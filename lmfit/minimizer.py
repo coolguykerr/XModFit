@@ -1298,7 +1298,7 @@ class Minimizer:
             # objective function returns a single value.
             # use float_behaviour to figure out if the value is posterior or chi2
             if float_behavior == 'posterior':
-                if funcname == 'XLayersPDB' or 'XLayersPDB_box' or 'XLayersPDB_G' or 'XLayersPDB_H':
+                if ((funcname == 'XLayersPDB') or (funcname == 'XLayersPDB_box')) or ((funcname == 'XLayersPDB_G') or (funcname == 'XLayersPDB_H')):
                     angleind = np.where(var_names == 'theta')[0]
                     lnprior = np.log(np.sin(theta(angleind) * np.pi / 180) / 2)
                     if np.isinf(lnprior):
@@ -1600,7 +1600,7 @@ class Minimizer:
                 raise ValueError("You cannot reuse the sampler if the number "
                                  "of varying parameters has changed")
 
-        elif funcname == 'XLayersPDB' and not reuse_sampler:
+        elif (((funcname == 'XLayersPDB') or (funcname == 'XLayersPDB_box')) or ((funcname == 'XLayersPDB_G') or (funcname == 'XLayersPDB_H'))) and not reuse_sampler:
             ind = 0
             angleindex = np.zeros(len(result.var_names))
             p0 = np.zeros((nwalkers, self.nvarys))
@@ -1770,7 +1770,7 @@ class Minimizer:
             with self.backend.open("a") as f:
                 f[self.backend.name].attrs.update(result.params)
         self.result.nfev = np.array([0])
-        if funcname == 'XLayersPDB':
+        if ((funcname == 'XLayersPDB') or (funcname == 'XLayersPDB_box')) or ((funcname == 'XLayersPDB_G') or (funcname == 'XLayersPDB_H')):
             self.sampler = lmfit.customsampler.CustomSampler(nwalkers, self.nvarys,
                                                              self._lnprob, **sampler_kwargs)
         else:
@@ -1800,7 +1800,7 @@ class Minimizer:
 
         # now do a production run, sampling all the time
         try:
-            if funcname == 'XLayersPDB':
+            if ((funcname == 'XLayersPDB') or (funcname == 'XLayersPDB_box')) or ((funcname == 'XLayersPDB_G') or (funcname == 'XLayersPDB_H')):
                 output = self.sampler.custom_run_mcmc(p0, steps, progress=progress, **run_mcmc_kwargs)
             else:
                 output = self.sampler.run_mcmc(p0, steps, progress=progress, **run_mcmc_kwargs)
