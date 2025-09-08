@@ -47,6 +47,7 @@ from ConsoleWidget import ConsoleWidget
 from collections import OrderedDict
 import datetime
 from emcee import backends
+from lmfit.customhdf import CustomHDFBackend
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
 
@@ -1599,9 +1600,27 @@ class XModFit(QWidget):
         if file != '':
             self.MCMCBackendFile=file
             self.emceeConfIntervalWidget.MCMCFileLineEdit.setText(self.MCMCBackendFile)
-            self.backend=backends.HDFBackend(self.MCMCBackendFile)
+            if self.funcListWidget.currentItem().text() == 'XLayersPDB':
+                self.backend = CustomHDFBackend(self.MCMCBackendFile)
+            else:
+                self.backend = backends.HDFBackend(self.MCMCBackendFile)
             self.fit.result.chain=self.backend.get_chain()[..., :, :]
-            self.autoCorrTime=np.array([[self.fit.result.chain.shape[0],np.mean(self.backend.get_autocorr_time(tol=0))]])
+            if self.funcListWidget.currentItem().text() == 'XLayersPDB':
+                angleindex = np.zeros(len(self.fit.result.var_names))
+                ind = 0
+                for var_name in self.fit.result.var_names:
+                    if var_name == 'theta':
+                        angleindex[ind] = 1
+                    elif var_name == 'phi':
+                        angleindex[ind] = 2
+                    else:
+                        angleindex[ind] = 0
+                    ind += 1
+                self.autoCorrTime = np.array([[self.fit.result.chain.shape[0], np.mean(
+                    self.backend.get_autocorr_time(angleindex=angleindex, tol=0))]])
+            else:
+                self.autoCorrTime=np.array([[self.fit.result.chain.shape[0],np.mean(self.backend.get_autocorr_time(tol=0))]])
+
             self.MCMC_starting_step=self.autoCorrTime[-1,0]
             self.emceeConfIntervalWidget.autoCorrTimeTextEdit.clear()
             self.emceeConfIntervalWidget.autoCorrTimeTextEdit.append('#MCMC_steps\tCorr_Time')
@@ -1642,7 +1661,10 @@ class XModFit(QWidget):
                 os.remove(file)
             self.MCMCBackendFile=file
             self.emceeConfIntervalWidget.MCMCFileLineEdit.setText(self.MCMCBackendFile)
-            self.backend = backends.HDFBackend(self.MCMCBackendFile)
+            if self.funcListWidget.currentItem().text() == 'XLayersPDB':
+                self.backend = CustomHDFBackend(self.MCMCBackendFile)
+            else:
+                self.backend = backends.HDFBackend(self.MCMCBackendFile)
             self.autoCorrTime=np.array([[0,1.0]])
             self.MCMC_starting_step = self.autoCorrTime[-1, 0]
             self.emceeConfIntervalWidget.autoCorrTimeMPLWidget.clear()
@@ -1871,8 +1893,26 @@ class XModFit(QWidget):
             # self.iterations = 0
             if os.path.exists(self.MCMCBackendFile):
                 self.fit.result.chain = self.backend.get_chain()[..., :, :]
-                data = np.array(
-                    [[self.fit.result.chain.shape[0], np.mean(self.backend.get_autocorr_time(tol=0))]])
+
+                if self.funcListWidget.currentItem().text() == 'XLayersPDB':
+                    angleindex = np.zeros(len(self.fit.result.var_names))
+                    ind = 0
+                    for var_name in self.fit.result.var_names:
+                        if var_name == 'theta':
+                            angleindex[ind] = 1
+                        elif var_name == 'phi':
+                            angleindex[ind] = 2
+                        else:
+                            angleindex[ind] = 0
+                        ind += 1
+
+                    data = np.array([[self.fit.result.chain.shape[0],
+                                      np.mean(self.backend.get_autocorr_time(angleindex=angleindex, tol=0))]])
+                else:
+                    data = np.array(
+                        [[self.fit.result.chain.shape[0], np.mean(self.backend.get_autocorr_time(tol=0))]])
+                """data = np.array(
+                    [[self.fit.result.chain.shape[0], np.mean(self.fit.fitter.sampler.get_autocorr_time(tol=0))]])"""
                 self.autoCorrTime = np.vstack([self.autoCorrTime, data])
                 # self.MCMC_starting_step = copy.copy(self.fit.fitter.sampler.iteration)
                 self.MCMC_starting_step=self.autoCorrTime[-1,0]
@@ -1950,41 +1990,79 @@ class XModFit(QWidget):
 
 
     def fitErrorCallback(self, params, iterations, residual, fit_scale):
-        if self.fit.fitter.sampler.iteration>self.MCMC_starting_step:
-            self.MCMC_starting_step=copy.copy(self.fit.fitter.sampler.iteration)
-            time_taken=time.time()-self.start_time
-        #frac=iterations/(self.emcee_walkers*self.emcee_steps+self.emcee_walkers)
-            #time_left=time_taken*(self.emcee_walkers*self.emcee_steps+self.emcee_walkers-iterations)/iterations
-            time_left=time_taken*(self.emcee_steps-self.MCMC_starting_step)
+        if hasattr(self.fit.fitter, 'sampler'):
 
-            self.emceeConfIntervalWidget.fitIterLabel.setText('MCMC Step=%d, Time left (hh:mm:ss): %s'
-                                                          %(self.MCMC_starting_step, time.strftime('%H:%M:%S',time.gmtime(time_left))))
-            self.emceeConfIntervalWidget.progressBar.setValue(self.MCMC_starting_step)
-            #print(iterations, self.fit.fitter.sampler.iteration)
-            # if (iterations-self.iterations)>self.emcee_walkers and (self.MCMC_starting_step+int(iterations/self.emcee_walkers))%100==0:
-            if self.MCMC_starting_step % 100 == 0:
-                data = np.array(
-                    [[self.MCMC_starting_step, np.mean(self.backend.get_autocorr_time(tol=0))]])
-                self.autoCorrTime=np.vstack([self.autoCorrTime, data])
-                self.emceeConfIntervalWidget.autoCorrTimeTextEdit.append(
-                    '%d\t%.3f' % (self.autoCorrTime[-1, 0], self.autoCorrTime[-1, 1]))
+            if self.funcListWidget.currentItem().text() == 'XLayersPDB':
+                angleindex = np.zeros(len(self.fit.result.var_names))
+                ind = 0
+                for var_name in self.fit.result.var_names:
+                    if var_name == 'theta':
+                        angleindex[ind] = 1
+                    elif var_name == 'phi':
+                        angleindex[ind] = 2
+                    else:
+                        angleindex[ind] = 0
+                    ind += 1
 
-                self.autoCorrPlot_sp.set_data(self.autoCorrTime[:,0],self.autoCorrTime[:,1])
-                self.autoCorrPlot_ax1.set_xlim(0.98 * min(self.autoCorrTime[:,0]), 1.02 * max(self.autoCorrTime[:,0]))
-                self.autoCorrPlot_ax1.set_ylim(0.98 * min(self.autoCorrTime[:, 1]), 1.02 * max(self.autoCorrTime[:, 1]))
-                self.emceeConfIntervalWidget.autoCorrTimeMPLWidget.fig.canvas.draw()
-                self.emceeConfIntervalWidget.autoCorrTimeMPLWidget.fig.canvas.flush_events()
-                self.emceeConfIntervalWidget.tabWidget.setCurrentIndex(3)
-                if self.autoCorrTime[-1,1]*50<(self.MCMC_starting_step+int(iterations/self.emcee_walkers)):
-                    self.stopFit()
-            self.start_time=time.time()
+            if self.fit.fitter.sampler.iteration>self.MCMC_starting_step:
+                self.MCMC_starting_step=copy.copy(self.fit.fitter.sampler.iteration)
+                time_taken=time.time()-self.start_time
+            #frac=iterations/(self.emcee_walkers*self.emcee_steps+self.emcee_walkers)
+                #time_left=time_taken*(self.emcee_walkers*self.emcee_steps+self.emcee_walkers-iterations)/iterations
+                time_left=time_taken*(self.emcee_steps-self.MCMC_starting_step)
+
+                self.emceeConfIntervalWidget.fitIterLabel.setText('MCMC Step=%d, Time left (hh:mm:ss): %s'
+                                                            %(self.MCMC_starting_step, time.strftime('%H:%M:%S',time.gmtime(time_left))))
+                self.emceeConfIntervalWidget.progressBar.setValue(self.MCMC_starting_step)
+                #print(iterations, self.fit.fitter.sampler.iteration)
+                # if (iterations-self.iterations)>self.emcee_walkers and (self.MCMC_starting_step+int(iterations/self.emcee_walkers))%100==0:
+                if self.MCMC_starting_step % 100 == 0:
+                    if self.funcListWidget.currentItem().text() == 'XLayersPDB':
+                        data = np.array(
+                            [[self.MCMC_starting_step, np.mean(self.backend.get_autocorr_time(angleindex=angleindex, tol=0))]])
+                    else:
+                        data = np.array(
+                            [[self.MCMC_starting_step, np.mean(self.backend.get_autocorr_time(tol=0))]])
+                    """data = np.array(
+                        [[self.MCMC_starting_step, np.mean(self.fit.fitter.sampler.get_autocorr_time(tol=0))]])"""
+                    self.autoCorrTime=np.vstack([self.autoCorrTime, data])
+                    self.emceeConfIntervalWidget.autoCorrTimeTextEdit.append(
+                        '%d\t%.3f' % (self.autoCorrTime[-1, 0], self.autoCorrTime[-1, 1]))
+
+                    self.autoCorrPlot_sp.set_data(self.autoCorrTime[:,0],self.autoCorrTime[:,1])
+                    self.autoCorrPlot_ax1.set_xlim(0.98 * min(self.autoCorrTime[:,0]), 1.02 * max(self.autoCorrTime[:,0]))
+                    self.autoCorrPlot_ax1.set_ylim(0.98 * min(self.autoCorrTime[:, 1]), 1.02 * max(self.autoCorrTime[:, 1]))
+                    self.emceeConfIntervalWidget.autoCorrTimeMPLWidget.fig.canvas.draw()
+                    self.emceeConfIntervalWidget.autoCorrTimeMPLWidget.fig.canvas.flush_events()
+                    self.emceeConfIntervalWidget.tabWidget.setCurrentIndex(3)
+                    print(iterations, self.MCMC_starting_step, self.autoCorrTime[-1,1])
+                    """if self.autoCorrTime[-1,1]*50<(self.MCMC_starting_step+int(iterations/self.emcee_walkers)):
+                        self.stopFit()"""
+                self.start_time=time.time()
         # self.iterations = copy.copy(iterations)
         QApplication.processEvents()
 
     def perform_post_sampling_tasks(self):
         #self.emceeConfIntervalWidget.progressBar.setValue(self.emcee_steps)
-        data = np.array(
-            [[self.MCMC_starting_step, np.mean(self.backend.get_autocorr_time(tol=0))]])
+        if self.funcListWidget.currentItem().text() == 'XLayersPDB':
+            angleindex = np.zeros(len(self.fit.result.var_names))
+            ind = 0
+            for var_name in self.fit.result.var_names:
+                if var_name == 'theta':
+                    angleindex[ind] = 1
+                elif var_name == 'phi':
+                    angleindex[ind] = 2
+                else:
+                    angleindex[ind] = 0
+                ind += 1
+            data = np.array(
+                [[self.MCMC_starting_step, np.mean(self.backend.get_autocorr_time(angleindex=angleindex, tol=0))]])
+        else:
+            data = np.array(
+                [[self.MCMC_starting_step, np.mean(self.backend.get_autocorr_time(tol=0))]])
+        """data = np.array(
+            [[self.MCMC_starting_step, np.mean(self.fit.fitter.sampler.get_autocorr_time(tol=0))]])"""
+
         self.autoCorrTime = np.vstack([self.autoCorrTime, data])
         self.emceeConfIntervalWidget.fitIterLabel.setText('MCMC Step=%d, Time left (hh:mm:ss): 00:00:00'%self.MCMC_starting_step)
         self.chain=self.fit.result.chain
@@ -2009,7 +2087,10 @@ class XModFit(QWidget):
         try:
             acor_mcmc=self.fit.fitter.sampler.get_autocorr_time(quiet=True) #Calculates from newly generated samples
         except:
-            acor_mcmc=self.backend.get_autocorr_time(quiet=True) #Calculates from the existing backend file
+            if self.funcListWidget.currentItem().text() == 'XLayersPDB':
+                acor_mcmc = self.backend.get_autocorr_time(angleindex=angleindex, quiet=True)  # Calculates from the existing backend file
+            else:
+                acor_mcmc = self.backend.get_autocorr_time(quiet=True) #Calculates from the existing backend file
         for i,key in enumerate(self.param_chain.keys()):
             tcor=[]
             for ikey in self.param_chain[key].keys():

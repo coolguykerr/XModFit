@@ -23,7 +23,7 @@ try:
     from mendeleev.fetch import fetch_table
 except:
     from mendeleev import get_table
-from numba import njit
+from numba import njit, prange
 
 
 @njit(parallel=False,cache=True)
@@ -33,8 +33,8 @@ def parratt_numba(q,lam,d,rho,beta):
     f1=16.0*np.pi*2.818e-5
     f2=-32.0*np.pi**2/lam**2
     Nl=len(d)
-    for j in range(len(q)):
-        r=complex(0.0,0.0)
+    for j in prange(len(q)):
+        refc[j]=complex(0.0,0.0)
         for it in range(1,Nl):
             i=Nl-it
             qc1=f1*(rho[i-1]-rho[0])
@@ -45,10 +45,9 @@ def parratt_numba(q,lam,d,rho,beta):
             fact1=complex(np.cos(k2.real*d[i]),np.sin(k2.real*d[i]))
             fact2=np.exp(-k2.imag*d[i])
             fact=fact1*fact2
-            r=(X+r*fact)/(1.0+X*r*fact)
-        ref[j]=np.abs(r)**2
-        refc[j]=r
-    return ref, r
+            refc[j]=(X+refc[j]*fact)/(1.0+X*refc[j]*fact)
+        ref[j]=np.abs(refc[j])**2
+    return ref, refc
 
 @njit(parallel=False, cache=True)
 def protmembcomb(protmembpos, membpos, d, rho, mu, sig, protpos, protrho, layarea, cov):
@@ -107,10 +106,16 @@ def SphereElecFrac(zrotcoord, radius, electrons, z_gridpos, zslice, ElecFracsum,
         d = np.maximum(botslice[inc], -radius[ind])
         h = np.minimum((topslice[inc] - d), (radius[ind] - botslice[inc]))
 
-        ElecFracsum[inc] += electrons[ind] * (
+        spheresegvol = np.pi * h * (np.square(radius[ind]) - np.square(d) - h * d - (1 / 3) * np.square(h))
+
+        ElecFracsum[inc] += electrons[ind] * spheresegvol / vol
+
+        Volfrac[inc] += spheresegvol
+
+        """ElecFracsum[inc] += electrons[ind] * (
                     np.pi * h * (np.square(radius[ind]) - np.square(d) - h * d - (1 / 3) * np.square(h))) / vol
 
-        Volfrac[inc] += (np.pi * h * (np.square(radius[ind]) - np.square(d) - h * d - (1 / 3) * np.square(h)))
+        Volfrac[inc] += (np.pi * h * (np.square(radius[ind]) - np.square(d) - h * d - (1 / 3) * np.square(h)))"""
 
     return ElecFracsum, Volfrac
 

@@ -20,6 +20,7 @@ import inspect
 import multiprocessing
 import numbers
 import warnings
+import copy
 
 import numpy as np
 from scipy.linalg import LinAlgError, inv
@@ -602,6 +603,60 @@ class Minimizer:
             return _nan_policy(np.asarray(out).ravel(),
                                nan_policy=self.nan_policy)
 
+    def __walkerresidual(self, fvars, result, apply_bounds_transformation=True):
+        """Residual function used for least-squares fit for emcee walkers.
+
+        With the new, candidate values of `fvars` (the fitting variables),
+        this evaluates all parameters, including setting bounds and
+        evaluating constraints, and then passes those to the user-supplied
+        function to calculate the residual.
+
+        Parameters
+        ----------
+        fvars : numpy.ndarray
+            Array of new parameter values suggested by the minimizer.
+        result : Minimizer object with fit information from best-fit.
+        apply_bounds_transformation : bool, optional
+            Whether to apply lmfits parameter transformation to constrain
+            parameters (default is True). This is needed for solvers
+            without built-in support for bounds.
+
+        Returns
+        -------
+        numpy.ndarray
+             The evaluated function values for given `fvars`.
+
+        """
+        params = result.params
+
+        if fvars.shape == ():
+            fvars = fvars.reshape((1,))
+
+        if apply_bounds_transformation:
+            for name, val in zip(result.var_names, fvars):
+                params[name].value = params[name].from_internal(val)
+        else:
+            for name, val in zip(result.var_names, fvars):
+                params[name].value = val
+        params.update_constraints()
+
+        if self.max_nfev is None:
+            max_nfev = 200000 * (len(fvars) + 1)
+
+        result.nfev += 1
+        result.last_internal_values = fvars
+        if result.nfev > max_nfev:
+            result.aborted = True
+            m = f"number of function evaluations > {max_nfev}"
+            result.message = f"Fit aborted: {m}"
+            result.success = False
+            raise AbortFitException(f"fit aborted: too many function evaluations {max_nfev}")
+
+        out = self.userfcn(params, *self.userargs, **self.userkws)
+
+        return _nan_policy(np.asarray(out).ravel(),
+                           nan_policy=self.nan_policy)
+
     def __jacobian(self, fvars):
         """Return analytical jacobian to be used with Levenberg-Marquardt.
 
@@ -748,6 +803,67 @@ class Minimizer:
                 self.reduce_fcn = reduce_chisquare
         return result
 
+    def prepare_walker_fit(self, params=None):
+        """Prepare parameters for fitting.
+
+        Prepares and initializes model and Parameters for subsequent
+        fitting. This routine prepares the conversion of
+        :class:`Parameters` into fit variables, organizes parameter bounds,
+        and parses, "compiles" and checks constrain expressions. The method
+        also creates and returns a new instance of a
+        :class:`MinimizerResult` object that contains the copy of the
+        Parameters that will actually be varied in the fit.
+
+        Parameters
+        ----------
+        params : Parameters, optional
+            Contains the Parameters for the model; if None, then the
+            Parameters used to initialize the Minimizer object are used.
+
+        Returns
+        -------
+        MinimizerResult
+
+        Notes
+        -----
+        This method is called directly by the fitting methods, and it is
+        generally not necessary to call this function explicitly.
+
+
+        .. versionchanged:: 0.9.0
+           Return value changed to :class:`MinimizerResult`.
+
+        """
+
+        result = MinimizerResult()
+        result.params = deepcopy(params)
+
+        # determine which parameters are actually variables
+        # and which are defined expressions.
+        result.var_names = []  # note that this *does* belong to self...
+        result.init_vals = []
+        result.params.update_constraints()
+        result.nfev = 0
+        result.call_kws = {}
+        result.errorbars = False
+        result.aborted = False
+        for name, par in result.params.items():
+            par.stderr = None
+            par.correl = None
+            if par.expr is not None:
+                par.vary = False
+            if par.vary:
+                result.var_names.append(name)
+                result.init_vals.append(par.setup_bounds())
+
+            par.init_value = par.value
+            if par.name is None:
+                par.name = name
+        result.nvarys = len(result.var_names)
+        result.init_values = {n: v for n, v in zip(result.var_names,
+                                                   result.init_vals)}
+        return result
+
     def unprepare_fit(self):
         """Clean fit state.
 
@@ -871,6 +987,50 @@ class Minimizer:
                 # restore nominal values
                 for v, nam in zip(uvars, self.result.var_names):
                     self.result.params[nam].value = v.nominal_value
+
+    def _calculate_walker_uncertainties_correlations(self, result):
+        """Calculate parameter uncertainties and correlations."""
+        result.errorbars = True
+
+        if self.scale_covar:
+            result.covar *= result.redchi
+
+        vbest = np.atleast_1d([result.params[name].value for name in
+                               result.var_names])
+
+        has_expr = False
+        for par in result.params.values():
+            par.stderr, par.correl = 0, None
+            has_expr = has_expr or par.expr is not None
+
+        for ivar, name in enumerate(result.var_names):
+            par = result.params[name]
+            par.stderr = np.sqrt(result.covar[ivar, ivar])
+            par.correl = {}
+            try:
+                result.errorbars = result.errorbars and (par.stderr > 0.0)
+                for jvar, varn2 in enumerate(result.var_names):
+                    if jvar != ivar:
+                        par.correl[varn2] = (result.covar[ivar, jvar] /
+                                             (par.stderr * np.sqrt(result.covar[jvar, jvar])))
+            except ZeroDivisionError:
+                result.errorbars = False
+
+        if has_expr:
+            try:
+                uvars = uncertainties.correlated_values(vbest, result.covar)
+            except (LinAlgError, ValueError):
+                uvars = None
+
+            # for uncertainties on constrained parameters, use the calculated
+            # "correlated_values", evaluate the uncertainties on the constrained
+            # parameters and reset the Parameters to best-fit value
+            if uvars is not None:
+                for par in result.params.values():
+                    eval_stderr(par, uvars, result.var_names, result.params)
+                # restore nominal values
+                for v, nam in zip(uvars, result.var_names):
+                    result.params[nam].value = v.nominal_value
 
     def scalar_minimize(self, method='Nelder-Mead', params=None, max_nfev=None,
                         **kws):
@@ -1138,9 +1298,11 @@ class Minimizer:
             # objective function returns a single value.
             # use float_behaviour to figure out if the value is posterior or chi2
             if float_behavior == 'posterior':
-                if funcname == 'XLayersPDB':
+                if funcname == 'XLayersPDB' or 'XLayersPDB_box' or 'XLayersPDB_G' or 'XLayersPDB_H':
                     angleind = np.where(var_names == 'theta')[0]
                     lnprior = np.log(np.sin(theta(angleind) * np.pi / 180) / 2)
+                    if np.isinf(lnprior):
+                        lnprior = np.array([-1.e100])
                     lnprob += lnprior
             elif float_behavior == 'chi2':
                 lnprob *= -0.5
@@ -1438,25 +1600,164 @@ class Minimizer:
                 raise ValueError("You cannot reuse the sampler if the number "
                                  "of varying parameters has changed")
 
-        elif funcname == 'XLayersPDB':
+        elif funcname == 'XLayersPDB' and not reuse_sampler:
             ind = 0
             angleindex = np.zeros(len(result.var_names))
             p0 = np.zeros((nwalkers, self.nvarys))
+            thetaflag = 0
+            phiflag = 0
             for var_name in result.var_names:
                 if var_name == 'theta':
-                    p0[:, ind] = np.arccos(2*rng.rand(nwalkers) - 1)*180/np.pi
                     angleindex[ind] = 1
+                    thetaind = ind
+                    thetaflag = 1
                 elif var_name == 'phi':
-                    p0[:, ind] = rng.rand(nwalkers) * 360
                     angleindex[ind] = 2
+                    phiind = ind
+                    phiflag = 1
                 else:
-                    p0[:, ind] = (1 + rng.randn(nwalkers)*fiterr[ind])*var_arr[ind]
                     angleindex[ind] = 0
                 ind += 1
 
+            if thetaflag == 1 and phiflag == 1:
+                start_vals = np.delete(var_arr, [thetaind, phiind])
+                mesh_params = copy.copy(result.params)
+                mesh_params['theta'].vary = 0
+                mesh_params['phi'].vary = 0
+                result_mesh = self.prepare_walker_fit(mesh_params)
+
+                thetares = 10
+                thetameshrange = np.arange(0, 180 + thetares, thetares)
+
+                phires = np.zeros(len(thetameshrange))
+                phimeshrange = [np.array([]) for _ in thetameshrange]
+
+                chiminarray = np.zeros(len(thetameshrange))
+                chi2mesh = [np.array([]) for _ in thetameshrange]
+
+                likelihood_profile = [np.array([]) for _ in thetameshrange]
+                likelihood_sumarray = np.zeros(len(thetameshrange))
+                likelihood_maxarray = np.zeros(len(thetameshrange))
+                """chi2mesh = np.zeros((len(thetameshrange), len(phimeshrange)), dtype=float)"""
+
+                uniform_inverse = 0
+
+                thetameshind = 0
+                for thetamesh in thetameshrange:
+                    if thetamesh == 0 or thetamesh == 180:
+                        phires[thetameshind] = 360
+                    else:
+                        phires[thetameshind] = int(360/np.round((np.cos((thetamesh - thetares/2)*np.pi/180) -
+                                                                 np.cos((thetamesh + thetares/2)*np.pi/180)) /
+                                                                (1 - np.cos((thetares/2)*np.pi/180))))
+                    phimeshrange[thetameshind] = np.arange(0, 360, phires[thetameshind])
+                    chi2mesh[thetameshind] = np.zeros(len(phimeshrange[thetameshind]), dtype=float)
+
+                    uniform_inverse += len(phimeshrange)
+
+                    phimeshind = 0
+                    for phimesh in phimeshrange[thetameshind]:
+                        result_mesh.params['theta'].value = thetamesh
+                        result_mesh.params['phi'].value = phimesh
+                        ret = least_squares(self.__walkerresidual, start_vals, args=[result_mesh],
+                                            kwargs=dict(apply_bounds_transformation=False))
+                        chi2mesh[thetameshind][phimeshind] = ret.cost
+                        phimeshind += 1
+                    chiminarray[thetameshind] = np.min(chi2mesh[thetameshind])
+                    thetameshind += 1
+
+                chimin = np.min(np.array(chiminarray))/(len(ret.fun) - len(result_mesh.var_names))
+
+                for thetameshind in np.arange(len(thetameshrange)):
+                    likelihood_profile[thetameshind] = np.exp(-0.5 * chi2mesh[thetameshind] / chimin)
+                    likelihood_sumarray[thetameshind] = np.sum(likelihood_profile[thetameshind])
+
+                likelihood_sum = np.sum(np.array(likelihood_sumarray))
+
+                for thetameshind in np.arange(len(thetameshrange)):
+                    likelihood_profile[thetameshind] = (0.5 * likelihood_profile[thetameshind] * (1 / likelihood_sum) +
+                                                        0.5 / uniform_inverse)
+                    likelihood_maxarray[thetameshind] = np.max(likelihood_profile[thetameshind])
+
+                """p0[:, thetaind] = np.arccos(2 * rng.rand(nwalkers) - 1) * 180 / np.pi
+                p0[:, phiind] = rng.rand(nwalkers) * 360"""
+
+                likelihood_max = np.max(np.array(likelihood_maxarray))
+
+                for walkind in range(nwalkers):
+                    while True:
+                        thetarand = np.arccos(2 * rng.rand(1) - 1) * 180 / np.pi
+                        phirand = rng.rand(1) * 360
+                        ylikelihood = rng.rand(1) * likelihood_max
+                        thetameshind = int(np.round(thetarand / thetares))
+                        phimeshind = int((np.round(phirand / phires[thetameshind]) % (360 / phires[thetameshind])))
+                        pdf = likelihood_profile[thetameshind][phimeshind]
+                        if ylikelihood < pdf:
+                            break
+                    p0[walkind, thetaind] = thetarand
+                    p0[walkind, phiind] = phirand
+
+                    """start_vals = np.delete(var_arr,[thetaind, phiind])"""
+                    walker_params = copy.copy(result.params)
+                    walker_params['theta'].value = p0[walkind, thetaind]
+                    walker_params['phi'].value = p0[walkind, phiind]
+                    walker_params['theta'].vary = 0
+                    walker_params['phi'].vary = 0
+
+                    result_walker = self.prepare_walker_fit(walker_params)
+
+                    ret = least_squares(self.__walkerresidual, start_vals, args=[result_walker], kwargs=dict(apply_bounds_transformation=False))
+                    result_walker.nfev -= 1
+                    result_walker.residual = self.__walkerresidual(ret.x, result_walker, False)
+                    result_walker._calculate_statistics()
+
+                    for attr in ret:
+                        setattr(result_walker, attr, ret[attr])
+
+                        result_walker.x = np.atleast_1d(result_walker.x)
+
+                        # calculate the cov_x and estimate uncertainties/correlations
+                    try:
+                        if issparse(ret.jac):
+                            hess = (ret.jac.T * ret.jac).toarray()
+                        elif isinstance(ret.jac, LinearOperator):
+                            identity = np.eye(ret.jac.shape[1], dtype=ret.jac.dtype)
+                            hess = (ret.jac.T * ret.jac) * identity
+                        else:
+                            hess = np.matmul(ret.jac.T, ret.jac)
+                        result_walker.covar = np.linalg.inv(hess)
+                        self._calculate_walker_uncertainties_correlations(result_walker)
+                    except LinAlgError:
+                        pass
+
+                    if any([result_walker.params[key].stderr is None for key in result_walker.params.keys() if
+                            result_walker.params[key].vary == 1]):
+                        walkererr = np.zeros(len([result_walker.params[key].value for key in result_walker.params.keys() if
+                                               result_walker.params[key].vary == 1]))
+                    else:
+                        walkererr = np.array(
+                            [result_walker.params[key].stderr / result_walker.params[key].value for key in
+                             result_walker.params.keys() if
+                             result_walker.params[key].vary == 1])
+
+                    varind = 0
+                    xind = 0
+                    for var_name in result.var_names:
+                        if var_name != 'theta' and var_name != 'phi':
+                            p0[walkind, varind] = (1 + rng.randn(1) * walkererr[xind]) * result_walker.x[xind]
+                            xind += 1
+                        varind += 1
+
+            else:
+                ind = 0
+                for var_name in result.var_names:
+                    if var_name != 'theta' and var_name != 'phi':
+                        p0[:, ind] = (1 + rng.randn(nwalkers) * fiterr[ind]) * var_arr[ind]
+                    ind += 1
 
             sampler_kwargs.setdefault('moves', [(emcee.moves.StretchMove(), 0.3), (emcee.moves.KDEMove(), 0.3), (emcee.moves.DEMove(), 0.25), (emcee.moves.DESnookerMove(), 0.15)])
             sampler_kwargs.setdefault('pool', auto_pool)
+            sampler_kwargs.setdefault('angleindex', angleindex)
             self.backend.reset(nwalkers, self.nvarys)
 
         else:
@@ -1468,6 +1769,7 @@ class Minimizer:
             #Adding data, fitting function and fitting parameters to the backend file
             with self.backend.open("a") as f:
                 f[self.backend.name].attrs.update(result.params)
+        self.result.nfev = np.array([0])
         if funcname == 'XLayersPDB':
             self.sampler = lmfit.customsampler.CustomSampler(nwalkers, self.nvarys,
                                                              self._lnprob, **sampler_kwargs)
@@ -1499,7 +1801,7 @@ class Minimizer:
         # now do a production run, sampling all the time
         try:
             if funcname == 'XLayersPDB':
-                output = self.sampler.custom_run_mcmc(p0, steps, angleindex, progress=progress, **run_mcmc_kwargs)
+                output = self.sampler.custom_run_mcmc(p0, steps, progress=progress, **run_mcmc_kwargs)
             else:
                 output = self.sampler.run_mcmc(p0, steps, progress=progress, **run_mcmc_kwargs)
             self._lastpos = output.coords

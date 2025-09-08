@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Union
 
 import numpy as np
 
-from emcee.backends import Backend
+from lmfit.custombackend import CustomBackend
 from emcee.model import Model
 from emcee.moves import StretchMove
 from emcee.pbar import get_progress_bar
@@ -19,6 +19,7 @@ class CustomSampler(EnsembleSampler):
         nwalkers,
         ndim,
         log_prob_fn,
+        angleindex=[],
         pool=None,
         moves=None,
         args=None,
@@ -30,6 +31,35 @@ class CustomSampler(EnsembleSampler):
         super().__init__(nwalkers, ndim, log_prob_fn, pool, moves, args, kwargs, backend, vectorize, blobs_dtype,
                          parameter_names)
 
+        self.angleindex = angleindex
+
+        self.backend = CustomBackend() if backend is None else backend
+
+        # Deal with re-used backends
+        if not self.backend.initialized:
+            self._previous_state = None
+            self.reset()
+            state = np.random.get_state()
+        else:
+            # Check the backend shape
+            if self.backend.shape != (self.nwalkers, self.ndim):
+                raise ValueError(
+                    (
+                        "the shape of the backend ({0}) is incompatible with the "
+                        "shape of the sampler ({1})"
+                    ).format(self.backend.shape, (self.nwalkers, self.ndim))
+                )
+
+            # Get the last random state
+            state = self.backend.random_state
+            if state is None:
+                state = np.random.get_state()
+
+            # Grab the last step so that we can restart
+            it = self.backend.iteration
+            if it > 0:
+                self._previous_state = self.get_last_sample()
+
     def custom_sample(
             self,
             initial_state,
@@ -37,7 +67,6 @@ class CustomSampler(EnsembleSampler):
             rstate0=None,  # Deprecated
             blobs0=None,  # Deprecated
             iterations=1,
-            angleindex=[],
             tune=False,
             skip_initial_state_check=False,
             thin_by=1,
@@ -173,8 +202,8 @@ class CustomSampler(EnsembleSampler):
             progress_kwargs = {}
 
         # Determine presence of angle variables
-        thetaind = np.where(angleindex == 1)[0]
-        phiind = np.where(angleindex == 2)[0]
+        thetaind = np.where(self.angleindex == 1)[0]
+        phiind = np.where(self.angleindex == 2)[0]
 
         # Inject the progress bar
         total = None if iterations is None else iterations * yield_step
@@ -227,7 +256,7 @@ class CustomSampler(EnsembleSampler):
                 yield state
 
 
-    def custom_run_mcmc(self, initial_state, nsteps, angleindex, **kwargs):
+    def custom_run_mcmc(self, initial_state, nsteps, **kwargs):
 
         """
                Iterate :func:`sample` for ``nsteps`` iterations and return the result
@@ -252,10 +281,13 @@ class CustomSampler(EnsembleSampler):
             initial_state = self._previous_state
 
         results = None
-        for results in self.custom_sample(initial_state, iterations=nsteps, angleindex=angleindex, **kwargs):
+        for results in self.custom_sample(initial_state, iterations=nsteps, **kwargs):
             pass
 
         # Store so that the ``initial_state=None`` case will work
         self._previous_state = results
 
         return results
+
+    def get_autocorr_time(self, **kwargs):
+        return self.backend.get_autocorr_time(angleindex=self.angleindex, **kwargs)

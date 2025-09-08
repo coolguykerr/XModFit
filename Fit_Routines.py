@@ -171,9 +171,15 @@ class Fit(QObject):
     def set_emcee_minimizer(self,fit_scale='Linear',emcee_walkers=100, emcee_steps=100, emcee_cores=1,
                             emcee_burn=0, reuse_sampler=False, emcee_thin=1,backend=None):
 
-        fiterr = np.array(
-            [self.result.params[key].stderr / self.result.params[key].value for key in self.result.params.keys() if
-             self.result.params[key].vary == 1])
+        if any([self.result.params[key].stderr is None for key in self.result.params.keys() if
+                self.result.params[key].vary == 1]):
+            fiterr = np.zeros(len([self.result.params[key].value for key in self.result.params.keys() if
+                                   self.result.params[key].vary == 1]))
+        else:
+            fiterr = np.array(
+                [self.result.params[key].stderr / self.result.params[key].value for key in self.result.params.keys() if
+                 self.result.params[key].vary == 1])
+
         funcname = type(self.func).__name__
         self.emcee_params = self.result.params.copy()
         if 'w/o' in fit_scale:
