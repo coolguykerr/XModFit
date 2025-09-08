@@ -290,4 +290,5 @@ class CustomSampler(EnsembleSampler):
         return results
 
     def get_autocorr_time(self, **kwargs):
+        super(CustomSampler, self).get_autocorr_time(**kwargs)
         return self.backend.get_autocorr_time(angleindex=self.angleindex, **kwargs)
