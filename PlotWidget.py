@@ -172,7 +172,13 @@ class PlotWidget(QWidget):
             #self.dataErr[dname].setCurves(self.dataErrPos[dname],self.dataErrNeg[dname])
             else:
                 if color is None:
-                    color=pg.intColor(np.random.choice(range(0,210),1)[0])
+                    # deterministic, well-separated palette (Tableau-10) instead of a
+                    # random color, so color-less curves are distinct and stable.
+                    _pal=['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd',
+                          '#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf']
+                    _ct=getattr(self,'_palette_ct',0)
+                    color=_pal[_ct % len(_pal)]
+                    self._palette_ct=_ct+1
                 #color=self.data[dname].opts['pen'].color()
                 pen=pg.mkPen(color=color,width=float(self.lineWidthLineEdit.text()))
                 symbol='o'

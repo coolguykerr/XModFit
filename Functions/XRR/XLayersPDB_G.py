@@ -34,6 +34,13 @@ except:
     from mendeleev import get_table
 from numba import njit, prange
 
+# Shared, input-keyed PDB read cached across ALL XLayersPDB* instances/variants
+# (keyed on fname, not self) -- see Functions/pdb_cache.py.
+try:
+    from Functions.pdb_cache import pdbread
+except Exception:
+    from pdb_cache import pdbread
+
 @njit(parallel=False, cache=True)
 def parratt_numba(q, lam, d, rho, beta):
     ref = np.ones_like(q)
@@ -457,7 +464,7 @@ class XLayersPDB_G:  # Please put the class name same as the function name
         self.__fix_sig_changed__ = 0
         self.init_params()
         self.output_params = {'scaler_parameters': {}}
-        xcoord, ycoord, zcoord, electrons, radius, mass = self.pdbread(self.fname)
+        xcoord, ycoord, zcoord, electrons, radius, mass = pdbread(self.fname)
 
     def init_params(self):
         """
@@ -482,44 +489,7 @@ class XLayersPDB_G:  # Please put the class name same as the function name
                         self.params.add('__%s_%s_%03d' % (mkey, key, i), value=self.__mpar__[mkey][key][i], vary=0,
                                         min=0, max=np.inf, expr=None, brute_step=0.05)
 
-    @lru_cache(maxsize=2)
-    def pdbread(self, fname):
-        try:
-            ptable = fetch_table('elements')[['symbol', 'atomic_number', 'vdw_radius', 'atomic_weight']]
-        except:
-            ptable = get_table('elements')[['symbol', 'atomic_number', 'vdw_radius', 'atomic_weight']]
-        atominfo = ptable.set_index('symbol').T.to_dict('list')
-        pdbcode = 'struct'
-
-        pdbparser = Bio.PDB.PDBParser(QUIET=True)
-        struct = pdbparser.get_structure(pdbcode, fname)
-
-        radius = np.zeros(len(list(struct.get_atoms())))
-        electrons = np.zeros(len(list(struct.get_atoms())))
-        mass = np.zeros(len(list(struct.get_atoms())))
-        coord = np.zeros((len(list(struct.get_atoms())), 3))
-
-        ind = 0
-
-        for atom in struct.get_atoms():
-            coord[ind, :] = atom.coord
-            if atom.name == 'CAL':
-                electrons[ind] = atominfo['Ca'][0]
-                radius[ind] = atominfo['Ca'][1] / 100
-                mass[ind] = atominfo['Ca'][2]
-            else:
-                electrons[ind] = atominfo[atom.element][0]
-                radius[ind] = atominfo[atom.element][1] / 100
-                mass[ind] = atominfo[atom.element][2]
-            ind += 1
-
-        xcoord = np.squeeze(coord[:, 0])
-        ycoord = np.squeeze(coord[:, 1])
-        zcoord = np.squeeze(coord[:, 2])
-
-        return xcoord, ycoord, zcoord, electrons, radius, mass
-
-    @lru_cache(maxsize=2)
+    @lru_cache(maxsize=16)
     def ED_profrot(self, xcoord, ycoord, zcoord, radius, electrons, theta, phi, protins, d, fslice):
         """Move protein to center of mass"""
 
@@ -563,7 +533,7 @@ class XLayersPDB_G:  # Please put the class name same as the function name
 
         return protpos, protrho, layarea
 
-    @lru_cache(maxsize=2)
+    @lru_cache(maxsize=16)
     def calcProfComb(self, d, rho, mu, sig, protins, cov, phase, dz, protpos, protrho, layarea):
         """
         Calculates the electron and absorption density superposition of user-provided
@@ -719,7 +689,7 @@ class XLayersPDB_G:  # Please put the class name same as the function name
 
         """Calculate protein electron density profile with updated parameters."""
 
-        xcoord, ycoord, zcoord, electrons, radius, mass = self.pdbread(self.fname)
+        xcoord, ycoord, zcoord, electrons, radius, mass = pdbread(self.fname)
         self.__protpos__, self.__protrho__, self.__layarea__ = self.ED_profrot(tuple(xcoord), tuple(ycoord),
                                                                                tuple(zcoord), tuple(radius),
                                                                                tuple(electrons), self.theta, self.phi,

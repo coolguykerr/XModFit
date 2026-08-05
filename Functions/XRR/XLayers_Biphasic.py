@@ -35,7 +35,7 @@ def parratt_numba(q,lam,d,rho,beta):
             r=(X+r*fact)/(1.0+X*r*fact)
         ref[j]=np.abs(r)**2
         refc[j]=r
-    return ref,r
+    return ref,refc
 
 
 class XLayers_Biphasic: #Please put the class name same as the function name
@@ -109,7 +109,7 @@ class XLayers_Biphasic: #Please put the class name same as the function name
                         self.params.add('__%s_%s_%03d' % (mkey,key, i), value=self.__mpar__[mkey][key][i], vary=0, min=0, max=np.inf, expr=None, brute_step=0.05)
 
     @lru_cache(maxsize=10)
-    def calcProfile(self,d,rho,mu,sig,phase,dz,zmin=None,zmax=None):
+    def calcProfile(self,d,rho,mu,sig,phase,dz,sumd=None, zmin=None,zmax=None):
         """
         Calculates the electron and absorption density profiles
         """

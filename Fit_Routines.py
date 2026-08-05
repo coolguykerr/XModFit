@@ -186,13 +186,13 @@ class Fit(QObject):
             self.emcee_params.add('__lnsigma', value=-1.0, vary=True, min=np.log(0.001), max=np.log(2.0))
             fitter = Minimizer(self.residual, self.emcee_params, fcn_args=(fit_scale,),
                            iter_cb=self.callback,
-                           nan_policy='raise', burn=emcee_burn, steps=emcee_steps, thin=emcee_thin,
+                           nan_policy='propagate', burn=emcee_burn, steps=emcee_steps, thin=emcee_thin,
                            is_weighted=False, backend=backend, fiterr=fiterr, funcname=funcname,
                            nwalkers=emcee_walkers, workers=emcee_cores, reuse_sampler=reuse_sampler,
                            run_mcmc_kwargs={'store':True})
         else:
             fitter = Minimizer(self.residual, self.emcee_params, fcn_args=(fit_scale,), iter_cb=self.callback,
-                           nan_policy='raise', burn=emcee_burn, steps=emcee_steps, thin=emcee_thin,
+                           nan_policy='propagate', burn=emcee_burn, steps=emcee_steps, thin=emcee_thin,
                            is_weighted=True, backend=backend, fiterr=fiterr, funcname=funcname,
                            nwalkers=emcee_walkers, workers=emcee_cores, reuse_sampler=reuse_sampler,
                            run_mcmc_kwargs={'store':True})

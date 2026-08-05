@@ -1294,9 +1294,14 @@ class Minimizer:
                 lnprob = -0.5 * np.sum((lnprob / np.exp(__lnsigma)) ** 2 + c)
             else:
                 lnprob = -0.5 * (lnprob * lnprob).sum()
+            if np.isinf(lnprob) or np.isnan(lnprob):
+                lnprob = np.array([-1.e100])
         else:
             # objective function returns a single value.
             # use float_behaviour to figure out if the value is posterior or chi2
+            if np.isinf(lnprob) or np.isnan(lnprob):
+                lnprob = np.array([-1.e100])
+
             if float_behavior == 'posterior':
                 if ((funcname == 'XLayersPDB') or (funcname == 'XLayersPDB_box')) or ((funcname == 'XLayersPDB_G') or (funcname == 'XLayersPDB_H')):
                     angleind = np.where(var_names == 'theta')[0]
@@ -1588,19 +1593,8 @@ class Minimizer:
         # set up the random number generator
         rng = _make_random_gen(seed)
 
-        # now initialise the samplers
-        if reuse_sampler:
-            if auto_pool is not None:
-                self.sampler.pool = auto_pool
-            if backend is not None:
-                p0 = self.backend.get_last_sample().coords
-            else:
-                p0 = self._lastpos
-            if p0.shape[-1] != self.nvarys:
-                raise ValueError("You cannot reuse the sampler if the number "
-                                 "of varying parameters has changed")
-
-        elif (((funcname == 'XLayersPDB') or (funcname == 'XLayersPDB_box')) or ((funcname == 'XLayersPDB_G') or (funcname == 'XLayersPDB_H'))) and not reuse_sampler:
+        if (((funcname == 'XLayersPDB') or (funcname == 'XLayersPDB_box')) or (
+                (funcname == 'XLayersPDB_G') or (funcname == 'XLayersPDB_H'))):
             ind = 0
             angleindex = np.zeros(len(result.var_names))
             p0 = np.zeros((nwalkers, self.nvarys))
@@ -1618,6 +1612,20 @@ class Minimizer:
                 else:
                     angleindex[ind] = 0
                 ind += 1
+
+        # now initialise the samplers
+        if reuse_sampler:
+            if auto_pool is not None:
+                self.sampler.pool = auto_pool
+            if backend is not None:
+                p0 = self.backend.get_last_sample().coords
+            else:
+                p0 = self._lastpos
+            if p0.shape[-1] != self.nvarys:
+                raise ValueError("You cannot reuse the sampler if the number "
+                                 "of varying parameters has changed")
+
+        elif (((funcname == 'XLayersPDB') or (funcname == 'XLayersPDB_box')) or ((funcname == 'XLayersPDB_G') or (funcname == 'XLayersPDB_H'))) and not reuse_sampler:
 
             if thetaflag == 1 and phiflag == 1:
                 start_vals = np.delete(var_arr, [thetaind, phiind])
@@ -1760,6 +1768,15 @@ class Minimizer:
             sampler_kwargs.setdefault('angleindex', angleindex)
             self.backend.reset(nwalkers, self.nvarys)
 
+        elif (((funcname == 'XLayersPDB') or (funcname == 'XLayersPDB_box')) or (
+                (funcname == 'XLayersPDB_G') or (funcname == 'XLayersPDB_H'))) and reuse_sampler:
+
+            sampler_kwargs.setdefault('moves', [(emcee.moves.StretchMove(), 0.3), (emcee.moves.KDEMove(), 0.3),
+                                                (emcee.moves.DEMove(), 0.25), (emcee.moves.DESnookerMove(), 0.15)])
+            sampler_kwargs.setdefault('pool', auto_pool)
+            sampler_kwargs.setdefault('angleindex', angleindex)
+            self.backend.reset(nwalkers, self.nvarys)
+
         else:
             p0 = 1 + rng.randn(nwalkers, self.nvarys) * 1.e-4
             p0 *= var_arr
@@ -1770,6 +1787,7 @@ class Minimizer:
             with self.backend.open("a") as f:
                 f[self.backend.name].attrs.update(result.params)
         self.result.nfev = np.array([0])
+
         if ((funcname == 'XLayersPDB') or (funcname == 'XLayersPDB_box')) or ((funcname == 'XLayersPDB_G') or (funcname == 'XLayersPDB_H')):
             self.sampler = lmfit.customsampler.CustomSampler(nwalkers, self.nvarys,
                                                              self._lnprob, **sampler_kwargs)

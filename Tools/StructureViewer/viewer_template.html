@@ -1,0 +1,216 @@
+<!--
+  viewer_template.html
+  ====================
+  The complete NGL viewer page (CSS + panel markup + wiring/geometry JS) for
+  XModFit's XLayersPDB fit. NGLViewerDialog.build_html() loads this file and
+  fills in two placeholders before serving it (both are visible below, in the
+  actual markup -- NOT reproduced in these comments, because build_html does a
+  plain global text replace):
+    * the lone <script>...</script> tag just above the final script holds a
+      placeholder that is swapped for the bundled ngl.js library (assets/ngl.js);
+    * the placeholder assigned to `const CFG =` at the top of the final script
+      is swapped for a JSON scene config: {pdb, fit:{theta, phi, protins,
+      fslice, names, d, rho, colors}}, read live from the fit.
+  Both the embedded Qt tool and scripts/make_browser_viewer.py render from THIS
+  one file, so they always match. After a build you can open the generated page
+  directly in a browser to test scene behaviour.
+
+  The file has two regions:
+    1. GUI PANEL  (the <div id="panel"> below) -- safe to edit: relabel
+       controls, reorder rows, add inputs. The id="..." attributes are wired to
+       the script at the bottom, so if you rename or remove an id, update the
+       matching document.getElementById(...) call there too.
+    2. VIEWER ENGINE  (the final <script>) -- orientation/slab/colour geometry
+       and event wiring. Edit with care; see references/geometry.md and
+       references/ngl_recipes.md, then verify with make_browser_viewer.py.
+-->
+<!doctype html><html><head><meta charset="utf-8"><title>Tim4 NGL (live)</title>
+<!-- ===== Panel + viewport appearance (CSS). Cosmetic; edit freely. ===== -->
+<style>
+ html,body{margin:0;height:100%;font-family:system-ui,Arial;background:#12141a;color:#e8e8ee}
+ #panel{position:absolute;top:0;left:0;width:300px;bottom:0;padding:12px;box-sizing:border-box;background:#191c24;overflow:auto;font-size:13px}
+ #vp{position:absolute;top:0;left:300px;right:0;bottom:0}
+ h3{margin:10px 0 4px;font-size:12px;letter-spacing:.03em;color:#9ab;text-transform:uppercase}
+ label{display:block;margin:4px 0} input[type=text]{width:66px} .btn{margin:3px 2px;padding:4px 8px;cursor:pointer}
+ input[type=range]{width:150px} .swatch{display:inline-block;width:11px;height:11px;vertical-align:middle;margin-right:5px}
+ small{color:#889;display:block;margin-top:3px}
+ .val{color:#bfe3ff;font-weight:600}
+ .lrow{display:flex;justify-content:space-between;gap:10px;margin:2px 0;padding:1px 0}
+ .lrow span:last-child{color:#cde;font-variant-numeric:tabular-nums}
+</style></head><body>
+
+<!-- ============================ GUI PANEL ============================ -->
+<!-- Left-hand controls. Relabel / reorder / add controls here. Each id="..." -->
+<!-- is referenced by the VIEWER ENGINE script at the bottom; keep them in    -->
+<!-- sync if you rename one. The orientation and per-layer values are         -->
+<!-- READ-ONLY <span> displays driven entirely by the fit.                     -->
+<div id="panel">
+ <h3>Orientation (live from fit)</h3>
+ &theta; <span id="theta" class="val"></span> &nbsp; &phi; <span id="phi" class="val"></span><br>
+ protins <span id="protins" class="val"></span> &#8491;
+ <h3>Layers (live from fit)</h3><div id="layerInputs"></div>
+ <h3>Representation</h3>
+ <label>main <select id="rep"><option>cartoon</option><option>tube</option><option>backbone</option><option>ball+stick</option><option>spacefill</option></select></label>
+ <label>Colour by <select id="cscheme"><option value="sstruc">Secondary structure</option><option value="chainid">Chain</option><option value="residueindex">Rainbow (N to C)</option><option value="resname">Residue type</option><option value="bfactor">B-factor</option><option value="hydrophobicity">Hydrophobicity</option><option value="element">Element (CPK)</option><option value="depth">Depth (vs interfaces)</option></select></label>
+ <label><input type="checkbox" id="allside"> All side chains</label>
+ <label><input type="checkbox" id="surface"> Surface</label>
+ <label>Surface opacity <input type="range" id="surfop" min="5" max="100" value="50"></label>
+ <label>Background <input type="color" id="bg" value="#ffffff"></label>
+ <h3>Hetero groups</h3>
+ <label><input type="checkbox" id="ions"> Ions (vdW spheres)</label>
+ <label><input type="checkbox" id="ligands"> Ligands / small molecules (licorice)</label>
+ <label>Slab opacity <input type="range" id="opacity" min="5" max="80" value="30"></label>
+ <h3>Side chains for selection (opt-in)</h3>
+ <input type="text" id="scSele" placeholder="e.g. 64-72 or :A" style="width:150px">
+ <button class="btn" id="scAdd">Show</button><button class="btn" id="scClear">Clear</button>
+ <h3>Highlight residues (whole residue)</h3>
+ <input type="text" id="sele" placeholder="e.g. resname HIS" style="width:150px">
+ <input type="color" id="color" value="#ff3355">
+ <button class="btn" id="hl">Highlight</button><button class="btn" id="hide">Hide</button><button class="btn" id="reset">Reset</button>
+ <small>Selection: 64-72 · :A · resname HIS · helix/sheet</small>
+ <h3>Layers legend</h3><div id="legend"></div>
+ <h3>Hover</h3>
+ <div id="hoverdbg" style="min-height:2.6em;color:#bfe3ff;font-variant-numeric:tabular-nums">Move the pointer over the protein…</div>
+ <small>Residue/atom under the cursor (a floating label also appears at the pointer).</small>
+</div>
+<!-- ============================ 3-D VIEWPORT ============================ -->
+<div id="vp"></div>
+<!-- The NGL library (assets/ngl.js) is injected into the next tag by       -->
+<!-- build_html. Leave the tag as-is.                                        -->
+<script>__NGLJS__</script>
+<!-- ============================ VIEWER ENGINE ============================ -->
+<!-- Scene config + geometry + event wiring. Edit with care; see            -->
+<!-- references/geometry.md and references/ngl_recipes.md.                   -->
+<script>
+const CFG=__CFG__, F=CFG.fit, VDW={H:1.10,C:1.70,N:1.55,O:1.52,S:1.80,P:1.80,CA:2.31,MG:1.73,NA:2.27,K:2.75,ZN:2.01,CL:1.75,FE:2.04,MN:2.05,CU:1.96,NI:1.97,CO:2.00,CD:2.18,HG:2.23,BR:1.85,I:1.98,SR:2.49,BA:2.68,LI:1.82,SE:1.90,MO:2.17};
+const BOT_MARGIN=5;
+let cur={theta:F.theta,phi:F.phi,protins:F.protins,d:F.d.slice()};
+let comp=null,shapeComp=null,orig=[],sideRep=null,surfRep=null,surfaceOn=false,hlReps=[],scReps=[],hidden="";
+let fixedHalf=40, slabOpacity=0.30, surfaceOpacity=0.50, colorScheme="sstruc", lastTip=-60, ionRep=null, ligRep=null;
+const stage=new NGL.Stage("vp",{backgroundColor:"#ffffff"});  // built-in hover tooltip stays ON -- it shows the hovered atom's label ("atom: [RESNAME]resno:chain.atomname"). It only ever showed the slab MESH because the slab intercepted the pick; that is fixed by disablePicking on the slab buffer (see buildSlabs), so the tooltip now labels the protein atom behind the see-through slab.
+let depthRef={top:0,deep:-20};
+const DEPTHID=NGL.ColormakerRegistry.addScheme(function(){this.atomColor=function(a){let t=(depthRef.top-a.z)/((depthRef.top-depthRef.deep)||1);t=Math.max(0,Math.min(1,t));const r=Math.round(255*(1.0+t*(0.10-1.0))),g=Math.round(255*(0.85+t*(0.20-0.85))),b=Math.round(255*(0.30+t*(0.60-0.30)));return (r<<16)+(g<<8)+b;};});
+window.addEventListener("resize",()=>stage.handleResize());
+// Camera get/set so the Python side can preserve the view across dataset (PDB) reloads.
+window.getOrientation=function(){try{return Array.prototype.slice.call(stage.viewerControls.getOrientation().elements);}catch(e){return null;}};
+window.applyOrientation=function(a){try{var m=new NGL.Matrix4();m.fromArray(a);stage.viewerControls.orient(m);}catch(e){}};
+function renderOri(){theta.textContent=(+cur.theta).toFixed(4);phi.textContent=(+cur.phi).toFixed(4);protins.textContent=(+cur.protins).toFixed(4);}
+function rebuildLayerDisplay(){const li=document.getElementById("layerInputs");li.innerHTML="";
+  F.names.forEach((nm,i)=>li.insertAdjacentHTML("beforeend",`<div class="lrow"><span>${nm}</span><span>${(+F.d[i]).toFixed(2)} &#8491;</span></div>`));}
+function rebuildLegend(){const leg=document.getElementById("legend");leg.innerHTML="";
+  for(let i=1;i<F.names.length;i++){const c=F.colors[i].map(v=>Math.round(v*255));
+    leg.innerHTML+=`<div><span class="swatch" style="background:rgb(${c[0]},${c[1]},${c[2]})"></span>${F.names[i]}: &rho;=${(+F.rho[i]).toFixed(3)}</div>`;}}
+renderOri();rebuildLayerDisplay();rebuildLegend();
+function rotRows(th,ph){const t=th*Math.PI/180,p=ph*Math.PI/180,ct=Math.cos(t),st=Math.sin(t),cp=Math.cos(p),sp=Math.sin(p);
+  return [[cp,-sp,0],[ct*sp,ct*cp,-st],[st*sp,st*cp,ct]];}
+function addBox(shape,cx,cy,cz,wx,wy,wz,color){
+ const x0=cx-wx/2,x1=cx+wx/2,y0=cy-wy/2,y1=cy+wy/2,z0=cz-wz/2,z1=cz+wz/2;
+ const V=[[x0,y0,z0],[x1,y0,z0],[x1,y1,z0],[x0,y1,z0],[x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1]];
+ const Fa=[[0,1,2],[0,2,3],[4,5,6],[4,6,7],[0,1,5],[0,5,4],[2,3,7],[2,7,6],[1,2,6],[1,6,5],[3,0,4],[3,4,7]];
+ const P=[],C=[],N=[];
+ for(const f of Fa){const a=V[f[0]],b=V[f[1]],c=V[f[2]];
+   const ux=b[0]-a[0],uy=b[1]-a[1],uz=b[2]-a[2],vx=c[0]-a[0],vy=c[1]-a[1],vz=c[2]-a[2];
+   let nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx; const L=Math.hypot(nx,ny,nz)||1; nx/=L;ny/=L;nz/=L;
+   for(const vi of f){P.push(...V[vi]);C.push(...color);N.push(nx,ny,nz);}}
+ shape.addMesh(new Float32Array(P),new Float32Array(C),undefined,new Float32Array(N));
+}
+function buildSlabs(tip){
+ if(shapeComp){stage.removeComponent(shapeComp);shapeComp=null;}
+ let cs=0; const mp=[]; for(let i=0;i<cur.d.length;i++){cs+=cur.d[i];mp.push(-cs);}
+ const n=cur.d.length, z_deep=mp[n-2], floor=Math.min(z_deep-BOT_MARGIN, tip-BOT_MARGIN), H=fixedHalf;
+ const shape=new NGL.Shape("layers");
+ for(let i=1;i<=n-2;i++){ if(cur.d[i]<=0) continue;
+   addBox(shape,0,0,(mp[i]+mp[i-1])/2,H*2,H*2,mp[i-1]-mp[i],F.colors[i]); }   // finite layers
+ addBox(shape,0,0,(floor+z_deep)/2,H*2,H*2,z_deep-floor,F.colors[n-1]);        // bottom medium (water)
+ shapeComp=stage.addComponentFromObject(shape);
+ const slabRep=shapeComp.addRepresentation("buffer",{opacity:slabOpacity,side:"double",depthWrite:false,opaqueBack:false,disablePicking:true});
+ // NGL applies a representation's disablePicking flag to the buffer only AFTER it
+ // has already added that buffer to the picking scene: attach() runs
+ // viewer.add(buffer) (which enrolls the buffer's pickingGroup) BEFORE
+ // setParameters({disablePicking:true}), and setVisibility() only toggles the
+ // pickingGroup while the buffer is still pickable. So disablePicking alone does
+ // NOT take the slab out of picking -- the see-through slab keeps intercepting
+ // every hover and the tooltip labels the slab MESH instead of the protein atom
+ // behind it. Force it out directly by hiding each buffer's pickingGroup (kept
+ // false because disablePicking makes the buffer non-pickable, so setVisibility
+ // won't re-show it). Buffer reps build synchronously, so bufferList is ready here.
+ try{const _r=slabRep&&(slabRep.repr||slabRep),_bl=_r&&_r.bufferList;if(_bl)_bl.forEach(function(b){if(b&&b.pickingGroup)b.pickingGroup.visible=false;});}catch(_e){}
+}
+function addSurface(){surfRep=comp.addRepresentation("surface",{opacity:surfaceOpacity,colorScheme:colorScheme,side:"front",depthWrite:true});}
+function recompute(){
+ const Rm=rotRows(cur.theta,cur.phi);
+ let maxr=-1e30,minb=1e30,minz=1e30;
+ for(const a of orig){const z=Rm[2][0]*a[0]+Rm[2][1]*a[1]+Rm[2][2]*a[2];
+   maxr=Math.max(maxr,z+a[3]); minb=Math.min(minb,z-a[3]); minz=Math.min(minz,z);}
+ const ztop=maxr+F.fslice,zbot=minb-F.fslice,zslice=(ztop-zbot)/Math.round((ztop-zbot)/F.fslice),zref=ztop-zslice/2;
+ let sumExcl=0; for(let i=0;i<cur.d.length-1;i++) sumExcl+=cur.d[i];
+ const zshift=(-sumExcl+cur.protins)-zref;
+ // BAKE transform into the atom coordinates so ALL reps (incl. surface) stay consistent
+ let i=0; comp.structure.eachAtom(ap=>{const a=orig[i++];
+   ap.x=Rm[0][0]*a[0]+Rm[0][1]*a[1]+Rm[0][2]*a[2];
+   ap.y=Rm[1][0]*a[0]+Rm[1][1]*a[1]+Rm[1][2]*a[2];
+   ap.z=Rm[2][0]*a[0]+Rm[2][1]*a[1]+Rm[2][2]*a[2]+zshift;});
+ comp.structure.refreshPosition();
+ lastTip=minz+zshift; {let _cs=0;const _mp=[];for(let k=0;k<cur.d.length;k++){_cs+=cur.d[k];_mp.push(-_cs);} depthRef.top=_mp[0]; depthRef.deep=_mp[cur.d.length-2];} comp.updateRepresentations({position:true,color:(colorScheme===DEPTHID)});
+ // depthRef.deep = deepest MEMBRANE interface (fixed by the layer stack), NOT lastTip (the protein tip). Anchoring to the membrane keeps the depth palette stable as the protein inserts: a given z always maps to the same colour, and inserting deeper shows as a real colour shift instead of the scale re-normalising to the tip each frame.
+ if(surfaceOn){ if(surfRep)comp.removeRepresentation(surfRep); addSurface(); }  // rebuild surface at new coords
+ buildSlabs(lastTip); stage.viewer.requestRender();
+}
+function applyHidden(){const s=hidden?("not ("+hidden+")"):"*"; comp.eachRepresentation(r=>{if(r._main)r.setSelection(s);});}
+const blob=new Blob([CFG.pdb],{type:"text/plain"});
+stage.loadFile(blob,{ext:"pdb",name:"prot"}).then(o=>{comp=o;
+ let R=0; o.structure.eachAtom(ap=>{orig.push([ap.x,ap.y,ap.z,(VDW[(ap.element||'').toUpperCase()]||1.7)]);
+   const dd=Math.hypot(ap.x,ap.y,ap.z); if(dd>R)R=dd;});
+ fixedHalf=R+2;
+ const r=comp.addRepresentation("cartoon",{colorScheme:colorScheme}); r._main=true; r._primary=true;
+ recompute();
+ // Restore the prior camera (set by the Python side across a dataset/PDB reload) so
+ // switching datasets doesn't reorient the view; otherwise frame the new structure.
+ if(CFG.orientation){window.applyOrientation(CFG.orientation);}else{stage.autoView();}
+});
+// Hover labels: NGL's built-in tooltip (enabled on the Stage above) provides the
+// floating label at the pointer, showing the hovered atom's residue/atom name.
+// With the slab buffer non-pickable (disablePicking, see buildSlabs) the pick
+// falls through the see-through slab to the protein atom, so the tooltip labels
+// the residue/atom under the cursor instead of the slab mesh.
+//
+// In addition, the "Hover" panel readout (#hoverdbg) is driven off the hovered
+// signal below. It is a static panel element (always rendered), so it reliably
+// shows the residue/atom under the cursor even if the floating tooltip is
+// suppressed by the host, and it reports WHAT was picked (atom / non-atom /
+// nothing) so hover behaviour can be diagnosed without a debugger.
+const hoverdbg=document.getElementById("hoverdbg");
+stage.signals.hovered.add(function(pp){
+ if(!pp){ hoverdbg.textContent="(nothing under cursor)"; return; }
+ var a=pp.atom||pp.closestBondAtom||(pp.bond&&pp.bond.atom1);
+ if(a){
+   hoverdbg.textContent=a.resname+" "+a.resno+(a.chainname?(":"+a.chainname):"")+" \u00b7 "+a.atomname+" ("+a.element+")";
+ } else {
+   var what=(pp.picker&&pp.picker.type)||pp.type||"?";
+   var cn=(pp.component&&pp.component.name)||"?";
+   hoverdbg.textContent="picked non-atom: "+what+" [component: "+cn+"]";
+ }
+});
+document.getElementById("rep").onchange=()=>{comp.eachRepresentation(r=>{if(r._primary)comp.removeRepresentation(r);});
+ const r=comp.addRepresentation(document.getElementById("rep").value,{colorScheme:colorScheme});r._main=true;r._primary=true;applyHidden();};
+document.getElementById("cscheme").onchange=e=>{const v=e.target.value; colorScheme=(v==="depth")?DEPTHID:v; if(colorScheme===DEPTHID){let cs=0;const mp=[];for(let i=0;i<cur.d.length;i++){cs+=cur.d[i];mp.push(-cs);}depthRef.top=mp[0];depthRef.deep=mp[cur.d.length-2];} comp.eachRepresentation(r=>{if(r._primary)r.setParameters({colorScheme});}); if(surfRep)surfRep.setParameters({colorScheme});};
+document.getElementById("allside").onchange=e=>{if(e.target.checked){sideRep=comp.addRepresentation("licorice",{sele:"sidechain or .CA",colorScheme:"element"});sideRep._main=true;applyHidden();}else if(sideRep){comp.removeRepresentation(sideRep);sideRep=null;}};
+document.getElementById("surface").onchange=e=>{surfaceOn=e.target.checked; if(surfaceOn){addSurface();}else if(surfRep){comp.removeRepresentation(surfRep);surfRep=null;}};
+document.getElementById("surfop").oninput=e=>{surfaceOpacity=e.target.value/100; if(surfRep)surfRep.setParameters({opacity:surfaceOpacity});};
+document.getElementById("bg").oninput=e=>{stage.setParameters({backgroundColor:e.target.value});};
+document.getElementById("ions").onchange=e=>{if(e.target.checked){ionRep=comp.addRepresentation("spacefill",{sele:"ion or .CAL",colorScheme:"element"});}else if(ionRep){comp.removeRepresentation(ionRep);ionRep=null;}};
+document.getElementById("ligands").onchange=e=>{if(e.target.checked){ligRep=comp.addRepresentation("licorice",{sele:"ligand",colorScheme:"element"});}else if(ligRep){comp.removeRepresentation(ligRep);ligRep=null;}};
+window.setFit=function(th,ph,pi,layers){cur.theta=+th;cur.phi=+ph;cur.protins=+pi;
+ if(layers){F.names=layers.names;F.d=layers.d.slice();F.rho=layers.rho;F.colors=layers.colors;
+  if(layers.fslice!=null)F.fslice=+layers.fslice; cur.d=layers.d.slice();
+  rebuildLayerDisplay();rebuildLegend();}
+ renderOri(); if(comp)recompute();};
+document.getElementById("opacity").oninput=e=>{slabOpacity=e.target.value/100; buildSlabs(lastTip);};
+document.getElementById("scAdd").onclick=()=>{const s=document.getElementById("scSele").value.trim(); if(!s)return;
+ scReps.push(comp.addRepresentation("licorice",{sele:"("+s+") and (sidechain or .CA)",colorScheme:"element"}));};
+document.getElementById("scClear").onclick=()=>{scReps.forEach(r=>comp.removeRepresentation(r));scReps=[];};
+document.getElementById("hl").onclick=()=>{const s=document.getElementById("sele").value.trim(); if(!s)return;
+ const c=document.getElementById("color").value; hlReps.push(comp.addRepresentation("ball+stick",{sele:s,color:c}));};
+document.getElementById("hide").onclick=()=>{const s=document.getElementById("sele").value.trim(); if(!s)return; hidden=hidden?(hidden+" or "+s):s; applyHidden();};
+document.getElementById("reset").onclick=()=>{hidden="";hlReps.forEach(r=>comp.removeRepresentation(r));hlReps=[];applyHidden();};
+</script></body></html>

@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import QWidget, QApplication, QPushButton, QLabel, QLineEdi
     QComboBox, QListWidget, QDialog, QFileDialog, QAbstractItemView, QSplitter, QSizePolicy, QAbstractScrollArea, QHBoxLayout, QTextEdit, QShortcut,\
     QProgressDialog, QDesktopWidget, QSlider, QTabWidget, QMenuBar, QAction, QTableWidgetSelectionRange, QProgressBar, QMenu, QTableWidgetItem, QTreeWidgetItem
 from PyQt5.QtGui import QKeySequence, QFont, QDoubleValidator, QIntValidator, QTextCursor
-from PyQt5.QtCore import Qt, QProcess
+from PyQt5.QtCore import Qt, QProcess, QObject
 from PyQt5 import uic
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
@@ -48,6 +48,7 @@ from collections import OrderedDict
 import datetime
 from emcee import backends
 from lmfit.customhdf import CustomHDFBackend
+from joint_fit_panel import JointFitPanel, NameDelegate
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
 
@@ -289,9 +290,13 @@ class XModFit(QWidget):
         self.mainDock.addDock(self.consoleDock, 'right')
         self.mainDock.addDock(self.metaDataDock,'above',self.consoleDock)
         self.mainDock.addDock(self.fitResultDock, 'above',self.metaDataDock)
-        self.mainDock.addDock(self.plotDock,'above',self.fitResultDock)
+        self.compareDock=Dock('Model Comparison',size=(5,8),closable=False,hideTitle=False)
+        self.mainDock.addDock(self.compareDock,'above',self.fitResultDock)
+        self.mainDock.addDock(self.plotDock,'above',self.compareDock)
 
         self.mainDock.addDock(self.funcDock,'above',self.dataDock)
+        # The joint-fit controls are no longer a separate tab; they live under the Data
+        # list (overlay), collapsed until 'Enable joint fit' -- see create_jointFitDock.
         self.special_keys=['x','params','choices','output_params','__mpar__','filepaths']
         self.curr_funcClass={}
         
@@ -303,6 +308,21 @@ class XModFit(QWidget):
         self.dlg_data={}
         self.plotColIndex={}
         self.plotColors={}
+        # Per-dataset fit memory: composite dataset name "<num><>filepath" -> Fit.
+        # Each dataset owns its own model instance + params + result, so switching
+        # datasets restores that dataset's model/params/curve (see _fit_for_dataset).
+        self.dataset_fits={}
+        self._template_fit=None        # model shown with no dataset selected; seeds new datasets
+        self._switching_dataset=False  # re-entrancy guard for the select->tables->plot path
+        self.jointFit=None             # persistent compiled JointFit (retains joint results
+                                       # across individual-dataset views); see run_joint_fit
+        # Deterministic, well-separated plot palette: a dataset's data (markers) and its
+        # fit (line) share one color; distinct curves get distinct colors (see
+        # _curve_color_for). Tableau-10.
+        self._curve_palette=['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd',
+                             '#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf']
+        self._curve_color={}
+        self._curve_color_ct=0
         self.curDir=os.getcwd()
         self.fileNumber=0
         self.fileNames={}
@@ -336,8 +356,10 @@ class XModFit(QWidget):
         self.create_funcDock()
         self.create_fitDock()
         self.create_dataDock()
+        self.create_jointFitDock()
         self.create_plotDock()
         self.create_fitResultDock()
+        self.create_compareDock()
         self.create_metaDataDock()
         self.create_consoleDock()
         self.update_catagories()
@@ -352,6 +374,17 @@ class XModFit(QWidget):
         self.consoleMenu = self.menuBar.addMenu('&Console')
         self.toolMenu = self.menuBar.addMenu('&Tools')
         self.helpMenu = self.menuBar.addMenu('&Help')
+
+        saveJoint=QAction('Save &Joint Fit (.jpar)',self)
+        saveJoint.triggered.connect(lambda x: self.saveJointFit(fname=None))
+        self.fileMenu.addAction(saveJoint)
+        loadJoint=QAction('Load Join&t Fit (.jpar)',self)
+        loadJoint.triggered.connect(lambda x: self.loadJointFit(fname=None))
+        self.fileMenu.addAction(loadJoint)
+        parIntoJoint=QAction('Load .par &into Joint Fit',self)
+        parIntoJoint.triggered.connect(lambda x: self.loadParIntoJoint(fname=None))
+        self.fileMenu.addAction(parIntoJoint)
+        self.fileMenu.addSeparator()
 
         quit=QAction('Quit',self)
         quit.triggered.connect(self.close)
@@ -674,6 +707,7 @@ class XModFit(QWidget):
         self.dataLayoutWidget.nextRow()
         self.dataListWidget=QListWidget()
         self.dataListWidget.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.dataListWidget.setItemDelegate(NameDelegate(self.dataListWidget))  # show basenames
         self.dataListWidget.itemSelectionChanged.connect(self.dataFileSelectionChanged)
         self.dataListWidget.itemDoubleClicked.connect(self.openDataDialog)
         self.dataLayoutWidget.addWidget(self.dataListWidget,colspan=2)
@@ -765,6 +799,32 @@ class XModFit(QWidget):
             self.fitButton.setEnabled(True)
         else:
             self.fitButton.setDisabled(True)
+        # Per-dataset fit memory: restore the last-selected dataset's own model,
+        # parameters and (via re-evaluation) curve. Order is load-bearing:
+        #   (a) point self.fit at the stored Fit  ->  (b) repopulate the param tables
+        #   from it  ->  (c) update_plot (tables -> fit -> curve).
+        if len(self.sfnames)>0:
+            detail=self.sfnames[-1]
+            fit=self._fit_for_dataset(detail)
+            if fit is not None:
+                self._switching_dataset=True
+                try:
+                    # restore this dataset's Xrange expression + re-eval the model grid
+                    xexpr=getattr(fit,'_xmod_xexpr',None)
+                    if xexpr:
+                        self.xLineEdit.setText(xexpr)
+                        try:
+                            self.x=eval(self.xLineEdit.text())
+                            fit.func.x=self.x
+                        except Exception:
+                            pass
+                    # auto-follow: highlight this dataset's function (guarded, best-effort)
+                    self._sync_funclist_to_fit(fit)
+                    # point self.fit at the stored fit + repopulate the tables from it
+                    # BEFORE plotting (update_plot reads tables -> fit -> curve).
+                    self._activate_dataset_fit(fit)
+                finally:
+                    self._switching_dataset=False
         # try:
         self.update_plot()
         # except:
@@ -773,8 +833,86 @@ class XModFit(QWidget):
         # self.xChanged()
         self.errorAvailable = False
         self.reuse_sampler = False
-        self.calcConfInterButton.setDisabled(True)
-            
+        # CI ("Calculate Param Error") reflects THIS dataset's fit status and persists
+        # across switches (the dataset's Fit keeps its result/_is_fitted).
+        self._update_ci_button_state()
+        # mutual exclusion: an active individual (Data-list) selection releases any
+        # joint-fit selection, so alternating between the two views always re-triggers.
+        if len(self.sfnames) > 0 and not getattr(self, '_syncing_selection', False):
+            jp = getattr(self, 'jointFitPanel', None)
+            if jp is not None and jp.datasetList.selectedItems():
+                self._syncing_selection = True
+                jp.datasetList.blockSignals(True)
+                jp.datasetList.clearSelection()
+                jp.datasetList.blockSignals(False)
+                self._syncing_selection = False
+        self._refresh_data_labels()
+
+    def clear_individual_selection(self):
+        """Clear the Data-list selection without firing dataFileSelectionChanged.
+        Called by the joint panel when a joint dataset is selected (mutual exclusion)."""
+        if getattr(self, '_syncing_selection', False):
+            return
+        self._syncing_selection = True
+        try:
+            self.dataListWidget.blockSignals(True)
+            self.dataListWidget.clearSelection()
+            self.dataListWidget.blockSignals(False)
+        finally:
+            self._syncing_selection = False
+
+    def _curve_color_for(self, data_key, curve_key):
+        """Deterministic, well-separated color for a (dataset, curve). A dataset's data
+        and its fit share this color; distinct curves get distinct palette colors,
+        assigned in first-seen order."""
+        k = (data_key, curve_key)
+        if k not in self._curve_color:
+            self._curve_color[k] = self._curve_palette[self._curve_color_ct % len(self._curve_palette)]
+            self._curve_color_ct += 1
+        return self._curve_color[k]
+
+    def _single_fit_color(self, key=None):
+        """Color for the single-fit fit curve = the color of its data curve (so fit
+        matches data). Returns None when no dataset is selected (palette fallback)."""
+        sf = getattr(self, 'sfnames', None)
+        if not sf:
+            return None
+        if key is None:
+            try:
+                key = list(self.data[sf[-1]].keys())[0]
+            except Exception:
+                return None
+        return self._curve_color_for(sf[-1], key)
+
+    def _refresh_data_labels(self):
+        """Mark Data-list items that carry a fitted individual result (bold + green +
+        tooltip) and, in the tooltip, note joint-fit membership. Never changes
+        item.text() -- that string is the dataset key parsed throughout the app."""
+        try:
+            from PyQt5.QtGui import QColor, QBrush
+        except Exception:
+            return
+        try:
+            joint_names = set(self.jointFitPanel.spec.dataset_names)
+        except Exception:
+            joint_names = set()
+        for i in range(self.dataListWidget.count()):
+            it = self.dataListWidget.item(i)
+            txt = it.text()
+            stored = self.dataset_fits.get(txt)
+            has_fit = stored is not None and (getattr(stored, '_is_fitted', False)
+                                              or getattr(stored, 'result', None) is not None)
+            f = it.font()
+            f.setBold(bool(has_fit))
+            it.setFont(f)
+            it.setForeground(QBrush(QColor('#1a7f37')) if has_fit else QBrush())
+            tips = []
+            if has_fit:
+                tips.append('has individual fit')
+            if txt in joint_names:
+                tips.append('in joint fit')
+            it.setToolTip('; '.join(tips))
+
     def openDataDialog(self,item):
         try:
             self.dataListWidget.itemSelectionChanged.disconnect()
@@ -876,6 +1014,7 @@ class XModFit(QWidget):
 
     def doFit(self, fit_method=None, emcee_walkers=100, emcee_steps=100,
                        emcee_cores=1, reuse_sampler=False, emcee_burn=0, emcee_thin=1, backend=None):
+        from joint_fit_orchestration import build_jointfit_from_selection
         self.fchanged=False
         self.tchisqr=1e30
         # self.xminmaxChanged()
@@ -911,6 +1050,17 @@ class XModFit(QWidget):
                                                           'later.', QMessageBox.Ok)
             return
         self.fit_scale=self.fitScaleComboBox.currentText()
+        # Dispatch to the joint fit only when the JOINT view is active (a dataset is
+        # selected in the joint panel's list). With mutual-exclusion selection, choosing
+        # an individual dataset clears the joint selection, so the Fit button then does an
+        # individual fit even while joint mode is enabled.
+        _jp = getattr(self, 'jointFitPanel', None)
+        joint_active = (getattr(self, 'jointFitEnabled', False) and _jp is not None
+                        and len(_jp.datasetList.selectedItems()) > 0
+                        and len(_jp.spec.datasets) >= 2)
+        if joint_active:
+            self.run_joint_fit()
+            return
         self.disconnect_fit_function()
 
         selItems=self.dataListWidget.selectedItems()
@@ -918,13 +1068,29 @@ class XModFit(QWidget):
             self.dataListWidget.itemSelectionChanged.disconnect()
         except:
             pass
+
+        """if getattr(self, 'jointFitEnabled', False) and len(selItems) > 1:
+            fnames = [it.text() for it in selItems]
+            self.fit = build_jointfit_from_selection(
+                self.data, fnames, self.funcClass,
+                cov_paths=getattr(self, '_cov_path', {}),  # {fname: sidecar .npz or *_c_factors.txt}
+                raw_paths=getattr(self, '_raw_path', {}),  # {fname: original 4-col file} for *_c_factors.txt
+                shared=getattr(self, 'jointSharedParams', None),  # [] Axis-2, ['theta','phi'] Axis-1
+            )
+            self.fit.functionCalled.connect(self.fitCallback)
+            self.fit_report, self.fit_message = self.fit.perform_fit(
+                self.xmin, self.xmax, fit_scale=self.fit_scale, fit_method=self.fit_method)
+            # then repopulate the per-dataset tables from self.fit.master_params
+            # (see joint_fit_orchestration.push_result_to_tables)
+            return"""
+
         for item in selItems:
             item.setSelected(False)
         self.dataListWidget.itemSelectionChanged.connect(self.dataFileSelectionChanged)
 
         if len(selItems)>1:
             if self.fit_method=='emcee':
-                QMessageBox.warning(self, 'MultiFit Warning', 'Cannot perfrom Errorbar estimation on more than one data. '
+                QMessageBox.warning(self, 'MultiFit Warning', 'Cannot perform Errorbar estimation on more than one data. '
                                                              'Please select only one dataset at a time.',QMessageBox.Ok)
                 return
             else:
@@ -940,6 +1106,13 @@ class XModFit(QWidget):
             self.disconnect_fit_function()
             item.setSelected(True)
             fname=item.text()
+            # fit THIS dataset's own stored model/params (per-dataset memory);
+            # lazily seeded from the current view if never selected/fit before.
+            # _activate_dataset_fit resyncs the tables/mpar to it so the post-fit
+            # readback + update_plot use matching keys (models may differ per dataset).
+            _dsfit=self._fit_for_dataset(fname)
+            if _dsfit is not None:
+                self._activate_dataset_fit(_dsfit)
             if len(self.data[fname].keys())>1:
                 x={}
                 y={}
@@ -985,6 +1158,7 @@ class XModFit(QWidget):
                 # fit_method=self.fit_method,callback=self.fitCallback)
                 if self.fit_method != 'emcee':
                     self.final_fit_params=copy.copy(self.fit.result.params)
+                self.fit._is_fitted=True   # mark this dataset "already fit"
                 self.fit_info='Fit Message: %s\n'%self.fit_message
 
                 self.closeFitInfoDlg()
@@ -1162,12 +1336,69 @@ class XModFit(QWidget):
         except:
             pass
 
+    def _update_ci_button_state(self):
+        """Enable 'Calculate Param Error' iff the CURRENT individual dataset is fitted.
+        A JointFit active view keeps it disabled (joint-fit CIs are a separate step)."""
+        fit = getattr(self, 'fit', None)
+        ok = (fit is not None and not hasattr(fit, 'objectives')
+              and (getattr(fit, '_is_fitted', False) or getattr(fit, 'result', None) is not None))
+        try:
+            self.calcConfInterButton.setEnabled(bool(ok))
+        except Exception:
+            pass
+
+    def _ensure_ci_baseline(self):
+        """Confidence intervals need an lmfit result (redchi/nfree/stderr). A .par-loaded
+        fit has none, so run ONE leastsq at the loaded params to characterize the local
+        minimum. Returns (ok, message); ok=False with a message when CIs are impossible."""
+        fit = getattr(self, 'fit', None)
+        if fit is None or hasattr(fit, 'objectives'):
+            return False, 'No individual fit is active.'
+        r = getattr(fit, 'result', None)
+        if r is not None and getattr(r, 'redchi', None) is not None:
+            return True, ''
+        try:
+            nvary = sum(1 for p in fit.fit_params.values() if p.vary)
+        except Exception:
+            nvary = 0
+        if nvary == 0:
+            return False, ('No fittable parameters: free at least one parameter (check its box '
+                           'in the fit table) before calculating confidence intervals.')
+        try:
+            key = self.sfnames[-1]
+            d = self.data[key]
+            if len(d.keys()) > 1:
+                x = {k: d[k]['x'] for k in d}; y = {k: d[k]['y'] for k in d}
+                yerr = {k: d[k]['yerr'] for k in d}
+            else:
+                k0 = list(d.keys())[0]; x = d[k0]['x']; y = d[k0]['y']; yerr = d[k0]['yerr']
+            self.fit.set_x(x, y=y, yerr=yerr)
+            self.fit_scale = self.fitScaleComboBox.currentText()
+            self.fit.perform_fit(self.xmin[key], self.xmax[key], fit_scale=self.fit_scale,
+                                 fit_method='leastsq', maxiter=1000)
+        except Exception as e:
+            return False, ('Could not run a baseline fit to characterize the minimum '
+                           '(needed for confidence intervals):\n%s' % e)
+        r = getattr(fit, 'result', None)
+        if r is None or getattr(r, 'redchi', None) is None:
+            return False, ('The fit could not characterize the minimum (singular covariance). '
+                           'Adjust a bound or free a different parameter, then retry.')
+        fit._is_fitted = True
+        return True, ''
+
     def calcConfInterval(self):
         if len(self.sfnames)>1:
             QMessageBox.warning(self,'MultiFit Warning','Confidence interval can be calculated for one data set only.'
                                                ' Please select and fit one data set before caclulating confidence interval.',
                                 QMessageBox.Ok)
             return
+        # A .par-loaded (or freshly restored) fit may have no lmfit result yet; establish a
+        # baseline leastsq so the profiler has redchi/nfree/stderr (flag if impossible).
+        if getattr(self.fit, 'result', None) is None:
+            ok, msg = self._ensure_ci_baseline()
+            if not ok:
+                QMessageBox.warning(self, 'Confidence intervals', msg, QMessageBox.Ok)
+                return
         if self.confIntervalMethodComboBox.currentText()=='ChiSqrDist':
             self.confInterval_ChiSqrDist()
         else:
@@ -1572,6 +1803,10 @@ class XModFit(QWidget):
         else:
             self.emceeConfIntervalWidget.reuseSamplerCheckBox.setCheckState(Qt.Unchecked)
 
+        if not hasattr(self, 'MCMC_starting_step'):
+            self.MCMC_starting_step = 0
+            self.autoCorrTime = np.array([[0, 1]])
+
         self.emceeConfIntervalWidget.startSamplingPushButton.clicked.connect(self.start_emcee_sampling)
         self.emceeConfIntervalWidget.MCMCWalkerLineEdit.returnPressed.connect(self.MCMCWalker_changed)
         self.emceeConfIntervalWidget.saveConfIntervalPushButton.clicked.connect(self.saveParameterError)
@@ -1600,12 +1835,12 @@ class XModFit(QWidget):
         if file != '':
             self.MCMCBackendFile=file
             self.emceeConfIntervalWidget.MCMCFileLineEdit.setText(self.MCMCBackendFile)
-            if self.funcListWidget.currentItem().text() == 'XLayersPDB':
+            if self.funcListWidget.currentItem().text() == 'XLayersPDB' or self.funcListWidget.currentItem().text() == 'XLayersPDB_box':
                 self.backend = CustomHDFBackend(self.MCMCBackendFile)
             else:
                 self.backend = backends.HDFBackend(self.MCMCBackendFile)
             self.fit.result.chain=self.backend.get_chain()[..., :, :]
-            if self.funcListWidget.currentItem().text() == 'XLayersPDB':
+            if self.funcListWidget.currentItem().text() == 'XLayersPDB' or self.funcListWidget.currentItem().text() == 'XLayersPDB_box':
                 angleindex = np.zeros(len(self.fit.result.var_names))
                 ind = 0
                 for var_name in self.fit.result.var_names:
@@ -1661,7 +1896,7 @@ class XModFit(QWidget):
                 os.remove(file)
             self.MCMCBackendFile=file
             self.emceeConfIntervalWidget.MCMCFileLineEdit.setText(self.MCMCBackendFile)
-            if self.funcListWidget.currentItem().text() == 'XLayersPDB':
+            if self.funcListWidget.currentItem().text() == 'XLayersPDB' or self.funcListWidget.currentItem().text() == 'XLayersPDB_box':
                 self.backend = CustomHDFBackend(self.MCMCBackendFile)
             else:
                 self.backend = backends.HDFBackend(self.MCMCBackendFile)
@@ -1894,7 +2129,7 @@ class XModFit(QWidget):
             if os.path.exists(self.MCMCBackendFile):
                 self.fit.result.chain = self.backend.get_chain()[..., :, :]
 
-                if self.funcListWidget.currentItem().text() == 'XLayersPDB':
+                if self.funcListWidget.currentItem().text() == 'XLayersPDB' or self.funcListWidget.currentItem().text() == 'XLayersPDB_box':
                     angleindex = np.zeros(len(self.fit.result.var_names))
                     ind = 0
                     for var_name in self.fit.result.var_names:
@@ -1938,7 +2173,7 @@ class XModFit(QWidget):
             self.stopFitPushButton=QPushButton('Stop')
             vblayout.addWidget(self.stopFitPushButton)
             self.stopFitPushButton.clicked.connect(self.stopFit)
-            if len(self.sfnames)==1:
+            if len(self.sfnames)==1 or hasattr(getattr(self,'fit',None),'objectives'):
                 self.fitInfoDlg.setWindowTitle('Please wait for the fitting to be completed')
                 self.fitInfoDlg.setModal(True)
                 self.fitInfoDlg.show()
@@ -1970,21 +2205,22 @@ class XModFit(QWidget):
             self.fitIterLabel.setText('Iteration=%d,\t Chi-Sqr=%.5e' % (iterations, chisqr))
             self.fitPlotWidget.add_data(x=np.array(self.fitData)[:,0],y=np.array(self.fitData)[:,1])
             self.temp_params=copy.copy(params)
-            if type(self.fit.x)==dict:
-                for key in self.fit.x.keys():
-                    self.plotWidget.add_data(x=self.fit.x[key][self.fit.imin[key]:self.fit.imax[key]+1],y=self.fit.yfit[key],\
-                                     name=self.funcListWidget.currentItem().text()+':'+key,fit=True)
-                    self.fit.params['output_params']['Residuals_%s'%key] = {'x': self.fit.x[key][self.fit.imin[key]:self.fit.imax[key]+1],
-                                                                            'y': (self.fit.y[key][self.fit.imin[key]:self.fit.imax[key]+1]-self.fit.yfit[key])
-                    /self.fit.yerr[key][self.fit.imin[key]:self.fit.imax[key]+1]}
-            else:
-                self.plotWidget.add_data(x=self.fit.x[self.fit.imin:self.fit.imax + 1], y=self.fit.yfit, \
-                                         name=self.funcListWidget.currentItem().text(), fit=True)
-            # else:
-            #     QMessageBox.warning(self,'Parameter Value Error','One or more fitting parameters has got unphysical values perhaps to make all the yvalues zeros!',QMessageBox.Ok)
-            #     self.fit.fit_abort=True
-                self.fit.params['output_params']['Residuals']={'x':self.fit.x[self.fit.imin:self.fit.imax + 1],
-                                                               'y': (self.fit.y[self.fit.imin:self.fit.imax + 1]-self.fit.yfit)/self.fit.yerr[self.fit.imin:self.fit.imax + 1]}
+            # The live model-curve redraw uses single-Fit attrs (self.fit.x/yfit/imin/imax);
+            # a JointFit has none of those (per-objective instead), so skip it there and
+            # just show the iteration/chi-sqr progress (a joint fit still gets a live screen).
+            if not hasattr(self.fit, 'objectives'):
+                if type(self.fit.x)==dict:
+                    for key in self.fit.x.keys():
+                        self.plotWidget.add_data(x=self.fit.x[key][self.fit.imin[key]:self.fit.imax[key]+1],y=self.fit.yfit[key],\
+                                         name=self.funcListWidget.currentItem().text()+':'+key,fit=True,color=self._single_fit_color(key))
+                        self.fit.params['output_params']['Residuals_%s'%key] = {'x': self.fit.x[key][self.fit.imin[key]:self.fit.imax[key]+1],
+                                                                                'y': (self.fit.y[key][self.fit.imin[key]:self.fit.imax[key]+1]-self.fit.yfit[key])
+                        /self.fit.yerr[key][self.fit.imin[key]:self.fit.imax[key]+1]}
+                else:
+                    self.plotWidget.add_data(x=self.fit.x[self.fit.imin:self.fit.imax + 1], y=self.fit.yfit, \
+                                             name=self.funcListWidget.currentItem().text(), fit=True,color=self._single_fit_color())
+                    self.fit.params['output_params']['Residuals']={'x':self.fit.x[self.fit.imin:self.fit.imax + 1],
+                                                                   'y': (self.fit.y[self.fit.imin:self.fit.imax + 1]-self.fit.yfit)/self.fit.yerr[self.fit.imin:self.fit.imax + 1]}
             self.tchisqr=chisqr
         QApplication.processEvents()
 
@@ -1992,7 +2228,7 @@ class XModFit(QWidget):
     def fitErrorCallback(self, params, iterations, residual, fit_scale):
         if hasattr(self.fit.fitter, 'sampler'):
 
-            if self.funcListWidget.currentItem().text() == 'XLayersPDB':
+            if self.funcListWidget.currentItem().text() == 'XLayersPDB' or self.funcListWidget.currentItem().text() == 'XLayersPDB_box':
                 angleindex = np.zeros(len(self.fit.result.var_names))
                 ind = 0
                 for var_name in self.fit.result.var_names:
@@ -2017,7 +2253,7 @@ class XModFit(QWidget):
                 #print(iterations, self.fit.fitter.sampler.iteration)
                 # if (iterations-self.iterations)>self.emcee_walkers and (self.MCMC_starting_step+int(iterations/self.emcee_walkers))%100==0:
                 if self.MCMC_starting_step % 100 == 0:
-                    if self.funcListWidget.currentItem().text() == 'XLayersPDB':
+                    if self.funcListWidget.currentItem().text() == 'XLayersPDB' or self.funcListWidget.currentItem().text() == 'XLayersPDB_box':
                         data = np.array(
                             [[self.MCMC_starting_step, np.mean(self.backend.get_autocorr_time(angleindex=angleindex, tol=0))]])
                     else:
@@ -2044,7 +2280,7 @@ class XModFit(QWidget):
 
     def perform_post_sampling_tasks(self):
         #self.emceeConfIntervalWidget.progressBar.setValue(self.emcee_steps)
-        if self.funcListWidget.currentItem().text() == 'XLayersPDB':
+        if self.funcListWidget.currentItem().text() == 'XLayersPDB' or self.funcListWidget.currentItem().text() == 'XLayersPDB_box':
             angleindex = np.zeros(len(self.fit.result.var_names))
             ind = 0
             for var_name in self.fit.result.var_names:
@@ -2087,7 +2323,7 @@ class XModFit(QWidget):
         try:
             acor_mcmc=self.fit.fitter.sampler.get_autocorr_time(quiet=True) #Calculates from newly generated samples
         except:
-            if self.funcListWidget.currentItem().text() == 'XLayersPDB':
+            if self.funcListWidget.currentItem().text() == 'XLayersPDB' or self.funcListWidget.currentItem().text() == 'XLayersPDB_box':
                 acor_mcmc = self.backend.get_autocorr_time(angleindex=angleindex, quiet=True)  # Calculates from the existing backend file
             else:
                 acor_mcmc = self.backend.get_autocorr_time(quiet=True) #Calculates from the existing backend file
@@ -2378,8 +2614,12 @@ class XModFit(QWidget):
                     self.meta[data_key]=data_dlg.externalMeta
                     self.expressions[data_key]=data_dlg.expressions
                     for key in self.data[data_key].keys():
+                        # deterministic palette color; data & its fit share it (see
+                        # _curve_color_for). Stored back so the fit paths reuse it.
+                        _col=self._curve_color_for(data_key,key)
+                        self.data[data_key][key]['color']=_col
                         self.plotWidget.add_data(self.data[data_key][key]['x'],self.data[data_key][key]['y'],\
-                                                 yerr=self.data[data_key][key]['yerr'],name='%d:%s'%(self.fileNumber,key),color=self.data[data_key][key]['color'])
+                                                 yerr=self.data[data_key][key]['yerr'],name='%d:%s'%(self.fileNumber,key),color=_col)
                     self.dataListWidget.addItem(data_key)
                     self.fileNames[self.fileNumber]=fname
                     self.xmin[data_key] = np.min([np.min(self.data[data_key][k1]['x']) for k1 in self.data[data_key].keys()])
@@ -2434,6 +2674,9 @@ class XModFit(QWidget):
                 self.plotWidget.remove_data(['%s:%s'%(fnum,key)])
             del self.data[txt]
             del self.meta[txt]
+            self.dataset_fits.pop(txt, None)   # drop this dataset's remembered fit
+            if hasattr(self, 'jointFitPanel'):
+                self.jointFitPanel.sync_available_datasets(list(self.data.keys()))
             del self.xmin[txt]
             del self.xmax[txt]
             del self.expressions[txt]
@@ -3075,7 +3318,7 @@ class XModFit(QWidget):
                 if txt in self.fit.params['choices'].keys():
                     fh.write(txt+'\t'+self.fixedParamTableWidget.cellWidget(row, 1).currentText()+'\n')
                 elif txt in self.fit.params['filepaths'].keys():
-                    fh.write(txt+'\t'+self.fixedParamTableWidget.cellWidget(row, 1).text().replace('[Click] ','')+'\n')
+                    fh.write(txt+'\t'+str(getattr(self,'filebutton_paths',{}).get(txt) or self.fit.params.get(txt) or '')+'\n')
                 else:
                     fh.write(txt+'\t'+self.fixedParamTableWidget.item(row,1).text()+'\n')
             fh.write('#Single fitting parameters:\n')
@@ -3134,6 +3377,7 @@ class XModFit(QWidget):
             fname=fname
         if fname!='':
             self.curDir = os.path.dirname(fname)
+            self._loading_params=True   # suppress functionChanged's per-dataset store
             try:
                 self.funcListWidget.itemSelectionChanged.disconnect()
             except:
@@ -3239,7 +3483,7 @@ class XModFit(QWidget):
                                                             min=pmin[parname],
                                                             max=pmax[parname], expr=None,
                                                             brute_step=pbrute[parname])
-                                mkey, pkey, num = parname[2:].split('_')
+                                mkey, pkey, num = parname[2:].rsplit('_', 2)  # tolerate namespaced 'd0_Model' mkeys
                                 num = int(num)
                                 try:
                                     self.fit.params['__mpar__'][mkey][pkey][num] = float(parval)
@@ -3247,7 +3491,7 @@ class XModFit(QWidget):
                                     self.fit.params['__mpar__'][mkey][pkey].insert(num, float(parval))
                             else:
                                 parname,parval=tlist
-                                mkey,pkey,num=parname[2:].split('_')
+                                mkey,pkey,num=parname[2:].rsplit('_', 2)        # tolerate namespaced 'd0_Model' mkeys
                                 num=int(num)
                                 try:
                                     self.fit.params['__mpar__'][mkey][pkey][num]=parval
@@ -3281,12 +3525,29 @@ class XModFit(QWidget):
                         self.xChanged()
                     self.errorAvailable=False
                     self.reuse_sampler=False
-                    self.calcConfInterButton.setDisabled(True)
+                    # a loaded .par counts as fit -> CIs available (a baseline leastsq is
+                    # run on demand in calcConfInterval to characterize the minimum).
+                    self.fit._is_fitted=True
+                    self._update_ci_button_state()
+                    # persist the loaded model into the per-dataset store (detail
+                    # dataset only) so switching away and back keeps it; refresh
+                    # provenance (functionChanged stamped it before #Xrange was parsed).
+                    self.fit._xmod_category=category
+                    self.fit._xmod_module='Functions.%s.%s'%(category,func)
+                    self.fit._xmod_funcname=func
+                    self.fit._xmod_xexpr=self.xLineEdit.text()
+                    self.fit._is_fitted=True   # a loaded .par counts as "already fit"
+                    _sel=[it.text() for it in self.dataListWidget.selectedItems()]
+                    if _sel:
+                        self.dataset_fits[_sel[-1]]=self.fit
+                    else:
+                        self._template_fit=self.fit
                 else:
                     QMessageBox.warning(self, 'File error',
                                         'This parameter file does not belong to function: %s' % func, QMessageBox.Ok)
             except:
                 QMessageBox.warning(self,'File Import Error','Some problems in the parameter file\n'+traceback.format_exc(), QMessageBox.Ok)
+            self._loading_params=False
         # else:
         #     QMessageBox.warning(self,'Function error','Please select a function first before loading parameter file.', QMessageBox.Ok)
 
@@ -3520,6 +3781,23 @@ class XModFit(QWidget):
                 self.genParamListWidget.clear()
                 self.fchanged = True
                 self.update_parameters()
+                # Picking a function means "use this model for the selected dataset(s)".
+                # Store the freshly-built model per selected dataset (each an independent
+                # clone so a later single-dataset fit doesn't mutate the others); the
+                # last-selected (detail) dataset owns the live self.fit that
+                # update_parameters just populated the tables/plot from. With nothing
+                # selected, keep it as the template that seeds the next new dataset.
+                # (skip while loadParameters is driving the func selection -- it
+                #  persists the loaded model to the detail dataset itself, so we must
+                #  not overwrite the OTHER selected datasets' fits with a blank template)
+                if not getattr(self,'_loading_params',False):
+                    sel=[it.text() for it in self.dataListWidget.selectedItems()]
+                    if sel:
+                        for nm in sel[:-1]:
+                            self.dataset_fits[nm]=self._clone_fit(self.fit)
+                        self.dataset_fits[sel[-1]]=self.fit
+                    else:
+                        self._template_fit=self.fit
                 self.saveSimulatedButton.setEnabled(True)
                 self.errorAvailable = False
                 self.reuse_sampler = False
@@ -3548,6 +3826,11 @@ class XModFit(QWidget):
         self.curr_module=self.funcListWidget.currentItem().text()
         module='Functions.%s.%s'%(self.curr_category,self.curr_module)
         self.fit=Fit(getattr(self.curr_funcClass[module],self.funcListWidget.currentItem().text()),self.x)
+        # provenance so the per-dataset store can auto-follow the function list + Xrange
+        self.fit._xmod_category=self.curr_category
+        self.fit._xmod_module=module
+        self.fit._xmod_funcname=self.curr_module
+        self.fit._xmod_xexpr=self.xLineEdit.text()
         if '__mpar__' in self.fit.params.keys() and self.fit.params['__mpar__'] != {}:
             self.mpar_keys = list(self.fit.params['__mpar__'].keys())
             pkey=list(self.fit.params['__mpar__'][self.mpar_keys[0]].keys())[0]
@@ -3567,6 +3850,7 @@ class XModFit(QWidget):
 
     def update_fixed_parameters(self):
         self.filebutton={}
+        self.filebutton_paths={}   # key -> FULL path (button shows only the basename)
         try:
             self.fixedParamTableWidget.cellChanged.disconnect()
         except:
@@ -3589,15 +3873,22 @@ class XModFit(QWidget):
                 combobox.setCurrentIndex(index)
                 combobox.currentIndexChanged.connect(lambda x: self.fixedParamChanged(row,1))
             if ftxt in self.fit.params['filepaths'].keys():
-                fname=self.fit.params['filepaths'][ftxt]
+                # Prefer the LIVE attribute value (e.g. func.fname) over the
+                # __init__-time 'filepaths' snapshot: a per-dataset PDB choice is
+                # written to the attribute (fname) and must survive dataset
+                # switching / cloning. 'filepaths' is only stamped once at
+                # construction, so reading it here would revert to the default PDB.
+                fname=self.fit.params.get(ftxt) or self.fit.params['filepaths'][ftxt]
+                self.filebutton_paths[ftxt]=fname          # keep the FULL path
                 if fname is not None and os.path.exists(fname):
-                    self.filebutton[ftxt]=QPushButton('[Click] '+fname)
+                    self.filebutton[ftxt]=QPushButton('[Click] '+os.path.basename(fname))
+                    self.filebutton[ftxt].setToolTip(fname)   # full path on hover
                     self.fixedParamTableWidget.setCellWidget(row,1,self.filebutton[ftxt])
-                    self.filebutton[ftxt].clicked.connect(lambda x: self.openFileDlg(fname=fname))
+                    self.filebutton[ftxt].clicked.connect(lambda x, k=ftxt: self.openFileDlg(fname=self.filebutton_paths.get(k)))
                 else:
                     self.filebutton[ftxt] = QPushButton('[Click] ')
-                    self.fixedParamTabletWidget.setCellWidget(row, 1, self.filebutton[ftxt])
-                    self.filebutton[ftxt].clicked.connect(lambda x: self.openFileDlg(fname=None))
+                    self.fixedParamTableWidget.setCellWidget(row, 1, self.filebutton[ftxt])
+                    self.filebutton[ftxt].clicked.connect(lambda x, k=ftxt: self.openFileDlg(fname=None))
                     self.openFileDlg(fname=None)
         self.fixedParamTableWidget.resizeRowsToContents()
         self.fixedParamTableWidget.resizeColumnsToContents()
@@ -3612,9 +3903,13 @@ class XModFit(QWidget):
                                                directory=os.path.dirname(fname),
                                                filter='Files (*%s)'%os.path.splitext(fname)[1])[0]
             if tfname!='':
-                self.filebutton[key].setText('[Click] '+tfname)
+                self.filebutton_paths[key]=tfname          # store FULL path
+                self.filebutton[key].setText('[Click] '+os.path.basename(tfname))
+                self.filebutton[key].setToolTip(tfname)
             else:
-                self.filebutton[key].setText('[Click] '+fname)
+                self.filebutton_paths[key]=fname
+                self.filebutton[key].setText('[Click] '+os.path.basename(fname))
+                self.filebutton[key].setToolTip(fname)
         self.fixedParamChanged(row, 1)
 
 
@@ -3783,7 +4078,8 @@ class XModFit(QWidget):
             self.update_plot()
             self.fixedParamTableWidget.cellWidget(row, 1).currentIndexChanged.connect(lambda x:self.fixedParamChanged(row,1))
         elif txt in self.fit.params['filepaths'].keys():
-            self.fit.params[txt]=str(self.filebutton[txt].text()).replace('[Click] ', '')
+            # value is the FULL path from filebutton_paths (button shows only basename)
+            self.fit.params[txt]=self.filebutton_paths.get(txt, self.fit.params.get(txt))
             self.fchanged=False
             self.update_plot()
         else:
@@ -3799,10 +4095,56 @@ class XModFit(QWidget):
             except:
                 QMessageBox.warning(self,'Value Error','The value just entered is not seem to be right.\n'+traceback.format_exc(),QMessageBox.Ok)
                 self.fixedParamTableWidget.item(row,col).setText(str(oldVal))
+        # In a joint fit, ALL fixed parameters (including the PDB) are shared: fan the
+        # edited value to every objective so the joint fit tests one structural hypothesis.
+        self._fan_fixed_to_objectives(txt)
         self.fixedParamTableWidget.resizeRowsToContents()
         self.fixedParamTableWidget.resizeColumnsToContents()
         self.update_fit_parameters()
         self.fixedParamTableWidget.cellChanged.connect(self.fixedParamChanged)
+
+    def _fan_fixed_to_objectives(self, key):
+        """Force a fixed parameter (incl. the PDB ``fname``) to be shared across a joint
+        fit: copy the CURRENT objective's value into every objective's model. No-op for a
+        single Fit."""
+        jf = getattr(self, 'fit', None)
+        if not hasattr(jf, 'objectives'):
+            return
+        params = jf.params                      # current objective's __dict__
+        if key not in params:
+            return
+        val = params[key]
+        is_file = key in params.get('filepaths', {})
+        for obj in jf.objectives:
+            fd = obj['func'].__dict__
+            fd[key] = val
+            if is_file and isinstance(fd.get('filepaths'), dict):
+                fd['filepaths'][key] = val
+
+    def _sync_joint_fixed_params(self, src_func):
+        """Unify ALL fixed parameters (scalars + PDB ``fname``/filepaths) across every
+        objective of ``self.fit`` (a JointFit) to ``src_func``'s values, so a freshly
+        built/loaded joint fit enforces one shared structural hypothesis. Fit-params
+        (lmfit) are untouched -- sharing of VARYING params stays governed by the spec."""
+        jf = getattr(self, 'fit', None)
+        if not hasattr(jf, 'objectives') or src_func is None:
+            return
+        sd = src_func.__dict__
+        fitp = getattr(src_func, 'params', None)
+        fp_keys = set(fitp.keys()) if fitp is not None else set()
+        src_files = sd.get('filepaths', {}) or {}
+        # keys that are fixed params: in __dict__, not a fit-param, not special/private
+        fixed_keys = [k for k in sd.keys()
+                      if k not in fp_keys and k not in self.special_keys and not k.startswith('_')]
+        for obj in jf.objectives:
+            if obj['func'] is src_func:
+                continue
+            fd = obj['func'].__dict__
+            for k in fixed_keys:
+                fd[k] = sd[k]
+            if isinstance(fd.get('filepaths'), dict):
+                for k in src_files:
+                    fd['filepaths'][k] = src_files[k]
 
 
         
@@ -4051,12 +4393,14 @@ class XModFit(QWidget):
                 if type(self.fit.x)==dict:
                     for key in self.fit.x.keys():
                         self.plotWidget.add_data(x=self.fit.x[key][self.fit.imin[key]:self.fit.imax[key] + 1], y=self.fit.yfit[key],
-                                                 name=self.funcListWidget.currentItem().text()+':'+key, fit=True)
+                                                 name=self.funcListWidget.currentItem().text()+':'+key, fit=True,
+                                                 color=self._single_fit_color(key))
                     pfnames = pfnames + [self.funcListWidget.currentItem().text() + ':' + key for key in
                                              self.fit.x.keys()]
                 else:
                     self.plotWidget.add_data(x=self.fit.x[self.fit.imin:self.fit.imax + 1], y=self.fit.yfit,
-                                             name=self.funcListWidget.currentItem().text(), fit=True)
+                                             name=self.funcListWidget.currentItem().text(), fit=True,
+                                             color=self._single_fit_color())
                     pfnames = pfnames + [self.funcListWidget.currentItem().text()]
 
                 self.plotWidget.Plot(pfnames)
@@ -4069,18 +4413,29 @@ class XModFit(QWidget):
 
 
     def update_plot(self):
+        # JointFit-aware early return: a joint fit has no top-level x/y/yfit and its
+        # residual takes MASTER params, so the single-Fit body below cannot run on it.
+        # _update_plot_joint draws the current objective's data + curve instead.
+        # (getattr guard: self.fit may not exist yet before any function is chosen.)
+        if hasattr(getattr(self, 'fit', None), 'objectives'):
+            self._update_plot_joint()
+            return
         for row in range(self.fixedParamTableWidget.rowCount()):
             txt=self.fixedParamTableWidget.item(row,0).text()
             if txt in self.fit.params['choices'].keys():
                 val = self.fixedParamTableWidget.cellWidget(row, 1).currentText()
             elif txt in self.fit.params['filepaths'].keys():
-                val = self.fixedParamTableWidget.cellWidget(row, 1).text().replace('[Click] ', '')
+                val = getattr(self, 'filebutton_paths', {}).get(txt) or self.fit.params.get(txt) or ''
             else:
                 val=self.fixedParamTableWidget.item(row,1).text()
             try:
                 self.fit.params[txt]=eval(val)
             except:
                 self.fit.params[txt]=str(val)
+            # keep the 'filepaths' snapshot in lock-step with the live value so it
+            # never reverts to the __init__ default (e.g. per-dataset PDB path).
+            if txt in self.fit.params['filepaths'].keys():
+                self.fit.params['filepaths'][txt]=self.fit.params[txt]
         for row in range(self.sfitParamTableWidget.rowCount()):
             txt=self.sfitParamTableWidget.item(row,0).text()
             self.fit.params[txt]=float(self.sfitParamTableWidget.item(row,1).text())
@@ -4175,7 +4530,8 @@ class XModFit(QWidget):
             if type(self.fit.x)==dict:
                 for key in self.fit.x.keys():
                     self.plotWidget.add_data(x=self.fit.x[key][self.fit.imin[key]:self.fit.imax[key] + 1], y=self.fit.yfit[key],
-                                             name=self.funcListWidget.currentItem().text()+':'+key, fit=True)
+                                             name=self.funcListWidget.currentItem().text()+':'+key, fit=True,
+                                             color=self._single_fit_color(key))
                     if len(self.dataListWidget.selectedItems()) > 0:
                         self.fit.params['output_params']['Residuals_%s' % key] = {
                             'x': self.fit.x[key][self.fit.imin[key]:self.fit.imax[key] + 1],
@@ -4188,7 +4544,8 @@ class XModFit(QWidget):
                                          self.fit.x.keys()]
             else:
                 self.plotWidget.add_data(x=self.fit.x[self.fit.imin:self.fit.imax + 1], y=self.fit.yfit,
-                                         name=self.funcListWidget.currentItem().text(), fit=True)
+                                         name=self.funcListWidget.currentItem().text(), fit=True,
+                                         color=self._single_fit_color())
                 if len(self.dataListWidget.selectedItems()) > 0:
                     self.fit.params['output_params']['Residuals'] = {'x': self.fit.x[self.fit.imin:self.fit.imax + 1],
                                                                      'y': (self.fit.y[
@@ -4227,7 +4584,128 @@ class XModFit(QWidget):
         self.plotWidget.Plot(pfnames)
         # QApplication.processEvents()
         QApplication.processEvents()
-        
+
+    def _update_plot_joint(self, overlay_names=None):
+        """Draw joint-fit objective(s) in the main plot: each selected dataset's data
+        curve(s) + its model curve. ``overlay_names`` (a list) overlays all of them; the
+        DETAIL objective (JointFit._current) drives the param tables + output_params /
+        genParamListWidget. Separate from update_plot because a JointFit has no single-Fit
+        x/y/yfit and its residual needs master params. Never touches the Data-list
+        selection (pfnames are built from the joint dataset names directly, so we don't
+        re-enter dataFileSelectionChanged and flip back to the individual fit)."""
+        jf = self.fit
+        objectives = getattr(jf, 'objectives', None)
+        if not objectives:
+            return
+        onames = jf.objective_names
+        cur = getattr(jf, '_current', 0) or 0
+        if cur >= len(objectives):
+            cur = 0
+        idxs = [onames.index(n) for n in (overlay_names or []) if n in onames]
+        if not idxs:
+            idxs = [cur]
+        detail_i = cur if cur in idxs else idxs[-1]
+
+        def _eval(k):
+            obj = objectives[k]
+            xall = np.asarray(obj['x'])
+            imin = obj.get('imin', 0) or 0
+            imax = obj.get('imax', None)
+            if imax is None or imax >= len(xall):
+                imax = len(xall) - 1
+            xin = xall[imin:imax + 1]
+            yin = np.asarray(obj['y'])[imin:imax + 1]
+            yerrin = np.asarray(obj['yerr'])[imin:imax + 1]
+            func = obj['func']
+            func.x = xin
+            func.__fit__ = False
+            try:
+                yfit = np.asarray(func.y())
+            except Exception:
+                QMessageBox.warning(self, 'Evaluation Error', traceback.format_exc(), QMessageBox.Ok)
+                yfit = np.zeros_like(xin)
+            return obj, func, xin, yin, yerrin, yfit
+
+        pfnames = []
+        detail = None
+        for k in idxs:
+            obj, func, xin, yin, yerrin, yfit = _eval(k)
+            name = obj['name']
+            if name not in self.data:
+                continue
+            fnum = name.split('<>')[0]
+            first_key = None
+            for key in self.data[name].keys():
+                if first_key is None:
+                    first_key = key
+                d = self.data[name][key]
+                col = d.get('color') or self._curve_color_for(name, key)
+                self.plotWidget.add_data(d['x'], d['y'], yerr=d['yerr'],
+                                         name='%s:%s' % (fnum, key), color=col)
+                pfnames.append('%s:%s' % (fnum, key))
+            fitname = '%s [joint:%s]' % (type(func).__name__, fnum)
+            # fit line shares the color of this dataset's primary data curve
+            self.plotWidget.add_data(x=xin, y=yfit, name=fitname, fit=True,
+                                     color=self._curve_color_for(name, first_key))
+            pfnames.append(fitname)
+            if k == detail_i:
+                detail = (func, xin, yin, yerrin, yfit)
+
+        if detail is None:
+            self.plotWidget.Plot(pfnames)
+            QApplication.processEvents()
+            return
+        func, xin, yin, yerrin, yfit = detail
+        try:
+            self.chisqr = float(np.sum(((yin - yfit) / yerrin) ** 2))
+            self.red_chisqr = self.chisqr / max(1, len(yin))
+        except Exception:
+            self.chisqr = None
+            self.red_chisqr = None
+        self.fitResultTextEdit.clear()
+        try:
+            self.fitResultTextEdit.append(self.fit_report)
+        except Exception:
+            pass
+        try:
+            self.genParamListWidget.itemSelectionChanged.disconnect()
+        except Exception:
+            pass
+        self.genParamListWidget.clear()
+        op = func.__dict__.setdefault('output_params', {})
+        op.setdefault('scaler_parameters', {})
+        op['scaler_parameters']['Chi-Sqr'] = self.chisqr
+        op['scaler_parameters']['Red_Chi_Sqr'] = self.red_chisqr
+        try:
+            op['Residuals'] = {'x': xin, 'y': (yin - yfit) / yerrin}
+        except Exception:
+            pass
+        row = 0
+        for key in op.keys():
+            if key == 'scaler_parameters':
+                for k in op[key].keys():
+                    self.genParamListWidget.addItem(k + ' : ' + str(op[key][k]))
+                    it = self.genParamListWidget.item(row)
+                    it.setFlags(it.flags() & ~Qt.ItemIsSelectable)
+                    row += 1
+            else:
+                var = [k for k in op[key].keys() if k not in ('names', 'plotType')]
+                self.genParamListWidget.addItem(str(key) + ' : ' + str(var))
+                row += 1
+        if not self.fchanged:
+            for j in range(self.genParamListWidget.count()):
+                item = self.genParamListWidget.item(j)
+                if item.text() in self.gen_param_items:
+                    item.setSelected(True)
+        self.plot_extra_param()
+        self.genParamListWidget.itemSelectionChanged.connect(self.plot_extra_param)
+        try:
+            self.consoleWidget.push_vars({'fit': self.fit})
+        except Exception:
+            pass
+        self.plotWidget.Plot(pfnames)
+        QApplication.processEvents()
+
     def extra_param_doubleClicked(self,item):
         key=item.text().split(':')[0].strip()
         if key in self.fit.params['output_params'].keys():
@@ -4299,6 +4777,739 @@ class XModFit(QWidget):
         self.gen_param_items=[item.text() for item in self.genParamListWidget.selectedItems()]
         QApplication.processEvents()
 
+    jointFitEnabled = False
+
+    def create_jointFitDock(self):
+        # Overlay: the joint-fit panel sits UNDER the Data list (not a separate tab),
+        # in a scroll area so its (collapsible) body never dominates the dock.
+        self.jointFitPanel = JointFitPanel(parent_app=self)
+        from PyQt5.QtWidgets import QScrollArea
+        self.jointFitScroll = QScrollArea()
+        self.jointFitScroll.setWidgetResizable(True)
+        self.jointFitScroll.setWidget(self.jointFitPanel)
+        self.dataLayoutWidget.nextRow()
+        self.dataLayoutWidget.addWidget(self.jointFitScroll, colspan=2)
+
+    # ---- contract the JointFitPanel calls (see joint_fit_panel.py docstring) ----
+    def selected_data_names(self):
+        return [it.text() for it in self.dataListWidget.selectedItems()]
+
+    def joint_model_name(self):
+        fit = getattr(self, 'fit', None)
+        if fit is not None and getattr(fit, 'func', None) is not None \
+           and not hasattr(fit, 'objectives'):
+            return type(fit.func).__name__
+        it = self.funcListWidget.currentItem()
+        return it.text() if it is not None else None
+
+    def joint_model_factory(self):
+        """A FRESH model instance for one dataset of the joint fit.
+
+        Clones the LIVE current model (self.fit.func) so it works whether the
+        function was clicked OR loaded from a .par -- a .par load sets the model via
+        a signal dance that does not reliably leave curr_module / the func-list
+        selection in the state a from-scratch reconstruction needs. Cloning the
+        already-built model sidesteps that and carries the loaded layer structure +
+        starting values. Falls back to reconstruction from the function list only if
+        no single-fit model is live yet."""
+        import copy
+        fit = getattr(self, 'fit', None)
+        # a live single-fit model (a JointFit also has .func, so exclude it)
+        if fit is not None and getattr(fit, 'func', None) is not None \
+           and not hasattr(fit, 'objectives'):
+            m = copy.deepcopy(fit.func)
+            m.x = self.x
+            if getattr(m, 'params', None) is None:
+                m.init_params()
+            return m
+        # fallback: reconstruct from the current function-list selection
+        it = self.funcListWidget.currentItem()
+        if it is None:
+            return None
+        module = 'Functions.%s.%s' % (self.curr_category, self.curr_module)
+        cls = getattr(self.curr_funcClass[module], it.text())
+        m = cls()
+        m.x = self.x
+        m.init_params()
+        return m
+
+    def joint_model_for(self, name):
+        """Seed model for one dataset entering the joint fit.
+
+        Prefer that dataset's remembered INDIVIDUAL fit (Phase-1 per-dataset store),
+        so each dataset enters the joint fit at its own individual best-fit; fall
+        back to the current view (joint_model_factory) if it has no individual fit."""
+        import copy
+        fit = self.dataset_fits.get(name)
+        if fit is not None and getattr(fit, 'func', None) is not None \
+           and not hasattr(fit, 'objectives'):
+            m = copy.deepcopy(fit.func)
+            m.x = self.x
+            if getattr(m, 'params', None) is None:
+                m.init_params()
+            return m
+        return self.joint_model_factory()
+
+    def show_joint_dataset(self, name):
+        """Panel selector/list -> make the JointFit the active view for `name` and paint
+        the main window (tables + plot) with that dataset's joint-recovered fit."""
+        self.show_joint_datasets([name])
+
+    def show_joint_datasets(self, names):
+        """Show one or more joint-fit datasets. The LAST name is the detail dataset that
+        drives the stock param tables; ALL selected datasets' curves are overlaid in the
+        plot. Called by the joint panel's dataset list (multi-select) and combo."""
+        jf = getattr(self, 'jointFit', None)
+        if jf is None or not hasattr(jf, 'set_current') or not names:
+            return
+        try:
+            self.fit = jf
+            jf.set_current(names[-1])           # detail = last selected
+            self.refresh_param_tables()
+            self._update_plot_joint(overlay_names=list(names))
+        except (ValueError, IndexError):
+            pass
+
+    # ---- per-dataset fit memory ------------------------------------------- #
+    def _clone_fit(self, src):
+        """Clone a ``Fit`` for the per-dataset store.
+
+        Deepcopies only the model (``func``) -- never the ``QObject`` -- and rewires
+        a fresh ``Fit`` around it WITHOUT re-running ``init_params()`` (which would
+        reset the values we want to carry over).  Provenance attrs (set in
+        ``update_parameters``) are copied so the function list can auto-follow.
+        Returns ``None`` if ``src`` is missing or is a ``JointFit`` (which has no
+        single ``.func`` to clone); callers then keep today's behavior."""
+        if src is None or hasattr(src, 'objectives'):
+            return None
+        f = getattr(src, 'func', None)
+        if f is None:
+            return None
+        newfit = Fit.__new__(Fit)
+        QObject.__init__(newfit)
+        newfit.func = copy.deepcopy(f)
+        newfit.func.x = self.x
+        newfit.params = newfit.func.__dict__
+        newfit.fit_params = newfit.func.params
+        newfit.fitter = None
+        newfit.result = None
+        newfit.Niter = 0
+        newfit.set_x(self.x)
+        for attr in ('_xmod_category', '_xmod_module', '_xmod_funcname', '_xmod_xexpr'):
+            if hasattr(src, attr):
+                setattr(newfit, attr, getattr(src, attr))
+        return newfit
+
+    def _fit_for_dataset(self, name, seed=None):
+        """Return the stored ``Fit`` for ``name``; lazily create one by cloning the
+        current view (``seed`` -> ``self.fit`` -> ``self._template_fit``).
+
+        Returns ``None`` if nothing has ever been displayed (fresh app / no function
+        picked yet), so callers fall back to the pre-existing single-``Fit`` path and
+        the feature stays transparent until a model exists."""
+        if name in self.dataset_fits:
+            return self.dataset_fits[name]
+        src = seed
+        if src is None:
+            src = getattr(self, 'fit', None)
+            if src is None or hasattr(src, 'objectives'):
+                src = self._template_fit
+        newfit = self._clone_fit(src)
+        if newfit is not None:
+            self.dataset_fits[name] = newfit
+        return newfit
+
+    def _activate_dataset_fit(self, fit):
+        """Make ``fit`` the live ``self.fit`` and resync the mpar bookkeeping + the
+        param tables to it.
+
+        Shared by dataset-switching and per-dataset batch fitting so the tables, the
+        undo snapshot and ``update_plot`` always match the ACTIVE model -- selected
+        datasets may now carry different models, so the tables cannot be assumed to
+        match ``self.fit`` after a swap.  ``update_fixed_parameters`` /
+        ``update_fit_parameters`` each self-manage their own ``cellChanged`` signal."""
+        self.fit = fit
+        if '__mpar__' in self.fit.params.keys() and self.fit.params['__mpar__'] != {}:
+            self.mpar_keys = list(self.fit.params['__mpar__'].keys())
+            pkey = list(self.fit.params['__mpar__'][self.mpar_keys[0]].keys())[0]
+            self.mpar_N = {}
+            for mkey in self.mpar_keys:
+                self.mpar_N[mkey] = len(self.fit.params['__mpar__'][mkey][pkey])
+        self.update_fixed_parameters()
+        self.update_fit_parameters()
+
+    def _sync_funclist_to_fit(self, fit):
+        """Point the function list + Xrange at ``fit``'s model (auto-follow) without
+        triggering ``functionChanged`` / ``update_functions`` recursively.
+
+        Best-effort: any failure leaves the tables/plot correct (they read
+        ``self.fit``); only the highlight would be stale."""
+        if fit is None:
+            return
+        cat = getattr(fit, '_xmod_category', None)
+        funcname = getattr(fit, '_xmod_funcname', None)
+        if funcname is None:
+            func = getattr(fit, 'func', None)
+            funcname = type(func).__name__ if func is not None else None
+        xexpr = getattr(fit, '_xmod_xexpr', None)
+        try:
+            self.categoryListWidget.currentItemChanged.disconnect()
+        except Exception:
+            pass
+        try:
+            self.funcListWidget.itemSelectionChanged.disconnect()
+        except Exception:
+            pass
+        try:
+            if cat is not None and getattr(self, 'curr_category', None) != cat:
+                items = self.categoryListWidget.findItems(cat, Qt.MatchExactly)
+                if items:
+                    self.categoryListWidget.setCurrentItem(items[0])
+                    self.update_functions()  # rebuilds funcListWidget, sets curr_category
+                    try:                       # update_functions re-attaches functionChanged
+                        self.funcListWidget.itemSelectionChanged.disconnect()
+                    except Exception:
+                        pass
+            if funcname is not None:
+                fitems = self.funcListWidget.findItems(funcname, Qt.MatchExactly)
+                if fitems:
+                    self.funcListWidget.clearSelection()
+                    self.funcListWidget.setCurrentItem(fitems[0])
+                    fitems[0].setSelected(True)
+                    self.curr_module = funcname
+            if xexpr:
+                self.xLineEdit.setText(xexpr)
+        except Exception:
+            import traceback; traceback.print_exc()
+        finally:
+            self.categoryListWidget.currentItemChanged.connect(self.update_functions)
+            self.funcListWidget.itemSelectionChanged.connect(self.functionChanged)
+
+    def refresh_param_tables(self):
+        """Re-render the stock param tables from self.fit (master/detail: shows the
+        JointFit's *current* dataset via its .fit_params / .params view)."""
+        try:
+            self.update_fixed_parameters()
+            self.update_fit_parameters()
+        except Exception:
+            pass
+
+    def run_joint_fit(self):
+        """Compile the panel's spec into a JointFit, fit it, and show the current
+        dataset's fitted params in the stock tables (master/detail). q-range is a
+        scalar parsed from the Xrange box; we deliberately do NOT call
+        xminmaxChanged()/update_plot() -- those assume a single Fit (dict xmin/xmax
+        and self.fit.params['choices']/self.fit.x). Joint-fit plotting is a
+        separate, deferred step."""
+        import numpy as _np
+        spec = self.jointFitPanel.spec
+        self.fit = spec.compile(self.data)  # fresh JointFit
+        self.jointFit = self.fit            # persist so switching to an individual
+                                            # dataset view and back retains joint results
+        # enforce shared fixed params (incl. the PDB) across all datasets
+        if getattr(self.fit, 'objectives', None):
+            self._sync_joint_fixed_params(self.fit.objectives[0]['func'])
+        self.fit_method = self.fitMethods[self.fitMethodComboBox.currentText()]
+        self.fit_scale = self.fitScaleComboBox.currentText()
+        # scalar q-bounds from the Xrange box (NOT the per-file self.xmin/self.xmax dicts)
+        try:
+            _xmin, _xmax = self.xminmaxLineEdit.text().split(':')
+            xmin, xmax = float(_xmin), float(_xmax)
+        except Exception:
+            xmin, xmax = -_np.inf, _np.inf
+        # live progress screen (iteration / chi-sqr / Stop) -- same dialog as individual
+        # fits; fitCallback is JointFit-aware (skips the single-Fit curve redraw).
+        self.fitData = []
+        self.tchisqr = 1e30
+        try:
+            self.fit.functionCalled.connect(self.fitCallback)
+        except Exception:
+            pass
+        try:
+            self.showFitInfoDlg()
+        except Exception:
+            pass
+        try:
+            self.fit_report, self.fit_message = self.fit.perform_fit(
+                xmin, xmax, fit_scale=self.fit_scale, fit_method=self.fit_method)
+        finally:
+            try:
+                self.closeFitInfoDlg()
+            except Exception:
+                pass
+            self.disconnect_fit_function()
+        self.jointFit._is_fitted = True          # a completed joint fit
+        self.jointFit._jpar_incomplete = False
+        # results live in each objective's model after the fit; show the current
+        # dataset in the stock tables (guarded: a table hiccup must not eat the report)
+        try:
+            self.fit.set_current(self.jointFitPanel.datasetSelector.currentData()
+                                 or self.fit.objective_names[0])
+            self.refresh_param_tables()
+            self.update_plot()          # joint-aware: draws the current dataset's curve
+        except Exception:
+            import traceback; traceback.print_exc()
+        self._refresh_data_labels()
+        FitResultDialog(self.fit_report, self.fit_message, parent=self).show()
+
+    # ---- joint-fit save / load (.jpar) + .par-into-joint ------------------- #
+    def _category_of_func(self, funcname):
+        """Find which Functions/<category>/ folder defines <funcname>.py."""
+        base = os.path.join(os.curdir, 'Functions')
+        try:
+            for cat in os.listdir(base):
+                d = os.path.join(base, cat)
+                if os.path.isdir(d) and os.path.exists(os.path.join(d, funcname + '.py')):
+                    return cat
+        except Exception:
+            pass
+        return None
+
+    def _build_joint_model(self, block):
+        """Build a fresh model INSTANCE from a parsed .jpar dataset block and apply
+        its saved parameter values. Returns None if the model class can't be built."""
+        import joint_fit_io as jio
+        category = block.get('category') or self.curr_category
+        func = block.get('func')
+        module = 'Functions.%s.%s' % (category, func)
+        try:
+            if module not in self.curr_funcClass:
+                self.curr_funcClass[module] = import_module(module)
+            cls = getattr(self.curr_funcClass[module], func)
+        except Exception:
+            traceback.print_exc()
+            return None
+        # a PDB model must construct against a real file: pull fname from the block
+        fname = None
+        for line in block.get('fixed', []):
+            k, _, v = line.partition('\t')
+            if k == 'fname':
+                fname = v
+        try:
+            m = cls(fname=fname) if fname else cls()
+        except Exception:
+            try:
+                m = cls()
+            except Exception:
+                traceback.print_exc()
+                return None
+        try:
+            m.x = eval(block.get('xrange') or 'np.linspace(0.0,1.0,100)')
+        except Exception:
+            pass
+        if getattr(m, 'params', None) is None:
+            m.init_params()
+        try:
+            jio.apply_block(m, block.get('fixed', []), block.get('sfit', []), block.get('mfit', []))
+        except Exception:
+            traceback.print_exc()
+        return m
+
+    def _loaded_key_for_path(self, path):
+        """Map a stored file PATH to a currently-loaded dataset key ("<num><>path"),
+        matching on the path portion (the <num> prefix is volatile). Full-path match
+        first, then a unique-basename fallback; None if not loaded."""
+        target = os.path.normcase(os.path.abspath(path))
+        for k in self.data.keys():
+            p = k.split('<>', 1)[1] if '<>' in k else k
+            if os.path.normcase(os.path.abspath(p)) == target:
+                return k
+        base = os.path.basename(path)
+        cand = [k for k in self.data.keys()
+                if os.path.basename(k.split('<>', 1)[1] if '<>' in k else k) == base]
+        return cand[0] if len(cand) == 1 else None
+
+    def saveJointFit(self, fname=None):
+        """Write the current joint-fit spec to a .jpar (datasets by path + per-dataset
+        model/params + sharing + covariance + fit settings)."""
+        import joint_fit_io as jio
+        spec = getattr(self.jointFitPanel, 'spec', None)
+        if spec is None or len(spec.datasets) < 1:
+            QMessageBox.warning(self, 'Joint fit', 'No datasets in the joint fit to save.')
+            return
+        if fname is None:
+            fname = QFileDialog.getSaveFileName(self, 'Save joint fit', self.curDir,
+                                                'Joint fit (*.jpar)')[0]
+            if not fname:
+                return
+        if os.path.splitext(fname)[1] == '':
+            fname += '.jpar'
+        settings = {'fit_range': self.xminmaxLineEdit.text(),
+                    'fit_method': self.fitMethodComboBox.currentText(),
+                    'fit_scale': self.fitScaleComboBox.currentText(),
+                    'fit_iterations': self.fitIterationLineEdit.text()}
+        blocks = []
+        for e in spec.datasets:
+            if e.model is None:
+                continue
+            path = e.name.split('<>', 1)[1] if '<>' in e.name else e.name
+            func = type(e.model).__name__
+            category = self._category_of_func(func) or self.curr_category
+            src = self.dataset_fits.get(e.name)
+            xexpr = getattr(src, '_xmod_xexpr', None) or self.xLineEdit.text()
+            fixed, sfit, mfit = jio.dump_model(e.model)
+            blocks.append({'path': path, 'category': category, 'func': func,
+                           'xrange': xexpr, 'cov': e.cov_path, 'raw': e.raw_path,
+                           'fixed': fixed, 'sfit': sfit, 'mfit': mfit})
+        shares = []
+        for g in spec.groups:
+            eps = [((nm.split('<>', 1)[1] if '<>' in nm else nm), lk)
+                   for (nm, lk) in g.endpoints]
+            shares.append({'bare': g.bare, 'name': g.name, 'endpoints': eps})
+        try:
+            with open(fname, 'w') as fh:
+                fh.write(jio.format_jpar(settings, blocks, shares))
+        except Exception:
+            QMessageBox.warning(self, 'Joint fit', 'Could not save:\n' + traceback.format_exc())
+            return
+        QMessageBox.information(self, 'Joint fit', 'Saved joint fit to\n%s' % fname)
+
+    def loadJointFit(self, fname=None):
+        """Load a .jpar: associate datasets already in the Data list (warn+skip any
+        that are not loaded), restore per-dataset models/params + sharing, and compile
+        a viewable JointFit."""
+        import joint_fit_io as jio
+        if fname is None:
+            fname = QFileDialog.getOpenFileName(self, 'Load joint fit', self.curDir,
+                                                'Joint fit (*.jpar)')[0]
+            if not fname:
+                return
+        try:
+            with open(fname) as fh:
+                parsed = jio.parse_jpar(fh.read())
+        except Exception:
+            QMessageBox.warning(self, 'Joint fit', 'Could not read joint fit:\n'
+                                + traceback.format_exc())
+            return
+        spec = self.jointFitPanel.spec
+        for nm in list(spec.dataset_names):      # start fresh from the file
+            spec.remove_dataset(nm)
+        # resolve each referenced path to a currently-loaded dataset key
+        resolved = {b['path']: self._loaded_key_for_path(b['path']) for b in parsed['blocks']}
+        unloaded = [p for p, k in resolved.items() if k is None]
+        not_found, loaded_from_disk = [], []
+        if unloaded:
+            ans = QMessageBox.question(
+                self, 'Joint fit',
+                '%d dataset(s) referenced by this joint fit are not loaded:\n%s\n\n'
+                'Load them from their stored paths?'
+                % (len(unloaded), '\n'.join('  ' + os.path.basename(p) for p in unloaded)),
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if ans == QMessageBox.Yes:
+                to_load = [p for p in unloaded if os.path.exists(p)]
+                not_found = [p for p in unloaded if not os.path.exists(p)]
+                if to_load:
+                    try:
+                        self.addData(fnames=to_load)
+                    except Exception:
+                        traceback.print_exc()
+                    for p in to_load:
+                        resolved[p] = self._loaded_key_for_path(p)
+                        if resolved[p] is not None:
+                            loaded_from_disk.append(p)
+        path_to_name, skipped = {}, []
+        for b in parsed['blocks']:
+            dkey = resolved.get(b['path'])
+            if dkey is None:
+                if b['path'] not in not_found:
+                    skipped.append(b['path'])
+                continue
+            model = self._build_joint_model(b)
+            if model is None:
+                skipped.append(b['path'] + '  (model build failed)')
+                continue
+            spec.add_dataset(dkey, model=model,
+                             cov_path=b.get('cov') or None, raw_path=b.get('raw') or None)
+            path_to_name[b['path']] = dkey
+        for g in parsed['shares']:
+            eps = [(path_to_name[p], lk) for (p, lk) in g['endpoints'] if p in path_to_name]
+            if len(eps) >= 2:
+                spec.set_shared_endpoints(eps, bare=g.get('bare', False), master_name=g.get('name'))
+        s = parsed.get('settings', {})
+        if s.get('fit_range'):
+            self.xminmaxLineEdit.setText(s['fit_range'])
+        if s.get('fit_method'):
+            self.fitMethodComboBox.setCurrentText(s['fit_method'])
+        if s.get('fit_scale'):
+            self.fitScaleComboBox.setCurrentText(s['fit_scale'])
+        if s.get('fit_iterations'):
+            self.fitIterationLineEdit.setText(s['fit_iterations'])
+        incomplete = bool(skipped or not_found)
+        try:
+            if len(spec.datasets) >= 2:
+                self.jointFit = spec.compile(self.data)
+                self.fit = self.jointFit
+                if getattr(self.fit, 'objectives', None):
+                    self._sync_joint_fixed_params(self.fit.objectives[0]['func'])
+                # a complete .jpar load counts as a fitted joint; an incomplete one is
+                # flagged so the Model Comparison tells the user to re-run the joint fit.
+                self.jointFit._is_fitted = not incomplete
+                self.jointFit._jpar_incomplete = incomplete
+        except Exception:
+            traceback.print_exc()
+        self.jointFitEnabled = True
+        try:
+            self.jointFitPanel.enableCheck.setChecked(True)
+            self.jointFitPanel._resync_all()
+        except Exception:
+            traceback.print_exc()
+        msg = 'Loaded joint fit from\n%s\n\n%d dataset(s) associated.' % (fname, len(path_to_name))
+        if loaded_from_disk:
+            msg += '\n\nLoaded from disk:\n' + '\n'.join('  ' + os.path.basename(p) for p in loaded_from_disk)
+        if not_found:
+            msg += ('\n\nCould NOT be found on disk (skipped):\n'
+                    + '\n'.join('  ' + p for p in not_found))
+        if skipped:
+            msg += ('\n\nSkipped (not loaded in the Data list):\n'
+                    + '\n'.join('  ' + os.path.basename(s.split('  ')[0]) for s in skipped))
+        QMessageBox.information(self, 'Joint fit', msg)
+
+    def loadParIntoJoint(self, fname=None):
+        """Apply one stock .par's values to EVERY dataset in the joint fit (datasets
+        whose model function differs from the file are skipped with a warning)."""
+        import joint_fit_io as jio
+        spec = getattr(self.jointFitPanel, 'spec', None)
+        if spec is None or len(spec.datasets) < 1:
+            QMessageBox.warning(self, 'Joint fit',
+                                'Add datasets to the joint fit first, then load a .par into it.')
+            return
+        if fname is None:
+            fname = QFileDialog.getOpenFileName(self, 'Load .par into joint fit', self.curDir,
+                                                'Parameter files (*.par)')[0]
+            if not fname:
+                return
+        try:
+            with open(fname) as fh:
+                par = jio.parse_par(fh.read())
+        except Exception:
+            QMessageBox.warning(self, 'Joint fit', 'Could not read .par:\n' + traceback.format_exc())
+            return
+        applied, mismatch = 0, []
+        for e in spec.datasets:
+            if e.model is None:
+                continue
+            if par.get('func') and type(e.model).__name__ != par['func']:
+                mismatch.append(e.name.split('<>', 1)[-1])
+                continue
+            try:
+                jio.apply_block(e.model, par.get('fixed', []), par.get('sfit', []), par.get('mfit', []))
+                applied += 1
+            except Exception:
+                traceback.print_exc()
+        try:
+            if len(spec.datasets) >= 2:
+                self.jointFit = spec.compile(self.data)
+                self.fit = self.jointFit
+        except Exception:
+            traceback.print_exc()
+        try:
+            self.jointFitPanel._resync_all()
+        except Exception:
+            pass
+        msg = 'Applied %s to %d joint dataset(s).' % (os.path.basename(fname), applied)
+        if mismatch:
+            msg += ('\n\nSkipped (model function differs from the .par):\n'
+                    + ', '.join(mismatch))
+        QMessageBox.information(self, 'Joint fit', msg)
+
+    # ---- Model Comparison (joint vs individual fits) ---------------------- #
+    def create_compareDock(self):
+        from PyQt5.QtWidgets import QWidget, QVBoxLayout, QPushButton, QTextEdit
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        btn = QPushButton('Compute joint-vs-individual comparison')
+        btn.clicked.connect(self.computeModelComparison)
+        lay.addWidget(btn)
+        self.compareTextEdit = QTextEdit()
+        self.compareTextEdit.setReadOnly(True)
+        self.compareTextEdit.setFontFamily('Courier New')
+        self.compareTextEdit.setText(
+            'Run (or load) a joint fit, individually fit each of its datasets, '
+            'then click Compute.\n\nCompares the joint fit against the collection of '
+            'individual fits with an F-test / likelihood-ratio test (when the models are '
+            'nested) and AIC/AICc/BIC (always).')
+        lay.addWidget(self.compareTextEdit)
+        self.compareDock.addWidget(w)
+
+    def _joint_range(self):
+        try:
+            a, b = self.xminmaxLineEdit.text().split(':')
+            return float(a), float(b)
+        except Exception:
+            return -np.inf, np.inf
+
+    def _eval_chisqr(self, func, name):
+        """Plain chi-square Sum(((y-yfit)/yerr)^2) of `func` against dataset `name`'s
+        PRIMARY curve over the joint fit range. Returns (chisqr, ndata) or (None, 0)."""
+        d = self.data.get(name)
+        if not d:
+            return None, 0
+        key = list(d.keys())[0]
+        x = np.asarray(d[key]['x']); y = np.asarray(d[key]['y']); yerr = np.asarray(d[key]['yerr'])
+        xmin, xmax = self._joint_range()
+        m = (x >= xmin) & (x <= xmax)
+        x, y, yerr = x[m], y[m], yerr[m]
+        if len(x) == 0:
+            return None, 0
+        func.x = x; func.__fit__ = False
+        try:
+            yfit = np.asarray(func.y())
+        except Exception:
+            return None, 0
+        yerr = np.where(np.abs(yerr) < 1e-30, 1.0, yerr)
+        return float(np.sum(((y - yfit) / yerr) ** 2)), int(len(x))
+
+    def computeModelComparison(self):
+        import numpy as _np
+        try:
+            from scipy import stats as _stats
+        except Exception:
+            _stats = None
+        jf = getattr(self, 'jointFit', None)
+        if jf is None:
+            self.compareTextEdit.setText('No joint fit yet — run or load a joint fit first.')
+            return
+        if not getattr(jf, '_is_fitted', False):
+            if getattr(jf, '_jpar_incomplete', False):
+                self.compareTextEdit.setText(
+                    'The loaded .jpar references datasets that are not in the current joint '
+                    'dataset list, so the joint fit is incomplete.\n\nRe-run the joint fit over '
+                    'the current datasets, then compare.')
+            else:
+                self.compareTextEdit.setText('Run the joint fit (or load a complete .jpar) first.')
+            return
+        names = jf.objective_names
+        def _fitted(n):
+            f = self.dataset_fits.get(n)
+            return f is not None and (getattr(f, '_is_fitted', False)
+                                      or getattr(f, 'result', None) is not None)
+        missing = [n for n in names if not _fitted(n)]
+        if missing:
+            self.compareTextEdit.setText(
+                'Each joint dataset needs an INDIVIDUAL fit (or a loaded .par) first. Missing:\n'
+                + '\n'.join('  ' + self._short_name(m) for m in missing))
+            return
+
+        # Compute PLAIN chi-square by evaluation for both models on the same range/points,
+        # so the comparison is scale-consistent even for a covariance/GLS joint fit.
+        RSS_ind = RSS_j = 0.0
+        N = p_ind = 0
+        for i, n in enumerate(names):
+            indfit = self.dataset_fits[n]
+            ci, ni = self._eval_chisqr(indfit.func, n)
+            cj, nj = self._eval_chisqr(jf.objectives[i]['func'], n)
+            if ci is None or cj is None:
+                self.compareTextEdit.setText(
+                    'Could not evaluate dataset %s over the fit range.' % self._short_name(n))
+                return
+            RSS_ind += ci; RSS_j += cj; N += ni
+            p_ind += sum(1 for pp in indfit.func.params.values() if pp.vary)
+        p_j = sum(1 for pp in jf.master_params.values() if getattr(pp, 'vary', False))
+        N_j = N   # same range/points by construction
+
+        # nesting: same function AND same PDB across all individuals and the joint fit
+        jf0 = jf.objectives[0]['func']
+        joint_fn, joint_pdb = type(jf0).__name__, getattr(jf0, 'fname', None)
+        def _norm(p):
+            return os.path.normcase(os.path.abspath(p)) if p else None
+        same_func = all(type(self.dataset_fits[n].func).__name__ == joint_fn for n in names)
+        same_pdb = all(_norm(getattr(self.dataset_fits[n].func, 'fname', None)) == _norm(joint_pdb)
+                       for n in names)
+        nested = same_func and same_pdb
+
+        def _ic(rss, n, p):
+            if rss <= 0 or n <= 0:
+                return float('nan'), float('nan'), float('nan')
+            aic = n * _np.log(rss / n) + 2 * p
+            aicc = aic + (2 * p * (p + 1) / (n - p - 1)) if (n - p - 1) > 0 else float('nan')
+            bic = n * _np.log(rss / n) + p * _np.log(n)
+            return aic, aicc, bic
+        aic_j, aicc_j, bic_j = _ic(RSS_j, N_j, p_j)
+        aic_i, aicc_i, bic_i = _ic(RSS_ind, N, p_ind)
+
+        L = []
+        L.append('MODEL COMPARISON  —  joint fit vs collection of individual fits')
+        L.append('=' * 66)
+        L.append('%-22s %16s %16s' % ('', 'Joint', 'Individuals'))
+        L.append('%-22s %16d %16d' % ('# datasets', len(names), len(names)))
+        L.append('%-22s %16d %16d' % ('data points N', N_j, N))
+        L.append('%-22s %16d %16d' % ('free params p', p_j, p_ind))
+        L.append('%-22s %16.6g %16.6g' % ('chi-square', RSS_j, RSS_ind))
+        L.append('%-22s %16.4g %16.4g' % ('reduced chi-square',
+                                          RSS_j / max(1, N_j - p_j), RSS_ind / max(1, N - p_ind)))
+        L.append('%-22s %16.4g %16.4g' % ('AIC', aic_j, aic_i))
+        L.append('%-22s %16.4g %16.4g' % ('AICc', aicc_j, aicc_i))
+        L.append('%-22s %16.4g %16.4g' % ('BIC', bic_j, bic_i))
+        L.append('')
+        dAIC, dBIC = aic_j - aic_i, bic_j - bic_i
+        L.append('Delta AIC (joint - indiv) = %+.4g     Delta BIC = %+.4g' % (dAIC, dBIC))
+        amin = min(aic_j, aic_i)
+        wj, wi = _np.exp(-0.5 * (aic_j - amin)), _np.exp(-0.5 * (aic_i - amin))
+        s = wj + wi
+        if s > 0:
+            L.append('Akaike weights:  joint=%.3f   individuals=%.3f   (evidence ratio %.3g)'
+                     % (wj / s, wi / s, max(wj, wi) / max(min(wj, wi), 1e-300)))
+        L.append('AIC prefers: %s' % ('joint (shared)' if dAIC < 0 else 'individuals (independent)'))
+        L.append('')
+        if N != N_j:
+            L.append('WARNING: point counts differ (indiv N=%d vs joint N=%d) — the individual'
+                     % (N, N_j))
+            L.append('         and joint fits likely used different q-ranges; refit over the same')
+            L.append('         range for a valid comparison. Numbers below are indicative only.')
+            L.append('')
+        if nested and _stats is not None:
+            df1, df2 = p_ind - p_j, N - p_ind
+            if df1 > 0 and df2 > 0 and RSS_ind > 0:
+                F = ((RSS_j - RSS_ind) / df1) / (RSS_ind / df2)
+                pF = float(_stats.f.sf(F, df1, df2))
+                dchi = RSS_j - RSS_ind
+                pL = float(_stats.chi2.sf(dchi, df1))
+                L.append('NESTED comparison (same model function AND same PDB) — valid:')
+                L.append('  Extra-sum-of-squares F-test (ANOVA)')
+                L.append('    %-16s %14s %6s %14s' % ('Source', 'SS', 'df', 'MS'))
+                L.append('    %-16s %14.6g %6d' % ('Joint (restr.)', RSS_j, N_j - p_j))
+                L.append('    %-16s %14.6g %6d %14.6g' % ('Indiv (full)', RSS_ind, df2, RSS_ind / df2))
+                L.append('    %-16s %14.6g %6d %14.6g' % ('Difference', RSS_j - RSS_ind, df1,
+                                                          (RSS_j - RSS_ind) / df1))
+                L.append('    F = %.5g     p = %.5g' % (F, pF))
+                L.append('  Likelihood-ratio (Delta chi-square) test')
+                L.append('    Delta chi-square = %.5g   Delta dof = %d   p = %.5g' % (dchi, df1, pL))
+                L.append('    small p  => the per-dataset freedom significantly improves the fit')
+                L.append('                (the shared-parameter joint model is rejected).')
+            else:
+                L.append('NESTED, but degrees of freedom are degenerate (df1=%d, df2=%d) — '
+                         'F-test not computable.' % (df1, df2))
+        else:
+            why = []
+            if not same_func:
+                why.append('different model functions')
+            if not same_pdb:
+                why.append('different PDB structures')
+            if _stats is None:
+                why.append('scipy.stats unavailable')
+            L.append('NON-NESTED comparison (%s).' % ', '.join(why or ['non-nested']))
+            L.append('  A PDB is a fixed structural hypothesis (0 continuous DOF), so the F-test /')
+            L.append('  likelihood-ratio test do not apply. Use the AIC/AICc/BIC above — those are')
+            L.append('  valid for non-nested models.')
+        L.append('')
+        L.append('Note: chi-squares are computed by evaluating each fitted model against the data')
+        L.append('over the same range/points, so they are directly comparable.')
+        if any(o.get('cov') is not None for o in jf.objectives):
+            L.append('  * The joint fit OPTIMIZED a covariance/GLS (whitened) objective, so its')
+            L.append('    parameters minimize that, not plain chi-square; the values above reflect')
+            L.append('    the fitted parameters\' plain-chi-square quality.')
+        L.append('  * If a PDB was chosen from a library by best fit, IC gaps understate the true')
+        L.append('    model-selection cost.')
+        self.compareTextEdit.setText('\n'.join(L))
+
+    def _short_name(self, key):
+        """Human-ish dataset label from the composite '<num><>path' key."""
+        try:
+            num, path = key.split('<>', 1)
+            return '%s: %s' % (num, os.path.basename(path))
+        except Exception:
+            return key
+
 if __name__=='__main__':
     # QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
     # QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
@@ -4311,6 +5522,7 @@ if __name__=='__main__':
     #     pass
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
     w=XModFit()
     w.setWindowTitle('XModFit')
@@ -4334,4 +5546,4 @@ if __name__=='__main__':
         
         
         
-    
+
