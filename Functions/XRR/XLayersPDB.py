@@ -23,7 +23,8 @@ try:
     from mendeleev.fetch import fetch_table
 except:
     from mendeleev import get_table
-from numba import njit, prange
+from numba import njit
+from XRR.XLayers import parratt_numba
 
 # Shared, input-keyed PDB read cached across ALL XLayersPDB* instances/variants
 # (keyed on fname, not self) -- see Functions/pdb_cache.py.
@@ -31,30 +32,6 @@ try:
     from Functions.pdb_cache import pdbread
 except Exception:
     from pdb_cache import pdbread
-
-
-@njit(parallel=False,cache=True)
-def parratt_numba(q,lam,d,rho,beta):
-    ref=np.ones_like(q)
-    refc=np.ones_like(q)*complex(1.0,0.0)
-    f1=16.0*np.pi*2.818e-5
-    f2=-32.0*np.pi**2/lam**2
-    Nl=len(d)
-    for j in prange(len(q)):
-        refc[j]=complex(0.0,0.0)
-        for it in range(1,Nl):
-            i=Nl-it
-            qc1=f1*(rho[i-1]-rho[0])
-            qc2=f1*(rho[i]-rho[0])
-            k1=np.sqrt(complex(q[j]**2-qc1,f2*beta[i-1]))
-            k2=np.sqrt(complex(q[j]**2-qc2,f2*beta[i]))
-            X=(k1-k2)/(k1+k2)
-            fact1=complex(np.cos(k2.real*d[i]),np.sin(k2.real*d[i]))
-            fact2=np.exp(-k2.imag*d[i])
-            fact=fact1*fact2
-            refc[j]=(X+refc[j]*fact)/(1.0+X*refc[j]*fact)
-        ref[j]=np.abs(refc[j])**2
-    return ref, refc
 
 @njit(parallel=False, cache=True)
 def protmembcomb(protmembpos, membpos, d, rho, mu, sig, protpos, protrho, layarea, cov):

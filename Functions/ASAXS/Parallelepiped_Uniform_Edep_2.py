@@ -51,7 +51,7 @@ def parallelopiped_ml(q, L, B, H, rho, Nphi, Npsi, HggtLB=True):
             qt = q[i]*sphi/2.0#((1.0-Nqt)+(1.0+Nqt)*q[i]*np.sin(phi)/2.0)/2.0
             for ipsi in prange(0, Npsi):
                 psi = ipsi*dpsi
-                tft = np.complex(0.0, 0.0)
+                tft = 0.0j
                 sc=qt*np.cos(psi)
                 ss=qt*np.sin(psi)
                 for k in prange(Nlayers-1):
@@ -308,7 +308,8 @@ class Parallelepiped_Uniform_Edep_2: #Please put the class name same as the func
                     self.output_params['simulated_w_err_' + Energy + 'keV'] = {'x': self.x[key], 'y': sqerr * minsignal,
                                                                                'yerr': np.sqrt(
                                                                                    normsignal) * minsignal * self.error_factor,
-                                                                               'meta': meta}
+                                                                               'meta': meta,
+                                                                               'names':['q (Angs<sup>-1</sup>)', 'I (cm<sup>-1</sup>)', 'Ierr (cm<sup>-1</sup>)']}
         else:
             rho, eirho, adensity, rhor, eirhor, adensityr, cdensityr = calc_rho(R=tuple(self.__L__), material=self.__material__,
                                                                      relement=self.relement,
@@ -363,12 +364,14 @@ class Parallelepiped_Uniform_Edep_2: #Please put the class name same as the func
                     self.output_params['simulated_w_err_%.3fkeV' % self.Energy] = {'x': self.x, 'y': sqerr * minsignal,
                                                                                    'yerr': np.sqrt(
                                                                                        normsignal) * minsignal * self.error_factor,
-                                                                                   'meta': meta}
+                                                                                   'meta': meta,
+                                                                                   'names':['q (Angs<sup>-1</sup>)', 'I (cm<sup>-1</sup>)', 'Ierr (cm<sup>-1</sup>)']}
                 else:
                     self.output_params['simulated_w_err'] = {'x': self.x, 'y': sqerr * minsignal,
                                                              'yerr': np.sqrt(
                                                                  normsignal) * minsignal * self.error_factor,
-                                                             'meta': meta}
+                                                             'meta': meta,
+                                                             'names':['q (Angs<sup>-1</sup>)', 'I (cm<sup>-1</sup>)', 'Ierr (cm<sup>-1</sup>)']}
                 self.output_params['Structure_Factor'] = {'x': self.x, 'y': struct}
                 self.output_params['rho_r'] = {'x': rhor[:, 0], 'y': rhor[:, 1]}
                 self.output_params['eirho_r'] = {'x': eirhor[:, 0], 'y': eirhor[:, 1]}
