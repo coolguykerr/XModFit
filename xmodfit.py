@@ -1157,7 +1157,11 @@ class XModFit(QWidget):
                 self.runFit(emcee_walkers=emcee_walkers, emcee_steps=emcee_steps, emcee_burn=emcee_burn,
                             emcee_cores=emcee_cores, reuse_sampler=reuse_sampler, emcee_thin=emcee_thin,
                             backend=backend)
-                if self.fit_stopped:
+                if self.fit_stopped and self.fit_method != 'emcee' and getattr(self, 'temp_params', None) is not None:
+                    # Restore the best params captured by fitCallback when a
+                    # least-squares fit is aborted. Skip for emcee: fitErrorCallback
+                    # never sets temp_params, so this would either crash (never set)
+                    # or restore stale params from a prior least-squares fit.
                     self.fit.result.params = copy.copy(self.temp_params)
                 #self.fit_report,self.fit_message=self.fit.perform_fit(self.xmin,self.xmax,fit_scale=self.fit_scale,\
                 # fit_method=self.fit_method,callback=self.fitCallback)
@@ -2266,7 +2270,12 @@ class XModFit(QWidget):
             self.emceeConfIntervalWidget.stopSamplingPushButton.clicked.disconnect()
 
     def closeFitInfoDlg(self):
-        self.fitInfoDlg.done(0)
+        # Only the non-emcee branch of showFitInfoDlg creates fitInfoDlg; for
+        # emcee there is no dialog to close. Guard so the unconditional call in
+        # doFit doesn't crash on an MCMC run.
+        if getattr(self, 'fitInfoDlg', None) is not None:
+            self.fitInfoDlg.done(0)
+            self.fitInfoDlg = None
 
         
 
@@ -2354,6 +2363,12 @@ class XModFit(QWidget):
 
     def perform_post_sampling_tasks(self):
         #self.emceeConfIntervalWidget.progressBar.setValue(self.emcee_steps)
+        # final_fit_params is normally set by a preceding least-squares fit and is
+        # used as the "truth" reference by cornerPlot, the user-defined MCMC params,
+        # and the errorbar table. When MCMC is run without a prior least-squares fit
+        # it is never set, so seed it from the current fit result here.
+        if getattr(self, 'final_fit_params', None) is None:
+            self.final_fit_params = copy.copy(self.fit.result.params)
         if self.funcListWidget.currentItem().text() == 'XLayersPDB' or self.funcListWidget.currentItem().text() == 'XLayersPDB_box':
             angleindex = np.zeros(len(self.fit.result.var_names))
             ind = 0

@@ -106,6 +106,13 @@ def integrated_time(x, angleindex, c=5, tol=50, quiet=False, has_walkers=True):
         raise ValueError("invalid dimensions")
 
     n_t, n_w, n_d = x.shape
+    # angleindex must provide one flag per parameter dimension (0 = standard
+    # autocorrelation, 3 = angular). lmfit's internal get_autocorr_time() call
+    # passes no angleindex, so custombackend defaults to [] -- pad missing/short
+    # entries with 0 to avoid an IndexError and reproduce stock behavior.
+    if angleindex is None:
+        angleindex = []
+    angleindex = list(angleindex) + [0] * (n_d - len(angleindex))
     tau_est = np.empty(n_d)
     windows = np.empty(n_d, dtype=int)
 
