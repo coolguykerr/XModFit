@@ -1,0 +1,25 @@
+# Extra Python requirements for the XLayersPDB_XPR function (Julia/XPR backend).
+# Everything else it needs -- numpy, biopython, mendeleev, lmfit, emcee -- is
+# already part of XModFit proper.
+#
+#   pip install -r requirements_xpr.txt
+#
+# juliacall is the only direct dependency; the rest are its transitive deps, pinned
+# here because the versions actually verified together are worth recording.
+#
+# Pin juliacall deliberately: juliapkg writes the PythonCall version into the shared
+# Julia project as an exact "=x.y.z" compat bound, so two Python environments running
+# DIFFERENT juliacall versions against the same Julia project will fight over it and
+# re-resolve on every startup.
+juliacall==0.9.28
+juliapkg==0.1.26
+filelock==3.19.1
+semver==3.0.4
+tomli==2.4.1        ; python_version < "3.11"
+tomlkit==0.15.1
+
+# NOT a pip package: the Julia runtime itself (1.11.9, ~1 GB installed) is downloaded
+# automatically by juliapkg on the first `import juliacall`, and the Julia packages
+# (ForwardDiff, SpecialFunctions) come from julia/XPR/Manifest.toml on the first
+# `using XPR`. See julia/README.md, including the two environment variables that
+# decide WHERE that 1 GB lands.
