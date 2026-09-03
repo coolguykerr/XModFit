@@ -232,12 +232,50 @@ def main():
           w.data[ck][_k0].get('color') == w._curve_color_for(ck, _k0))
     jp2 = w.jointFitPanel
     if jp2.datasetList.count() > 0:
-        w.dataListWidget.setCurrentRow(0)
-        check("selecting individual clears the joint selection",
-              len(jp2.datasetList.selectedItems()) == 0)
-        jp2.datasetList.item(0).setSelected(True)
-        check("selecting joint clears the individual selection",
+        # Item B2 selection model: PLAIN click = mutually exclusive lists (classic);
+        # Ctrl+click = overlay individual (dashed) + joint (solid). Headless can't set
+        # real keyboard state, so override the isolated modifier probe.
+        dk = w.dataListWidget.item(0).text()
+        if dk in w.dataset_fits:
+            w.dataset_fits[dk]._is_fitted = True     # ensure an individual curve exists
+
+        # ---- default (no modifier): lists stay MUTUALLY EXCLUSIVE ----
+        w._overlay_modifier_active = lambda: False
+        jp2.datasetList.clearSelection(); w.dataListWidget.clearSelection()
+        for i in range(jp2.datasetList.count()):
+            if jp2.datasetList.item(i).text() == dk:
+                jp2.datasetList.item(i).setSelected(True)   # plain-select joint
+        check("plain click: selecting joint clears the individual selection",
               len(w.dataListWidget.selectedItems()) == 0)
+        w.dataListWidget.item(0).setSelected(True)          # plain-select individual
+        check("plain click: selecting individual clears the joint selection",
+              len(jp2.datasetList.selectedItems()) == 0)
+
+        # ---- Ctrl held: OVERLAY (both lists coexist) ----
+        w._overlay_modifier_active = lambda: True
+        jp2.datasetList.clearSelection(); w.dataListWidget.clearSelection()
+        for i in range(jp2.datasetList.count()):
+            if jp2.datasetList.item(i).text() == dk:
+                jp2.datasetList.item(i).setSelected(True)
+        w.dataListWidget.item(0).setSelected(True)
+        check("Ctrl+click keeps both selections (overlay enabled)",
+              len(jp2.datasetList.selectedItems()) > 0 and len(w.dataListWidget.selectedItems()) > 0)
+        # check the CURRENTLY-plotted curves for THIS dataset (individual-view fits also
+        # use [indiv:N] keys now, so scan selDataNames for dk's fnum, not the whole dict)
+        _fnum = dk.split('<>')[0]
+        _plotted = list(getattr(w.plotWidget, 'selDataNames', []) or [])
+        _iname = next((k for k in _plotted if ('[indiv:%s]' % _fnum) in k), None)
+        check("Ctrl overlay draws individual+joint curves",
+              _iname is not None and any(('[joint:%s]' % _fnum) in k for k in _plotted))
+        check("overlaid individual curve is dashed",
+              _iname is not None and w.plotWidget.linestyle.get(_iname) == Qt.DashLine)
+
+        # ---- blank-click / deselect-all in the joint list clears the joint view ----
+        w._overlay_modifier_active = lambda: False
+        w.dataListWidget.clearSelection()      # nothing individual selected
+        jp2.datasetList.clearSelection()       # -> _on_dataset_list_selection(empty) -> clear_joint_view
+        check("blank-click in the joint list clears the plot (no curves shown)",
+              len(getattr(w.plotWidget, 'selDataNames', [1])) == 0)
     # loading a .par marks the (individual) dataset already-fit
     w.dataListWidget.setCurrentRow(0)
     dk = w.dataListWidget.item(0).text()
