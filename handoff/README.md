@@ -35,6 +35,16 @@ from the state *before* all of the above.
 
 ## 2. The change set has three buckets
 
+> **Superseded 2026-09-03, later the same day.** Everything that was uncommitted or
+> untracked has since been committed to `develop` in eight themed commits, `0296ec3`
+> through `b2b76ac`. The bucket statements throughout this directory — including every
+> category document's section 2, and the many "untracked working-tree only" notes —
+> describe the state at the time of writing, i.e. at `babe1aa`. They are still the right
+> guide to *what was ours versus upstream's*, which is what the merge cares about; they
+> are no longer a statement about risk of loss. Deliberately left out of those commits:
+> the personal PDB structures and test outputs in `Data/`, `xmodfit_old.py`, the
+> in-flight `Bnarrow` bake-off arm, and the two modified `.idea/` files.
+
 Every category document records which bucket each of its files is in, because the
 merge treats them very differently.
 
