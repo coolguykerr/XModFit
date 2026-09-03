@@ -1,0 +1,1651 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GID explorer — how a monolayer diffracts</title>
+<style>
+:root{
+  --page:#F1F5F8; --panel:#FFFFFF; --rule:#C7D3DB; --rule2:#E5EBEF;
+  --ink:#14212A; --dim:#51687A; --faint:#8DA1AE;
+  --c11:#C2410C; --c1m1:#0E7490; --c02:#6D28D9;
+  --beam:#B45309; --lit:#15803D;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:"Helvetica Neue",Inter,system-ui,-apple-system,Arial,sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);font-family:var(--sans);
+  font-size:14px;line-height:1.45;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1200px;margin:0 auto;padding:16px 16px 24px}
+header{border-bottom:2px solid var(--ink);padding-bottom:8px;margin-bottom:14px}
+h1{margin:0;font-size:20px;font-weight:680;letter-spacing:-.012em}
+h1 span{color:var(--dim);font-weight:400}
+.sub{margin:3px 0 0;color:var(--dim);font-size:12.5px;max-width:88ch}
+.stage{display:grid;
+  grid-template-columns:minmax(0,1fr) minmax(0,1.1fr) minmax(0,0.80fr);
+  gap:12px;align-items:start}
+.col{display:flex;flex-direction:column;gap:13px}
+.card{background:var(--panel);border:1px solid var(--rule);border-radius:4px;
+  padding:9px 11px 11px;box-shadow:0 1px 2px rgba(20,33,42,.05)}
+.card h2{margin:0 0 6px;font-size:10.5px;font-weight:700;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--faint)}
+.card h2 em{font-style:normal;text-transform:none;letter-spacing:0;
+  font-weight:400;font-size:11px;color:var(--dim)}
+canvas{display:block;width:100%;border-radius:2px}
+.sq{width:100%;aspect-ratio:1/1}
+pre.read{font-family:var(--mono);font-size:11.3px;line-height:1.58;margin:0;
+  color:var(--dim);white-space:pre-wrap}
+pre.read b{color:var(--ink);font-weight:650}
+pre.read u{color:var(--lit);text-decoration:none;font-weight:650}
+.ctrl{display:grid;grid-template-columns:1fr;gap:2px}
+.grp{border-top:1px solid var(--rule);padding-top:6px}
+.grp>h3{margin:0 0 2px;font-size:9.5px;letter-spacing:.12em;font-weight:700;
+  text-transform:uppercase;color:var(--faint)}
+.row{display:grid;grid-template-columns:84px 1fr 58px 40px;align-items:center;
+  gap:6px;padding:1px 0}
+.row label{font-family:var(--mono);font-size:11.2px;color:var(--dim)}
+input.num{font-family:var(--mono);font-size:11.2px;text-align:right;
+  color:var(--ink);background:#fff;border:1px solid var(--rule);
+  border-radius:2px;padding:2px 3px;width:100%;-moz-appearance:textfield}
+input.num::-webkit-outer-spin-button,input.num::-webkit-inner-spin-button{
+  -webkit-appearance:none;margin:0}
+input.num:focus{outline:none;border-color:var(--beam);
+  box-shadow:0 0 0 2px rgba(180,83,9,.18)}
+input.num.clamped{border-color:var(--flag);background:#FEF2F2}
+.row .unit{font-family:var(--mono);font-size:10.5px;color:var(--faint);
+  white-space:nowrap;overflow:visible}
+.fitbar{font-family:var(--mono);font-size:11px;color:var(--dim);
+  border-top:1px solid var(--rule);margin-top:8px;padding-top:7px}
+.fitbar b{color:var(--lit)}
+.fitbar i{color:var(--faint);font-style:normal}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:15px;
+  background:transparent;cursor:ew-resize}
+input[type=range]::-webkit-slider-runnable-track{height:3px;
+  background:var(--rule);border-radius:2px}
+input[type=range]::-moz-range-track{height:3px;background:var(--rule);
+  border-radius:2px}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;
+  height:13px;border-radius:50%;background:var(--acc,var(--ink));
+  margin-top:-5px;border:1.5px solid #fff}
+input[type=range]::-moz-range-thumb{width:13px;height:13px;border-radius:50%;
+  background:var(--acc,var(--ink));border:1.5px solid #fff}
+input[type=range]:focus-visible{outline:2px solid var(--beam);outline-offset:3px}
+.btns{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:6px;margin-top:9px;
+  align-items:center;border-top:1px solid var(--rule);padding-top:9px}
+button{font-family:var(--sans);font-size:12px;color:var(--ink);background:#fff;
+  border:1px solid var(--rule);border-radius:3px;padding:6px 11px;cursor:pointer}
+button:hover{border-color:var(--dim);background:#FBFDFE}
+button:focus-visible{outline:2px solid var(--beam);outline-offset:2px}
+button.on{border-color:var(--lit);color:var(--lit);background:#F0FDF4}
+button.pre{border-color:#C4B5FD;color:#5B21B6;background:#FAF7FF}
+.hint{font-size:11.3px;color:var(--faint)}
+footer{margin-top:13px;border-top:1px solid var(--rule);padding-top:8px;
+  font-size:11.5px;color:var(--faint);max-width:106ch}
+footer b{color:var(--dim);font-weight:650}
+@media (max-width:1080px){
+  .stage{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+}
+@media (max-width:820px){
+  .stage{grid-template-columns:1fr}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+<header>
+  <h1>GID explorer <span>/ how a monolayer diffracts</span></h1>
+  <p class="sub">Rotate one domain to bring each reflection into condition in
+    turn, then open the azimuthal spread to a 2D powder and see them all at
+    once. Chain tilt pushes peaks out of the surface plane.</p>
+</header>
+
+<div class="stage">
+  <div class="col">
+    <div class="card">
+      <h2>Reciprocal space <em>— rods, and the Ewald dome</em></h2>
+      <canvas id="ew" style="height:322px"></canvas>
+    </div>
+    <div class="card">
+      <h2>The monolayer in 3D <em>— tilted chains, both hexagons</em></h2>
+      <canvas id="three" style="height:296px"></canvas>
+    </div>
+  </div>
+  <div class="col">
+    <div class="card">
+      <h2>Area detector <em id="detsub">— 2&theta; across, &alpha;<sub>f</sub> up</em></h2>
+      <canvas id="det" style="height:208px"></canvas>
+      <canvas id="cut" style="height:62px;margin-top:3px"></canvas>
+    </div>
+    <div class="card">
+      <h2>Peak 2&theta; vs energy <em>— and where it stops existing</em></h2>
+      <canvas id="escan" style="height:158px"></canvas>
+    </div>
+    <div class="card">
+      <h2>The two real lattices <em>— overlaid; tilt is the offset</em></h2>
+      <canvas id="nets" style="height:196px"></canvas>
+    </div>
+  </div>
+  <div class="col">
+    <div class="card">
+      <h2>Controls</h2>
+      <div class="ctrl">
+        <div class="grp"><h3>Orientation &amp; beam</h3><div id="gA"></div></div>
+        <div class="grp"><h3>Lattice &amp; chain tilt</h3><div id="gB"></div></div>
+        <div class="btns">
+          <button id="bSpin">Spin</button>
+          <button id="bPow">Powder</button>
+          <button id="bSingle">Single domain</button>
+          <button id="bNets" class="on">Nets</button>
+          <button id="bIdx" class="on">Indices</button>
+          <button class="pre" data-pre="hex">Hexagonal</button>
+          <button class="pre" data-pre="dppcNN">DPPC NN</button>
+          <button class="pre" data-pre="dppcNNN">DPPC NNN</button>
+          <button id="bCheck">Run checks</button>
+        </div>
+      </div>
+    </div>
+    <div class="card"><h2>Readout</h2><pre class="read" id="read"></pre>
+      <div class="fitbar" id="fitbar"></div></div>
+  </div>
+</div>
+
+<footer>
+  <b>Two ideas the panels are built around.</b> First, the X-ray is a plane wave
+  across a whole domain, so the amplitude is
+  &Sigma;&#8202;exp(&minus;i&#8202;Q&middot;r) &mdash; the Fourier transform of
+  the density. Shifting a domain sideways multiplies it by
+  exp(&minus;i&#8202;Q&middot;&Delta;), which cancels in |F|&sup2;: only
+  <b>G</b> matters, never where the domain sits. Second, a single domain meets
+  Q<sub>xy</sub> = G at isolated azimuths only, but a monolayer is a mosaic
+  covering every in-plane angle, so each |G| always has some domain in
+  condition. The tilt azimuth rotates with its own domain, so
+  Q<sub>z</sub> survives the averaging untouched.
+  &nbsp;<b>Fixed behind the scenes:</b> &alpha;<sub>i</sub> = 0.11&deg; (below
+  &alpha;<sub>c</sub> &asymp; 0.12&deg; for water at 10 keV; it sets penetration
+  depth, not the diffraction condition), &Delta;E/E = 1.4&times;10<sup>&minus;4</sup>
+  for Si(111), domain-size spread 20%.
+  &nbsp;<b>Not modelled:</b> refraction and the Vineyard factor, polarisation and
+  effective-area corrections, and the molecular form factor &mdash; so the real
+  (02):(11) intensity ratio, which is sensitive to backbone-plane orientation, is
+  not reproduced. Positions are exact. Peak <em>heights</em> and
+  q<sub>z</sub>-<em>integrated</em> intensities are different quantities here: a
+  rod centred at q<sub>z</sub>=0 is halved by the horizon, so the integrated
+  (11):(02) ratio comes out near 2:1 while the heights are nearer 1:1.
+  &nbsp;<b>Detector axes.</b> q<sub>z</sub> depends on &alpha;<sub>f</sub> alone,
+  so the right-hand scale is exact; |Q<sub>xy</sub>| depends on
+  &alpha;<sub>f</sub> as well as 2&theta;, so the top scale is drawn as the feet
+  of its own iso-q<sub>xy</sub> curves and is read off the curve, not the edge.
+  <em>Indices</em> names the peaks the image actually contains; ones that
+  coincide exactly &mdash; (11) and (1&#772;1) under NN tilt &mdash; share a
+  label, and &darr; marks a rod whose maximum is below the horizon.
+</footer>
+</div>
+
+<script>
+"use strict";
+/* Injected by GIDViewerDialog.build_html; {} when opened standalone. */
+const XMODFIT_CFG = __CFG__;
+const TAU=2*Math.PI, D2R=Math.PI/180, R2D=180/Math.PI, HC=12.39842;
+const MONO=px=>px+'px ui-monospace,"SF Mono",Menlo,Consolas,monospace';
+const KEYS=["11","1m1","02"];
+const COL={"11":"#C2410C","1m1":"#0E7490","02":"#6D28D9"};
+const NICE={"11":"(11)","1m1":"(1\u03041)","02":"(02)"};
+const L_CHAIN=19.0;
+
+/* exposed: azim, spread, energy, a0, tilt, tpsi, eps, L
+   fixed:   ai, dEE, sL  (see footer) */
+const P={azim:0,spread:0,energy:10,a0:4.8743,tilt:18.85,tpsi:0,eps:-0.0321,
+         L:200, ai:0.11, dEE:1.4e-4, sL:0.20};
+
+const PRESETS={
+  hex:{a0:4.84,tilt:0,tpsi:0,eps:0,L:250,
+    note:"Untilted hexagonal (rotator / LS-like): one peak, q_z = 0."},
+  dppcNN:{a0:4.8743,tilt:18.85,tpsi:0,eps:-0.0321,L:200,
+    note:"DPPC monolayer, NN tilt. Matches Bera et al. ACS Omega 2020: "+
+         "q = 1.464 (q_z = 0.43) and 1.489 (q_z ~ 0), 42.1 A^2/molecule."},
+  dppcNNN:{a0:4.9137,tilt:26.56,tpsi:90,eps:0,L:200,
+    note:"NNN tilt: q_z = 0.33 and 0.66, an exact 1:2 ratio, t = 26.6 deg. "+
+         "From a DPPC MULTILAYER figure caption, not a monolayer."}
+};
+
+/* -------------------------------------------------------------- lattice -- */
+function model(){
+  const t=P.tilt*D2R, psi=P.tpsi*D2R, th=[Math.cos(psi),Math.sin(psi)];
+  const f=1/Math.cos(t)-1;
+  const S=v=>{const p=v[0]*th[0]+v[1]*th[1];
+              return [v[0]+f*p*th[0], v[1]+f*p*th[1]];};
+  const E=v=>[v[0]*(1+P.eps), v[1]];
+  const A1=E(S([P.a0,0])), A2=E(S([0,Math.sqrt(3)*P.a0]));
+  const det=A1[0]*A2[1]-A1[1]*A2[0];
+  const b1=[TAU*A2[1]/det,-TAU*A2[0]/det], b2=[-TAU*A1[1]/det,TAU*A1[0]/det];
+  const base={"11":[b1[0]+b2[0],b1[1]+b2[1]],
+              "1m1":[b1[0]-b2[0],b1[1]-b2[1]], "02":[2*b2[0],2*b2[1]]};
+  const G=[];
+  for(const k of KEYS){
+    const g=base[k];
+    for(const s of [1,-1]){
+      const gs=[s*g[0],s*g[1]];
+      /* SIGNED q_z. The rod maxima lie on the plane Q.n = 0, so the six
+         first-order points split three above the horizon and three below --
+         a tilt, not a fold. Taking |q_z| here would put a full maximum above
+         the horizon for all six, which is wrong for a single domain and
+         double-counts Friedel mates in a powder (it inflates off-plane peaks
+         by ~2x: the (11):(02) ratio comes out 3.8 instead of 2.0). A rod
+         centred at q_z = 0 is halved by the horizon, which is what actually
+         produces the observed 2:1. */
+      G.push({key:k,g:gs,q:Math.hypot(g[0],g[1]),
+              qz:-(gs[0]*th[0]+gs[1]*th[1])*Math.tan(t)});
+    }
+  }
+  /* area needs |b1 x b2|, not |b1||b2|: those agree only for a rectangular
+     cell (psi = 0 or 90). At an intermediate tilt azimuth the cell is oblique
+     and the norm form overstates the area by several per cent. */
+  const bx=Math.abs(b1[0]*b2[1]-b1[1]*b2[0]);
+  /* The chain axis and an orthonormal basis of the plane PERPENDICULAR to it.
+     Projecting the surface lattice into that plane undoes the tilt stretch, so
+     what remains is the true chain packing: exactly hexagonal when the extra
+     (backbone) strain is zero, whatever the tilt magnitude or azimuth. */
+  const nv=[Math.sin(t)*th[0],Math.sin(t)*th[1],Math.cos(t)];
+  const cr=(u,v)=>[u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]];
+  const nz=u=>{const m=Math.hypot(...u);return u.map(x=>x/m);};
+  const e2=nz(cr([0,0,1],[th[0],th[1],0])), e1=nz(cr(nv,e2));
+  const perp=v2=>{const v=[v2[0],v2[1],0];
+    const d=v[0]*nv[0]+v[1]*nv[1]+v[2]*nv[2];
+    const q=[v[0]-d*nv[0],v[1]-d*nv[1],v[2]-d*nv[2]];
+    return [q[0]*e1[0]+q[1]*e1[1]+q[2]*e1[2],
+            q[0]*e2[0]+q[1]*e2[1]+q[2]*e2[2]];};
+  const P1=perp(A1), P2=perp(A2);
+  return {G,area:2*Math.PI*Math.PI/bx,a:Math.hypot(...A1),
+          b:Math.hypot(...A2),t,psi,A1,A2,b1,b2,nv,e1,e2,P1,P2,
+          pa:Math.hypot(...P1), pb:Math.hypot(...P2)};
+}
+const kOf=()=>TAU/(HC/P.energy);
+const kpOf=()=>kOf()*Math.cos(P.ai*D2R);
+const rot=(v,a)=>[v[0]*Math.cos(a)-v[1]*Math.sin(a),
+                  v[0]*Math.sin(a)+v[1]*Math.cos(a)];
+const sigOf=Lv=>(TAU/Math.max(20,Lv))/2.3548;
+const ZS=[-1.2,0,1.2], WS=[0.27,0.46,0.27];
+function sigmasFor(q){
+  const o=[]; let tot=0;
+  for(let i=0;i<3;i++){
+    o.push({s:Math.hypot(sigOf(P.L*(1+P.sL*ZS[i])),q*P.dEE),w:WS[i]});
+    tot+=WS[i];
+  }
+  o.forEach(x=>x.w/=tot); return o;
+}
+const sinc=x=>x===0?1:Math.sin(Math.PI*x)/(Math.PI*x);
+const rodAt=(qz,qz0,t)=>{const v=sinc(L_CHAIN*Math.cos(t)*(qz-qz0)/(2*Math.PI));
+                         return v*v;};
+function pOrient(phi){
+  const w=P.spread*D2R;
+  if(w<=1e-9) return 0;
+  if(w>=TAU-1e-9) return 1/TAU;
+  let d=phi-P.azim*D2R; d=((d+Math.PI)%TAU+TAU)%TAU-Math.PI;
+  return Math.abs(d)<=w/2 ? 1/w : 0;
+}
+
+/* ------------------------------------------------------------- detector -- */
+const NT=320, NA=132, TTH=40*D2R, AFM=12*D2R;
+const IMG=new Float64Array(NT*NA), CUT=new Float64Array(NT);
+const tthAt=i=>-TTH+2*TTH*i/(NT-1), afAt=j=>AFM*j/(NA-1);
+
+function computeDetector(){
+  IMG.fill(0);
+  const M=model(), k=kOf(), kp=kpOf(), sai=Math.sin(P.ai*D2R),
+        t=M.t, nG=M.G.length;
+  const wAng=sigOf(P.L)/1.5, useRing=(P.spread*D2R)>8*wAng;
+  const nodes=M.G.map(R=>sigmasFor(R.q));
+  const cut2=nodes.map(nd=>25*Math.max(...nd.map(n=>n.s*n.s)));
+  const cutR=nodes.map(nd=>5*Math.max(...nd.map(n=>n.s)));
+  const gAng=M.G.map(R=>Math.atan2(R.g[1],R.g[0]));
+  let offs=[0];
+  if(!useRing && P.spread>1e-6){
+    const Md=Math.min(400,Math.max(3,Math.ceil(6*P.spread*D2R/wAng)));
+    offs=Array.from({length:Md},(_,i)=>(-P.spread/2+P.spread*i/(Md-1))*D2R);
+  }
+  const GR=offs.map(o=>M.G.map(R=>rot(R.g,P.azim*D2R+o))), invM=1/offs.length;
+  const ROD=new Float64Array(nG*NA);
+  for(let g=0;g<nG;g++) for(let j=0;j<NA;j++)
+    ROD[g*NA+j]=rodAt(k*(Math.sin(afAt(j))+sai),M.G[g].qz,t);
+  for(let j=0;j<NA;j++){
+    const kc=k*Math.cos(afAt(j));
+    for(let i=0;i<NT;i++){
+      const tt=tthAt(i);
+      const qx=kc*Math.cos(tt)-kp, qy=kc*Math.sin(tt);
+      const qm=Math.sqrt(qx*qx+qy*qy);
+      if(qm<1e-6) continue;
+      const qAng=useRing?Math.atan2(qy,qx):0;
+      let val=0;
+      for(let g=0;g<nG;g++){
+        const rod=ROD[g*NA+j];
+        if(rod<1e-4) continue;
+        const nd=nodes[g], R=M.G[g];
+        if(useRing){
+          const dr=qm-R.q;
+          if(Math.abs(dr)>cutR[g]) continue;
+          const pd=pOrient(qAng-gAng[g]);
+          if(pd<=0) continue;
+          const pref=rod*pd*Math.sqrt(TAU)/Math.sqrt(qm*R.q);
+          for(let n=0;n<nd.length;n++){
+            const sg=nd[n].s;
+            val+=pref*nd[n].w*sg*Math.exp(-dr*dr/(2*sg*sg));
+          }
+        }else{
+          for(let o=0;o<offs.length;o++){
+            const gr=GR[o][g];
+            const dx=qx-gr[0], dy=qy-gr[1], s2=dx*dx+dy*dy;
+            if(s2>cut2[g]) continue;
+            for(let n=0;n<nd.length;n++){
+              const sg=nd[n].s;
+              val+=rod*nd[n].w*Math.exp(-s2/(2*sg*sg))*invM;
+            }
+          }
+        }
+      }
+      IMG[j*NT+i]=val;
+    }
+  }
+  CUT.fill(0);
+  for(let i=0;i<NT;i++){let s=0;for(let j=0;j<NA;j++)s+=IMG[j*NT+i];CUT[i]=s;}
+}
+
+/* ---- the detector's own coordinates, and the map to (q_xy, q_z) ------------
+   Exit angles and q are related by
+       q_z   = k (sin a_f + sin a_i)
+       |Q_xy|^2 = (k cos a_f)^2 + k'^2 - 2 k' (k cos a_f) cos 2th,  k' = k cos a_i
+   The cos a_f in the second line is the part that is easy to drop: the
+   horizontal wavevector shrinks as the photon leaves upwards, so a rod at
+   q_z > 0 does NOT sit at the 2th its |G| would give in the plane. Both the
+   resampled image and the peak labels below go through these two equations in
+   this order, so neither can drift from the other. */
+const iOfT=tt=>Math.min(NT-1,Math.max(0,Math.round((tt+TTH)/(2*TTH)*(NT-1))));
+const jOfA=af=>Math.min(NA-1,Math.max(0,Math.round(af/AFM*(NA-1))));
+function qFrame(){
+  const k=kOf(), kp=kpOf(), si=Math.sin(P.ai*D2R);
+  return {k,kp,si,
+          qxMax:Math.hypot(k*Math.cos(TTH)-kp,k*Math.sin(TTH)),
+          qzMax:k*(Math.sin(AFM)+si)};
+}
+/* (|Q_xy|, q_z) -> (2th >= 0, a_f), or null outside the measured window. The
+   window is a rectangle in ANGLE, so in q it is a barrel with the corners cut
+   off; those pixels are genuinely unmeasured and are left blank, not filled in.
+   q_z < k sin a_i is inaccessible (it needs a_f < 0), but that floor is
+   0.01 A^-1 here -- far below one pixel -- so it is clamped to the a_f = 0 row
+   rather than punching a blank strip along the axis. */
+/* Split in two so a row of constant q_z can hoist the first half out of the
+   pixel loop without restating the equations anywhere. */
+function afFromQz(qz,F){
+  let sa=qz/F.k-F.si;
+  if(sa<0){ if(qz<0) return null; sa=0; }
+  if(sa>1) return null;
+  const af=Math.asin(sa);
+  if(af>AFM) return null;
+  const kc=F.k*Math.cos(af);
+  return {af,j:jOfA(af),base:kc*kc+F.kp*F.kp,den:2*kc*F.kp};
+}
+function ttFromQxy(qxy,row,F){
+  const ct=(row.base-qxy*qxy)/row.den;
+  if(ct<-1||ct>1) return null;
+  const tt=Math.acos(ct);
+  return tt>TTH?null:tt;
+}
+function angFromQ(qxy,qz,F){
+  const row=afFromQz(qz,F); if(!row) return null;
+  const tt=ttFromQxy(qxy,row,F);
+  return tt===null?null:[tt,row.af];
+}
+/* ---- which reflections land where on the detector, and under what index ----
+   A spot sits at |Q_xy| = |G| and q_z = q_z^G, so the exit angle comes from
+   q_z first and the in-plane angle from |G| at THAT exit angle.
+
+   Three things this has to get right, none of them obvious:
+
+   (1) Which domain can put a given G at a given spot. Only one at azimuth
+   phi_req = (azimuth of Q_xy at the spot) - (azimuth of G in the domain frame).
+   Under NN tilt (11) and (1b1) land on exactly the same spot -- they differ
+   only in the sign of the component along b -- but they light 61 deg apart in
+   phi_s, so for a single domain only one of them is there. Merging them into a
+   single label unconditionally would credit the spot to a reflection nowhere
+   near condition. phi_req must fall inside the orientation window, widened by
+   3 sigma of the azimuthal resonance, sigma_q/|G|. This is also what silences
+   the labels entirely when a single domain is out of condition.
+
+   (2) Rods whose maximum is BELOW the horizon. Those exist -- three of the six
+   for any tilt -- and in a powder Friedel symmetry puts an identical rod at
+   +|q_z| that is the thing you actually see, so labelling the lower one too
+   would double-label. But a single domain does NOT get the twin: the twin is
+   in condition at a different azimuth. What reaches the detector then is the
+   rod's tail crossing the horizon, at a_f = 0, and it is a real feature of the
+   image. So the lower member is kept only when its own twin failed test (1),
+   and is flagged so it can be drawn as what it is -- a clipped tail, not a
+   maximum. Taking |q_z| instead, which would make all six look observable, is
+   the standard way to get this wrong.
+
+   (3) Whether the computed image actually shows anything there. The intensity
+   gate at the end drops candidates the model does not support, so no label ever
+   points at blank detector. */
+function detPeaks(){
+  const M=model(), F=qFrame(), cand=[];
+  for(const R of M.G){
+    const below=R.qz<-1e-9;
+    const af=Math.asin(Math.min(1,Math.max(0,R.qz/F.k-F.si)));
+    if(af>AFM) continue;
+    const a=angFromQ(R.q,F.k*(Math.sin(af)+F.si),F);
+    if(!a) continue;
+    const kc=F.k*Math.cos(a[1]), gA=Math.atan2(R.g[1],R.g[0]);
+    const tol=P.spread*D2R/2+3*sigOf(P.L)/Math.max(1e-6,R.q);
+    for(const sg of [1,-1]){
+      const tt=sg*a[0];
+      const need=Math.atan2(kc*Math.sin(tt),kc*Math.cos(tt)-F.kp)-gA;
+      const dphi=((need-P.azim*D2R+Math.PI)%TAU+TAU)%TAU-Math.PI;
+      if(Math.abs(dphi)<=tol)
+        cand.push({key:R.key,q:R.q,tt,af:a[1],qz:Math.max(0,R.qz),below,
+                   grp:R.key+"|"+R.q.toFixed(4)+"|"+sg});
+      if(a[0]<1e-9) break;             /* 2th = 0: one spot, not two */
+    }
+  }
+  /* (2): drop a below-horizon member whose own twin made it through */
+  const hasUp=new Set(cand.filter(p=>!p.below).map(p=>p.grp));
+  const at=new Map();
+  for(const p of cand){
+    if(p.below&&hasUp.has(p.grp)) continue;
+    /* toFixed(3) rad = 0.06 deg: merges what no detector could resolve,
+       keeps genuinely split reflections apart. */
+    const kk=p.tt.toFixed(3)+"|"+p.af.toFixed(3), e=at.get(kk);
+    if(e){ if(!e.keys.includes(p.key)){ e.keys.push(p.key);
+             e.below=e.below&&p.below; } }
+    else at.set(kk,{tt:p.tt,af:p.af,q:p.q,qz:p.qz,below:p.below,keys:[p.key]});
+  }
+  let mx=1e-12; for(let i=0;i<IMG.length;i++) if(IMG[i]>mx) mx=IMG[i];
+  const out=[];
+  for(const p of at.values()){
+    const i0=iOfT(p.tt), j0=jOfA(p.af);
+    let v=0;
+    for(let di=-3;di<=3;di++) for(let dj=-2;dj<=2;dj++){
+      const i=i0+di, j=j0+dj;
+      if(i<0||i>=NT||j<0||j>=NA) continue;
+      if(IMG[j*NT+i]>v) v=IMG[j*NT+i];
+    }
+    if(v>0.04*mx) out.push(Object.assign({v:v/mx},p));
+  }
+  return out.sort((A,B)=>A.v-B.v);
+}
+
+/* Radius of the Ewald cross-section a reflection must meet. The rod maximum
+   sits at Q_z; if that is below the horizon (Q_z < k sin ai) the lowest
+   accessible height is used instead. ONE definition, shared by the condition
+   test and the drawing, so the panel cannot disagree with the physics. */
+function rEwald(qz,k,si){
+  const u=Math.max(k*si,qz)-k*si, v=k*k-u*u;
+  return v>0?Math.sqrt(v):NaN;
+}
+function litNow(){
+  const M=model(), k=kOf(), kp=kpOf(), si=Math.sin(P.ai*D2R),
+        s=sigOf(P.L), out=[];
+  for(const R of M.G){
+    const gr=rot(R.g,P.azim*D2R);
+    const res=Math.abs(Math.hypot(gr[0]+kp,gr[1])-rEwald(R.qz,k,si));
+    if(res<3*s) out.push({key:R.key,q:R.q,qz:R.qz,gr,res,
+                          af:Math.asin(Math.max(0,R.qz/k-si)),
+                          tth:Math.atan2(gr[1],gr[0]+kp),
+                          theta:Math.asin(Math.min(1,R.q/(2*k)))});
+  }
+  return out;
+}
+
+/* -------------------------------------------------------------- drawing -- */
+function fit(id){
+  const cv=document.getElementById(id), c=cv.getContext("2d");
+  const r=cv.getBoundingClientRect(), dp=window.devicePixelRatio||1;
+  cv.width=Math.max(1,Math.round(r.width*dp));
+  cv.height=Math.max(1,Math.round(r.height*dp));
+  c.setTransform(dp,0,0,dp,0,0);
+  return [c,r.width,r.height];
+}
+/* ---- legends. A row is a glyph plus a short label, and the glyph is drawn
+   with the SAME stroke or fill the panel uses, so a legend cannot drift from
+   its picture the way a prose caption can. Prefer these to sentences: a caption
+   that explains what a colour means is a legend written the long way. */
+const gLine=(col,lw,dash)=>(c,x,y)=>{
+  c.strokeStyle=col; c.lineWidth=lw||1.4; if(dash) c.setLineDash(dash);
+  c.beginPath(); c.moveTo(x,y); c.lineTo(x+16,y); c.stroke();};
+const gDots=(col)=>(c,x,y)=>{
+  c.beginPath(); c.arc(x+4,y,3.8,0,TAU); c.fillStyle=col; c.fill();
+  c.beginPath(); c.arc(x+14,y,3.8,0,TAU); c.fillStyle="#fff"; c.fill();
+  c.strokeStyle=col; c.lineWidth=1.7; c.stroke();};
+const gPatch=(fill,stroke)=>(c,x,y)=>{
+  c.fillStyle=fill; c.fillRect(x,y-4,16,8);
+  c.strokeStyle=stroke; c.lineWidth=0.8; c.strokeRect(x+.5,y-3.5,15,7);};
+function legend(c,x,y,rows){
+  const fs=9.5, dy=fs+2.4;
+  c.font=MONO(fs); c.textAlign="left";
+  rows.forEach((r,i)=>{
+    const yy=y+i*dy;
+    c.save(); r[0](c,x,yy-3); c.restore();
+    c.fillStyle=r[2]||"#8DA1AE"; halo(c,r[1],x+22,yy);
+  });
+  return y+rows.length*dy;
+}
+/* Haloed text. A legend sits on top of the picture it describes and an
+   annotation sits on top of its own curve, so both need to survive whatever
+   is behind them. */
+function halo(c,t,x,y){
+  const f=c.fillStyle;
+  c.lineWidth=3; c.strokeStyle="rgba(255,255,255,.88)"; c.strokeText(t,x,y);
+  c.fillStyle=f; c.fillText(t,x,y);
+}
+const STOPS=[[255,255,255],[254,243,199],[251,191,36],[220,38,38],[76,5,25]];
+function hot(v){
+  const x=Math.max(0,Math.min(1,Math.pow(v,0.48)))*(STOPS.length-1);
+  const i=Math.min(STOPS.length-2,Math.floor(x)), f=x-i;
+  return [0,1,2].map(c=>STOPS[i][c]+(STOPS[i+1][c]-STOPS[i][c])*f);
+}
+
+/* ---- reciprocal space in 3D: Bragg rods, rod maxima, and the Ewald dome.
+   The condition is |Q + k_in| = k, a SPHERE. Its horizontal cross-section at
+   height Q_z has radius r(Q_z) = sqrt(k^2 - (Q_z - k sin ai)^2), which shrinks
+   as Q_z rises. A tilted-chain reflection sits at Q_z > 0 and so must meet the
+   condition on a smaller circle -- it lights at a different azimuth than an
+   untilted one would. Drawing only the Q_z = 0 circle hides that. ---------- */
+const QSPAN=2.6, QZMAX=0.92, ZEX=2.0;      /* ZEX: vertical exaggeration */
+function drawEwald(){
+  const [c,w,h]=fit("ew"); c.clearRect(0,0,w,h);
+  const M=model(), k=kOf(), kp=kpOf(), si=Math.sin(P.ai*D2R), s0=sigOf(P.L);
+  const sc=Math.min(w/4.35,h/5.6), cx=w*0.45, cy=h*0.56;
+  const pj=(qx,qy,qz)=>[cx+sc*(qx-0.52*qy),
+                        cy+sc*(0.15*qx+0.42*qy-0.95*ZEX*qz)];
+
+  /* Q_xy plane */
+  c.beginPath();
+  for(let a=0;a<=360;a+=5){
+    const r=a*D2R, q=pj(QSPAN*Math.cos(r),QSPAN*Math.sin(r),0);
+    a?c.lineTo(q[0],q[1]):c.moveTo(q[0],q[1]);
+  }
+  c.closePath(); c.fillStyle="#F4F8FA"; c.fill();
+  c.strokeStyle="#DCE5EA"; c.lineWidth=1; c.stroke();
+  /* constant-|G| rings on the plane */
+  c.setLineDash([3,3]); c.strokeStyle="#C7D3DB";
+  for(const q of [...new Set(M.G.map(R=>+R.q.toFixed(4)))]){
+    c.beginPath();
+    for(let a=0;a<=360;a+=5){
+      const r=a*D2R, p=pj(q*Math.cos(r),q*Math.sin(r),0);
+      a?c.lineTo(p[0],p[1]):c.moveTo(p[0],p[1]);
+    }
+    c.closePath(); c.stroke();
+  }
+  c.setLineDash([]);
+  /* the inaccessible half-space, q_z < 0 */
+  c.beginPath();
+  for(let a=0;a<=360;a+=5){
+    const r=a*D2R, q=pj(QSPAN*Math.cos(r),QSPAN*Math.sin(r),-QZMAX);
+    a?c.lineTo(q[0],q[1]):c.moveTo(q[0],q[1]);
+  }
+  c.closePath(); c.fillStyle="rgba(120,135,148,.10)"; c.fill();
+  /* Edges of the reciprocal lattice, drawn TWICE.
+     (i) flat on the Q_xy plane: the projection, |Q_xy| = |G|, which is what a
+         q_xy map shows and what an in-plane cell inversion works from.
+     (ii) through the six rod maxima at their own SIGNED q_z. Because
+         q_z = -(G.t_hat) tan t is LINEAR in G, those six points are exactly
+         coplanar -- they are the intersection of the plane Q.n_hat = 0 with the
+         six rods -- so the tilted outline is a planar hexagon, hinged about the
+         two vertices left on the horizon, three up and three down. It is the
+         tilt itself made visible; the flat outline alone hides it, and the
+         difference between the two is the whole reason tilt moves intensity
+         into q_z. At t = 0 they coincide, so the tilted one is not drawn. */
+  {
+    const hx = M.G.map(R => ({g: rot(R.g, P.azim * D2R), qz: R.qz}))
+                  .sort((A, B) => Math.atan2(A.g[1], A.g[0]) -
+                                  Math.atan2(B.g[1], B.g[0]));
+    c.strokeStyle = "rgba(20,33,42,.45)"; c.lineWidth = 1.3;
+    c.beginPath();
+    hx.forEach((o, i2) => { const p = pj(o.g[0], o.g[1], 0);
+      i2 ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1]); });
+    c.closePath(); c.stroke();
+    if (P.tilt > 0.05) {
+      /* risers, so which vertex went up and which went down is unambiguous */
+      c.strokeStyle = "rgba(194,65,12,.34)"; c.lineWidth = 0.9;
+      for (const o of hx) {
+        const p0 = pj(o.g[0], o.g[1], 0), p1 = pj(o.g[0], o.g[1], o.qz);
+        c.beginPath(); c.moveTo(p0[0], p0[1]); c.lineTo(p1[0], p1[1]); c.stroke();
+      }
+      c.beginPath();
+      hx.forEach((o, i2) => { const p = pj(o.g[0], o.g[1], o.qz);
+        i2 ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1]); });
+      c.closePath();
+      c.fillStyle = "rgba(194,65,12,.08)"; c.fill();
+      c.strokeStyle = "rgba(194,65,12,.85)"; c.lineWidth = 1.7;
+      c.setLineDash([5, 3]); c.stroke(); c.setLineDash([]);
+    }
+    for (const [v, lab] of [[M.b1, "a*"], [M.b2, "b*"]]) {
+      const g = rot(v, P.azim * D2R), o = pj(0, 0, 0), e = pj(g[0], g[1], 0);
+      c.strokeStyle = "#1B5E20"; c.lineWidth = 1.5;
+      c.beginPath(); c.moveTo(o[0], o[1]); c.lineTo(e[0], e[1]); c.stroke();
+      const m = pj(g[0] * 0.62, g[1] * 0.62, 0);
+      c.font = MONO(10); c.fillStyle = "#1B5E20";
+      c.fillText(lab, m[0] + 5, m[1] - 3);
+    }
+  }
+  /* axes */
+  c.strokeStyle="#B7C4CD"; c.lineWidth=1;
+  for(const v of [[QSPAN,0,0],[0,QSPAN,0],[0,0,QZMAX]]){
+    const o=pj(0,0,0), e=pj(...v);
+    c.beginPath(); c.moveTo(o[0],o[1]); c.lineTo(e[0],e[1]); c.stroke();
+  }
+  c.font=MONO(10.5); c.fillStyle="#8DA1AE";
+  let e=pj(QSPAN*1.1,0,0); c.fillText("Q_x",e[0],e[1]+4);
+  e=pj(0,QSPAN*1.1,0); c.fillText("Q_y",e[0]-16,e[1]+4);
+  e=pj(0,0,QZMAX*1.06); c.fillText("Q_z",e[0]+4,e[1]);
+
+  /* The Ewald SPHERE: |Q + k_in| = k, centre (-kp, 0, k sin ai).
+
+     Meshed ON the sphere in (q_z, phi), not as a height field x(y, z) over a
+     fixed rectangle. The height-field form had two failures that only appeared
+     at low energy, where the sphere is small compared with the frame:
+
+       - It is single-valued in x, so it could only ever draw ONE hemisphere.
+         At 1.45 keV the whole sphere fits inside the plotted volume -- its far
+         side sits at Q_x = -1.47, well inside the +-2.6 frame -- and half of it
+         was simply absent. The sphere's poles are inside the frame there too.
+       - A quad was discarded whenever ANY corner fell off the sphere, so the
+         rim was a staircase strictly inside the true silhouette: 12 of 128
+         cells survived at 1.45 keV, 32 at 2 keV, 60 at 3 keV, all 128 only from
+         about 8 keV up. The cap looked far smaller than it is.
+
+     In (q_z, phi) every point is on the sphere by construction, so nothing is
+     dropped and both hemispheres come for free. At height q_z the horizontal
+     cross-section is a circle of radius r = sqrt(k^2 - (q_z - k sin ai)^2)
+     centred at (-kp, 0), and phi measured about THAT centre is exactly 2theta
+     -- so the azimuthal half-width still inside the frame,
+     phi_max = acos((kp^2 + r^2 - QSPAN^2) / (2 kp r)), is the same equation the
+     detector panel uses, and the mesh is adaptive for nothing: 12 deg of arc at
+     24 keV where only a sliver is in frame, the full 180 deg at 1.45 keV.
+
+     The shrinking itself is real and is left alone -- it is why nothing
+     diffracts below 1.47 keV -- but it should shrink to the true silhouette,
+     not to a quantised patch inside it. */
+  const NZC = 15, NPH = 24, cells = [];
+  const rAt = z => { const v = k * k - (z - k * si) * (z - k * si);
+                     return v > 0 ? Math.sqrt(v) : 0; };
+  const phiMax = r => {
+    if (r < 1e-9) return 0;
+    const cA = (kp * kp + r * r - QSPAN * QSPAN) / (2 * kp * r);
+    return cA >= 1 ? 0 : cA <= -1 ? Math.PI : Math.acos(cA);
+  };
+  const onSphere = (z, ph) => { const r = rAt(z);
+    return pj(-kp + r * Math.cos(ph), r * Math.sin(ph), z); };
+  const zLo = Math.max(-QZMAX, k * si - k), zHi = Math.min(QZMAX, k * si + k);
+  for (let iz = 0; iz < NZC; iz++) {
+    const z0 = zLo + (zHi - zLo) * iz / NZC, z1 = zLo + (zHi - zLo) * (iz + 1) / NZC;
+    const m0 = phiMax(rAt(z0)), m1 = phiMax(rAt(z1));
+    if (m0 < 1e-6 && m1 < 1e-6) continue;
+    for (let ip = 0; ip < NPH; ip++) {
+      const f0 = -1 + 2 * ip / NPH, f1 = -1 + 2 * (ip + 1) / NPH;
+      const corners = [[z0, f0 * m0], [z0, f1 * m0],
+                       [z1, f1 * m1], [z1, f0 * m1]].map(q => onSphere(q[0], q[1]));
+      cells.push({ corners, d: (corners[0][1] + corners[2][1]) / 2,
+                   up: (z0 + z1) / 2 >= 0,
+                   back: Math.abs((f0 + f1) / 2 * (m0 + m1) / 2) > Math.PI / 2 });
+    }
+  }
+  cells.sort((A, B) => A.d - B.d);
+  for (const cl of cells) {
+    /* the painter's sort is on projected screen y, which conflates depth with
+       height, so the far hemisphere is also faded rather than trusted to the
+       ordering alone */
+    const f = cl.back ? 0.4 : 1;
+    c.beginPath();
+    cl.corners.forEach((q, i2) => i2 ? c.lineTo(q[0], q[1]) : c.moveTo(q[0], q[1]));
+    c.closePath();
+    c.fillStyle = cl.up ? "rgba(180,83,9," + (0.10 * f).toFixed(3) + ")"
+                        : "rgba(150,132,112," + (0.06 * f).toFixed(3) + ")";
+    c.fill();
+    c.strokeStyle = cl.up ? "rgba(180,83,9," + (0.32 * f).toFixed(3) + ")"
+                          : "rgba(150,132,112," + (0.20 * f).toFixed(3) + ")";
+    c.lineWidth = 0.8; c.stroke();
+  }
+  /* The in-frame arc of an Ewald cross-section at one height. Both callers used
+     to sweep a hard-coded +-40 or +-38 deg, which is ample at 10 keV (the frame
+     edge is at 29.7 deg) but truncates the circle at low energy, where the whole
+     ring is inside the frame. phi_max gives the exact extent instead. */
+  const ewaldArc = (qz, r) => {
+    const pm = phiMax(r);
+    if (pm <= 0) return false;
+    const n = Math.max(30, Math.ceil(pm * R2D / 1.2));
+    for (let i = 0; i <= n; i++) {
+      const ph = -pm + 2 * pm * i / n;
+      const q = pj(-kp + r * Math.cos(ph), r * Math.sin(ph), qz);
+      i ? c.lineTo(q[0], q[1]) : c.moveTo(q[0], q[1]);
+    }
+    return true;
+  };
+  /* the horizon great circle, q_z = 0 */
+  c.strokeStyle = "rgba(180,83,9,.92)"; c.lineWidth = 2.1;
+  c.beginPath(); if (ewaldArc(0, rEwald(0, k, si))) c.stroke();
+
+
+  /* Bragg rods, shaded by the rod intensity profile, then the maxima */
+  const items=M.G.map(R=>{
+    const gr=rot(R.g,P.azim*D2R);
+    const res=Math.abs(Math.hypot(gr[0]+kp,gr[1])-rEwald(R.qz,k,si));
+    return {R,gr,res,on:res<3*s0,depth:pj(gr[0],gr[1],0)[1]};
+  }).sort((A,B)=>A.depth-B.depth);
+
+  for(const it of items){
+    const {R,gr,on}=it;
+    /* the highlighted Ewald cross-section at this reflection's own q_z */
+    if(R.qz>0.01){
+      c.strokeStyle=COL[R.key]+"80"; c.lineWidth=1.5;
+      c.beginPath();
+      if(ewaldArc(R.qz,rEwald(R.qz,k,si))) c.stroke();
+    }
+    /* rod, alpha tracking the sinc^2 profile */
+    const N=64;
+    for(let n=0;n<N;n++){
+      const z1=-QZMAX+2*QZMAX*n/N, z2=-QZMAX+2*QZMAX*(n+1)/N;
+      const v=rodAt((z1+z2)/2,R.qz,M.t);
+      const p1=pj(gr[0],gr[1],z1), p2=pj(gr[0],gr[1],z2);
+      c.strokeStyle="rgba(81,104,122,"+(0.10+0.62*v).toFixed(3)+")";
+      c.lineWidth=1+2.2*v;
+      c.beginPath(); c.moveTo(p1[0],p1[1]); c.lineTo(p2[0],p2[1]); c.stroke();
+    }
+    /* foot on the plane */
+    const fp=pj(gr[0],gr[1],0);
+    c.beginPath(); c.arc(fp[0],fp[1],3,0,TAU);
+    c.fillStyle="#8DA1AE"; c.fill();
+    /* the maximum */
+    const mp=pj(gr[0],gr[1],R.qz);
+    if(on){
+      c.beginPath(); c.arc(mp[0],mp[1],11,0,TAU);
+      c.strokeStyle="rgba(21,128,61,.65)"; c.lineWidth=2.6; c.stroke();
+      const o=pj(0,0,0);
+      c.strokeStyle="#15803D"; c.lineWidth=1.2;
+      c.beginPath(); c.moveTo(o[0],o[1]); c.lineTo(mp[0],mp[1]); c.stroke();
+    }
+    const above=R.qz>-1e-9;
+    c.beginPath(); c.arc(mp[0],mp[1],on?6.2:4.6,0,TAU);
+    if(above){ c.fillStyle=COL[R.key]; c.fill(); }
+    else { c.fillStyle="#FFFFFF"; c.fill();
+           c.strokeStyle=COL[R.key]; c.lineWidth=2; c.stroke(); }
+    if(on){
+      c.fillStyle="#14212A"; c.font=MONO(11);
+      c.fillText(NICE[R.key]+"  q_z="+R.qz.toFixed(3)+
+                 (above?"":"  (below horizon)"),mp[0]+13,mp[1]-9);
+    }
+  }
+  const o=pj(0,0,0);
+  c.beginPath(); c.arc(o[0],o[1],3.6,0,TAU); c.fillStyle="#14212A"; c.fill();
+
+  /* incident beam, arriving along +x into the origin at Q_z = 0 */
+  const b1=pj(-QSPAN*1.34,0,0), b2=pj(-QSPAN*0.62,0,0);
+  c.strokeStyle="#B45309"; c.lineWidth=1.8;
+  c.beginPath(); c.moveTo(b1[0],b1[1]); c.lineTo(b2[0],b2[1]); c.stroke();
+  c.beginPath(); c.moveTo(b2[0],b2[1]); c.lineTo(b2[0]-9,b2[1]-4.6);
+  c.lineTo(b2[0]-9,b2[1]+3.4); c.closePath(); c.fillStyle="#B45309"; c.fill();
+  c.font=MONO(10.5); c.fillText("k_in",b1[0]+2,b1[1]-7);
+
+  /* status line, then a legend -- not a paragraph */
+  const lit=litNow();
+  c.font=MONO(10.5); c.textAlign="left";
+  c.fillStyle=lit.length?"#15803D":"#8DA1AE";
+  c.fillText(lit.length?lit.length+" reflection in condition":
+    "nothing in condition \u2014 rotate, or open the spread",8,15);
+  legend(c,8,h-40,[
+    [gLine("rgba(20,33,42,.45)",1.3), "hexagon projected on q_x\u2013q_y"],
+    [gLine("rgba(194,65,12,.85)",1.7,[5,3]),
+     "the same six at their own q_z: the plane Q\u00B7n\u0302 = 0"],
+    [gDots(COL["11"]), "q_z \u2265 0, observable \u00B7 q_z < 0, twin above"],
+    [gPatch("rgba(180,83,9,.10)","rgba(180,83,9,.32)"),
+     "Ewald sphere, flattening as E rises \u00B7 Q_z \u00D7"+ZEX.toFixed(1)]]);
+}
+
+/* ------- 3D view: axonometric, painter's algorithm, tilted rods ---------- */
+function draw3D(){
+  const [c,w,h]=fit("three"); c.clearRect(0,0,w,h);
+  const M=model(), th=P.azim*D2R, t=M.t;
+  const nh=[Math.sin(t)*Math.cos(M.psi),Math.sin(t)*Math.sin(M.psi),Math.cos(t)];
+  const nr=rot([nh[0],nh[1]],th);                 // tilt direction, rotated
+  const n=[nr[0],nr[1],nh[2]];
+  /* Fit the view to everything that will be drawn, but to an AZIMUTH-INVARIANT
+     hull, so the panel does not breathe as phi_s turns. Fitting to the rotated
+     scene instead makes the scale and the centre both functions of the azimuth,
+     which slides the origin, the z axis and the beam arrow around while the
+     only thing physically happening is a rotation about z -- the one motion
+     that should leave all three fixed.
+     The hull: chain feet fill a disc of radius Rd; a leaning chain reaches
+     L*sin(t) sideways, so the union of the chain TOPS over all azimuths is a
+     disc of radius Rd + L*sin(t) at the fixed height L*cos(t); the beam tail
+     and the z axis are already azimuth-independent. Rings bound the discs,
+     since the projection is linear. Tilt still rescales -- it changes the
+     scene's real extent -- but the azimuth no longer does. */
+  const uu=(x,y,z)=>[x-0.52*y, 0.15*x+0.42*y-0.95*z];
+  const Rd=17, cand=[[-24,0,0],[0,0,L_CHAIN]];
+  const Rtop=Rd+L_CHAIN*Math.sin(t), Ztop=L_CHAIN*Math.cos(t);
+  for(let a=0;a<360;a+=15){
+    const ca=Math.cos(a*D2R), sa=Math.sin(a*D2R);
+    cand.push([Rd*ca,Rd*sa,0],[Rtop*ca,Rtop*sa,Ztop]);
+  }
+  let bx0=1e9,bx1=-1e9,by0=1e9,by1=-1e9;
+  for(const q of cand){ const v=uu(q[0],q[1],q[2]);
+    bx0=Math.min(bx0,v[0]); bx1=Math.max(bx1,v[0]);
+    by0=Math.min(by0,v[1]); by1=Math.max(by1,v[1]); }
+  const s=Math.min(w*0.95/(bx1-bx0), h*0.92/(by1-by0));
+  const cx=w/2-s*(bx0+bx1)/2, cy=h/2-s*(by0+by1)/2;
+  const proj=(x,y,z)=>{const v=uu(x,y,z);return [cx+s*v[0],cy+s*v[1]];};
+
+  /* sites inside a disc, so the hexagonal habit reads clearly */
+  const sites=[];
+  for(let i=-5;i<=5;i++) for(let j=-4;j<=4;j++) for(const sh of [[0,0],[.5,.5]]){
+    const p=rot([(i+sh[0])*M.a,(j+sh[1])*M.b],th);
+    if(Math.hypot(p[0],p[1])<15.5) sites.push(p);
+  }
+  /* water surface */
+  c.beginPath();
+  for(let a=0;a<=360;a+=6){
+    const r=a*D2R, X=17*Math.cos(r), Y=17*Math.sin(r), q=proj(X,Y,0);
+    a?c.lineTo(q[0],q[1]):c.moveTo(q[0],q[1]);
+  }
+  c.closePath(); c.fillStyle="#E4F1F8"; c.fill();
+  c.strokeStyle="#9EC5DA"; c.lineWidth=1; c.stroke();
+
+  /* reflecting rows of any lit reflection, drawn on the surface */
+  for(const Lr of litNow()){
+    const u=[Lr.gr[0]/Lr.q,Lr.gr[1]/Lr.q], pv=[-u[1],u[0]], d=TAU/Lr.q;
+    c.strokeStyle=COL[Lr.key]; c.lineWidth=1.3;
+    for(let m=-10;m<=10;m++){
+      const o=[u[0]*m*d,u[1]*m*d];
+      const e=Math.sqrt(Math.max(0,17*17-(m*d)*(m*d)));
+      if(e<0.5) continue;
+      const p1=proj(o[0]-pv[0]*e,o[1]-pv[1]*e,0);
+      const p2=proj(o[0]+pv[0]*e,o[1]+pv[1]*e,0);
+      c.beginPath(); c.moveTo(p1[0],p1[1]); c.lineTo(p2[0],p2[1]); c.stroke();
+    }
+  }
+  /* surface net: bonds between chain feet -- the STRETCHED lattice */
+  if(showNets){
+    const cen=[(M.A1[0]+M.A2[0])/2,(M.A1[1]+M.A2[1])/2];
+    const dmin=Math.min(Math.hypot(...M.A1),Math.hypot(...cen))*1.14;
+    c.strokeStyle="rgba(14,116,144,.42)"; c.lineWidth=1;
+    for(let i=0;i<sites.length;i++) for(let j=i+1;j<sites.length;j++){
+      const d=Math.hypot(sites[i][0]-sites[j][0],sites[i][1]-sites[j][1]);
+      if(d>dmin) continue;
+      const p1=proj(sites[i][0],sites[i][1],0), p2=proj(sites[j][0],sites[j][1],0);
+      c.beginPath(); c.moveTo(p1[0],p1[1]); c.lineTo(p2[0],p2[1]); c.stroke();
+    }
+  }
+
+  /* chains, far to near */
+  sites.map(p=>({p,d:proj(p[0],p[1],0)[1]}))
+       .sort((A,B)=>A.d-B.d)
+       .forEach(({p})=>{
+    const b=proj(p[0],p[1],0);
+    const tp=proj(p[0]+L_CHAIN*n[0],p[1]+L_CHAIN*n[1],L_CHAIN*n[2]);
+    c.lineCap="round"; c.lineWidth=Math.max(2.5,4.3*s*0.55);
+    c.strokeStyle="#C8D6DF";
+    c.beginPath(); c.moveTo(b[0],b[1]); c.lineTo(tp[0],tp[1]); c.stroke();
+    c.lineWidth=Math.max(1.2,4.3*s*0.30); c.strokeStyle="#8FA8B6";
+    c.beginPath(); c.moveTo(b[0],b[1]); c.lineTo(tp[0],tp[1]); c.stroke();
+    c.beginPath(); c.arc(b[0],b[1],1.9,0,TAU);
+    c.fillStyle="#3B7EA1"; c.fill();
+  });
+  /* Both hexagons around the central chain, hinged at a shared vertex.
+     The cut plane is placed at h = max_j (p_j . t-hat) sin t, the smallest
+     height for which every cut point sits at or above the water surface. The
+     neighbour furthest along +t-hat then has s = 0, so the two hexagons touch
+     at that vertex. At t = 0 this gives h = 0 and they coincide exactly. */
+  if(showNets && sites.length){
+    const st=Math.sin(t), mag=Math.hypot(nr[0],nr[1]);
+    const tr=mag>1e-9?[nr[0]/mag,nr[1]/mag]:[0,0];
+    const dOf=q=>(q[0]*tr[0]+q[1]*tr[1])*st;
+    const dPerp=q=>{const d=dOf(q);
+      return Math.sqrt(Math.max(0,q[0]*q[0]+q[1]*q[1]-d*d));};
+    let near=sites.filter(q=>Math.hypot(q[0],q[1])>1e-6)
+      .map(q=>({q,r:dPerp(q)})).sort((A,B)=>A.r-B.r).slice(0,6);
+    const hcut=Math.max(0,...near.map(o=>dOf(o.q)));
+    const cutOf=q=>{const sPar=hcut-dOf(q);
+      return [q[0]+sPar*n[0], q[1]+sPar*n[1], sPar*n[2]];};
+    const c0=cutOf([0,0]);
+    const ang=o=>{const v=cutOf(o.q).map((x,i)=>x-c0[i]);
+      return Math.atan2(v[0]*M.e2[0]+v[1]*M.e2[1]+v[2]*M.e2[2],
+                        v[0]*M.e1[0]+v[1]*M.e1[1]+v[2]*M.e1[2]);};
+    near.sort((A,B)=>ang(A)-ang(B));
+
+    const feetP=near.map(o=>proj(o.q[0],o.q[1],0));
+    const cutP =near.map(o=>proj(...cutOf(o.q)));
+    const pc=proj(...c0), pf=proj(0,0,0);
+
+    /* the projected (stretched) hexagon, lying in the water surface */
+    c.strokeStyle="rgba(14,116,144,.95)"; c.lineWidth=1.8;
+    c.beginPath();
+    feetP.forEach((q,i)=>i?c.lineTo(q[0],q[1]):c.moveTo(q[0],q[1]));
+    c.closePath(); c.fillStyle="rgba(14,116,144,.10)"; c.fill(); c.stroke();
+
+    /* struts along the chains, linking corresponding vertices */
+    c.strokeStyle="rgba(120,140,155,.55)"; c.lineWidth=1;
+    for(let i2=0;i2<6;i2++){
+      c.beginPath(); c.moveTo(feetP[i2][0],feetP[i2][1]);
+      c.lineTo(cutP[i2][0],cutP[i2][1]); c.stroke();
+    }
+    c.beginPath(); c.moveTo(pf[0],pf[1]); c.lineTo(pc[0],pc[1]); c.stroke();
+
+    /* the perpendicular-plane hexagon: the true packing */
+    c.strokeStyle="rgba(194,65,12,.95)"; c.lineWidth=1.9;
+    c.beginPath();
+    cutP.forEach((q,i)=>i?c.lineTo(q[0],q[1]):c.moveTo(q[0],q[1]));
+    c.closePath(); c.fillStyle="rgba(194,65,12,.13)"; c.fill(); c.stroke();
+    c.strokeStyle="rgba(194,65,12,.35)"; c.lineWidth=1;
+    for(const q of cutP){
+      c.beginPath(); c.moveTo(pc[0],pc[1]); c.lineTo(q[0],q[1]); c.stroke();
+    }
+    for(const q of cutP.concat([pc])){
+      c.beginPath(); c.arc(q[0],q[1],2.7,0,TAU);
+      c.fillStyle="#C2410C"; c.fill();
+    }
+    for(const q of feetP){
+      c.beginPath(); c.arc(q[0],q[1],2.5,0,TAU);
+      c.fillStyle="#0E7490"; c.fill();
+    }
+    /* mark the shared vertex (or vertices) */
+    near.forEach((o,i2)=>{
+      if(Math.abs(hcut-dOf(o.q))>1e-6) return;
+      c.beginPath(); c.arc(cutP[i2][0],cutP[i2][1],8,0,TAU);
+      c.strokeStyle="#14212A"; c.lineWidth=1.6; c.stroke();
+    });
+  }
+
+  /* one highlighted chain with the surface normal and the tilt angle */
+  const b0=proj(0,0,0), t0=proj(L_CHAIN*n[0],L_CHAIN*n[1],L_CHAIN*n[2]);
+  const z0=proj(0,0,L_CHAIN);
+  c.lineWidth=Math.max(3,4.3*s*0.62); c.lineCap="round";
+  c.strokeStyle="#C2410C";
+  c.beginPath(); c.moveTo(b0[0],b0[1]); c.lineTo(t0[0],t0[1]); c.stroke();
+  c.setLineDash([4,3]); c.lineWidth=1.2; c.strokeStyle="#51687A";
+  c.beginPath(); c.moveTo(b0[0],b0[1]); c.lineTo(z0[0],z0[1]); c.stroke();
+  c.setLineDash([]);
+  c.font=MONO(11); c.fillStyle="#51687A";
+  c.fillText("z",z0[0]+4,z0[1]-2);
+  c.fillStyle="#C2410C";
+  c.fillText("t = "+P.tilt.toFixed(1)+"\u00B0",t0[0]+6,t0[1]+4);
+  /* tilt azimuth arrow -- only meaningful when there IS a tilt */
+  if(P.tilt>0.05){
+    const mg=Math.hypot(nr[0],nr[1]);
+    const ta=proj(nr[0]/mg*13,nr[1]/mg*13,0);
+    c.strokeStyle="#C2410C"; c.lineWidth=1.8;
+    c.beginPath(); c.moveTo(b0[0],b0[1]); c.lineTo(ta[0],ta[1]); c.stroke();
+    c.font=MONO(11); c.fillText("t\u0302",ta[0]+4,ta[1]+4);
+  }else{
+    c.font=MONO(10); c.fillStyle="#8DA1AE";
+    c.fillText("t = 0: \u03C8 has no meaning, both nets coincide",6,h-39);
+  }
+  /* beam along +x at the surface */
+  const q1=proj(-24,0,0), q2=proj(-17.5,0,0);
+  c.strokeStyle="#B45309"; c.lineWidth=2;
+  c.beginPath(); c.moveTo(q1[0],q1[1]); c.lineTo(q2[0],q2[1]); c.stroke();
+  c.beginPath(); c.moveTo(q2[0],q2[1]); c.lineTo(q2[0]-8,q2[1]-4.5);
+  c.lineTo(q2[0]-8,q2[1]+4.5); c.closePath(); c.fillStyle="#B45309"; c.fill();
+  c.font=MONO(10.5); c.fillText("beam",q1[0]-2,q1[1]-8);
+  const lit=litNow();
+  c.fillStyle=lit.length?"#15803D":"#8DA1AE"; c.font=MONO(10);
+  c.fillText(lit.length?
+    "coloured rows reflect, at \u03B8 = "+(lit[0].theta*R2D).toFixed(2)+
+    "\u00B0 to the beam":"no rows reflecting at this azimuth",6,h-6);
+  if(showNets) legend(c,6,h-30,[
+    [gLine("rgba(14,116,144,.95)",1.8), "chain feet, projected on the water"],
+    [gLine("rgba(194,65,12,.95)",1.9),  "\u22A5-chain cut: the true packing"]]);
+}
+
+/* ---- the two real lattices, OVERLAID on one origin -------------------------
+   This was two nets side by side. Three things went wrong with that, and all
+   three came from deriving the drawing from the lattice parameters:
+
+     1. The zoom was set by the largest basis vector (scale = R/req with
+        req ~ max|A_i|), so dragging a0, tilt or strain rescaled the whole
+        picture -- defeating the panel's one job, which is a COMMON, FIXED
+        scale to compare against.
+     2. Sites were kept only if |r| <= req, so they crossed that cutoff and
+        popped in and out as parameters moved: 13 sites at the DPPC preset,
+        9 at +14% strain, 19 for NNN. Vertices vanished and took their bonds
+        with them.
+     3. Bonds were drawn wherever d < 1.14 * min(|a|, |centring|). That is a
+        nearest-neighbour guess, and it fails as soon as the cell distorts
+        enough to separate the two neighbour shells by more than 14%: at +14%
+        strain |a| = 5.872 against a cutoff of 5.862, and the whole a-direction
+        bond family disappeared. At a0 = 5.6, t = 45 deg it is 9.03 against
+        7.55, not even close.
+
+   All three heuristics are gone: a FIXED physical window (nothing rescales,
+   ever), a circular clip (edges are cut at the window rather than silently
+   dropped), and bonds drawn BY CONSTRUCTION from the lattice vectors -- the six
+   near neighbours of a centred-rectangular cell, whether or not they happen to
+   be equidistant.
+
+   And the two are overlaid rather than juxtaposed, which is the real fix. The
+   panel exists to show that the surface net IS the cross-section net stretched
+   by 1/cos t along t_hat. Side by side, you have to do that comparison in your
+   head and "same scale" is a promise rather than something visible. On one
+   origin the stretch IS the displacement between corresponding sites, growing
+   with distance along t_hat -- and each connector is literally a chain seen
+   from above, which is checkable: sliding a cross-section site along the chain
+   axis down to the water lands on its surface partner to 4e-15 across the whole
+   parameter range.
+
+   One trap on the way. P1/P2 come out of model() as components in the (e1,e2)
+   basis of the perpendicular plane, NOT as surface x-y. Since e2 = z x t_hat
+   and e1 = normalize(n x e2) = -cos t * t_hat + sin t * z, a perpendicular-plane
+   vector (p1,p2) sits at -p1*t_hat + p2*u_hat in the surface frame -- note the
+   MINUS. Plotting (p1,p2) as raw x,y rotates one net against the other by psi
+   (16.8 A of error) and still looks like a perfectly plausible pair of
+   hexagons; taking e1 along +t_hat is off by 27 A and looks fine too. Only the
+   signed form satisfies A = stretch(toSurf(P)). */
+const NET_RWIN=13;
+function drawNets(){
+  const [c,w,h]=fit("nets"); c.clearRect(0,0,w,h);
+  const M=model(), padT=10, padB=8;
+  const rp=Math.min((h-padT-padB)/2, w*0.235);
+  const cxp=8+rp, cyp=padT+(h-padT-padB)/2, sc=rp/NET_RWIN;
+  const X=q=>cxp+q[0]*sc, Y=q=>cyp-q[1]*sc;
+  const th=[Math.cos(M.psi),Math.sin(M.psi)], uh=[-th[1],th[0]];
+  const toSurf=q=>[-q[0]*th[0]+q[1]*uh[0], -q[0]*th[1]+q[1]*uh[1]];
+  const Q1=toSurf(M.P1), Q2=toSurf(M.P2);
+
+  /* One index set, two placements: the SAME (i,j,centring) chain located by the
+     cross-section basis and by the surface basis. Iterating indices, rather
+     than two independent site lists, is what makes a connector join a chain to
+     itself instead of to whichever site happens to be nearest. */
+  const span=(V,W)=>Math.max(3,Math.ceil((NET_RWIN+Math.hypot(...V))/
+    Math.max(1.5,Math.min(Math.hypot(...V),Math.hypot(...W)))))+1;
+  const n1=span(M.A1,Q1), n2=span(M.A2,Q2), idx=[];
+  for(let i=-n1;i<=n1;i++) for(let j=-n2;j<=n2;j++) for(const s of [0,0.5])
+    idx.push([i+s,j+s]);
+  const at=(V1,V2,u)=>[u[0]*V1[0]+u[1]*V2[0], u[0]*V1[1]+u[1]*V2[1]];
+  /* the six near neighbours of a centred-rectangular cell; each site draws
+     three of them and its partners draw the opposite three */
+  const bondsOf=(V1,V2)=>[V1,[(V1[0]+V2[0])/2,(V1[1]+V2[1])/2],
+                             [(V1[0]-V2[0])/2,(V1[1]-V2[1])/2]];
+
+  c.save();
+  c.beginPath(); c.arc(cxp,cyp,rp,0,TAU); c.clip();
+  c.fillStyle="#FBFDFE"; c.fillRect(cxp-rp,cyp-rp,2*rp,2*rp);
+  /* The cross-section net is drawn as a ghost -- dashed bonds, open rings --
+     and the surface net solid on top. At the DPPC tilt the stretch is only
+     1/cos t = 1.057, so the offset is a few pixels at the rim; two solid nets
+     of equal weight would read as one slightly fuzzy net rather than as two. */
+  const net=(V1,V2,col,lw,dash)=>{
+    const B=bondsOf(V1,V2);
+    c.strokeStyle=col; c.lineWidth=lw; if(dash) c.setLineDash(dash);
+    for(const u of idx){ const q=at(V1,V2,u);
+      for(const v of B){ c.beginPath(); c.moveTo(X(q),Y(q));
+        c.lineTo(X([q[0]+v[0],q[1]+v[1]]),Y([q[0]+v[0],q[1]+v[1]])); c.stroke(); } }
+    c.setLineDash([]);
+  };
+  /* The connectors: chains, foreshortened. All parallel to t_hat, each as long
+     as (1/cos t - 1) times that site's own projection along it -- which is why
+     they fan outward, and why neither a rotation nor a shift could fake the
+     pattern. Drawn on the bottom layer: at psi = 0, t_hat lies along a, so a
+     connector is collinear with the a-direction bonds of both nets and would
+     only be seen as a smear across them. Restricted to pairs with both ends
+     inside the window, so the rim has no half-drawn stubs. */
+  c.strokeStyle="rgba(110,130,146,.65)"; c.lineWidth=1.1;
+  for(const u of idx){
+    const q=at(Q1,Q2,u), s=at(M.A1,M.A2,u);
+    if(Math.hypot(...q)>NET_RWIN||Math.hypot(...s)>NET_RWIN) continue;
+    c.beginPath(); c.moveTo(X(q),Y(q)); c.lineTo(X(s),Y(s)); c.stroke();
+  }
+  net(Q1,Q2,"rgba(194,65,12,.75)",1,[3,2.5]);
+  net(M.A1,M.A2,"rgba(14,116,144,.9)",1.5);
+  for(const u of idx){
+    const q=at(Q1,Q2,u), s=at(M.A1,M.A2,u);
+    c.beginPath(); c.arc(X(q),Y(q),2.8,0,TAU);
+    c.fillStyle="#FBFDFE"; c.fill();
+    c.strokeStyle="#C2410C"; c.lineWidth=1.3; c.stroke();
+    c.beginPath(); c.arc(X(s),Y(s),3.2,0,TAU); c.fillStyle="#0E7490"; c.fill();
+  }
+  /* both bases, so the stretch is legible on a single edge as well as in bulk */
+  for(const [V,col,lw] of [[Q1,"#C2410C",1.4],[Q2,"#C2410C",1.4],
+                           [M.A1,"#0E7490",1.8],[M.A2,"#0E7490",1.8]]){
+    c.strokeStyle=col; c.lineWidth=lw;
+    c.beginPath(); c.moveTo(cxp,cyp); c.lineTo(X(V),Y(V)); c.stroke();
+  }
+  c.font=MONO(11); c.fillStyle="#0E7490"; c.textAlign="left";
+  halo(c,"a",X(M.A1)+4,Y(M.A1)-3); halo(c,"b",X(M.A2)+4,Y(M.A2)-3);
+  if(P.tilt>0.05){
+    const e=[th[0]*NET_RWIN*0.82,th[1]*NET_RWIN*0.82];
+    c.strokeStyle="rgba(194,65,12,.9)"; c.lineWidth=1.6; c.setLineDash([5,3]);
+    c.beginPath(); c.moveTo(cxp,cyp); c.lineTo(X(e),Y(e)); c.stroke();
+    c.setLineDash([]);
+    c.fillStyle="#C2410C"; halo(c,"t\u0302",X(e)+4,Y(e)+4);
+  }
+  c.beginPath(); c.arc(cxp,cyp,3.4,0,TAU); c.fillStyle="#14212A"; c.fill();
+  c.restore();
+  c.strokeStyle="#C7D3DB"; c.lineWidth=1;
+  c.beginPath(); c.arc(cxp,cyp,rp,0,TAU); c.stroke();
+
+  /* the numbers, keyed to the plot by colour rather than by a legend */
+  const S3=Math.sqrt(3), rs=M.b/M.a, rq=M.pb/M.pa;
+  const x0=2*rp+22, c1=x0+92, c2=x0+158;
+  const pc=v=>(v>=0?"+":"\u2212")+Math.abs(v).toFixed(2)+"%";
+  let y=padT+10;
+  const row=(lab,v1,v2,unit)=>{
+    c.font=MONO(9.5);
+    c.textAlign="left"; c.fillStyle="#8DA1AE"; c.fillText(lab,x0,y);
+    c.textAlign="right";
+    c.fillStyle="#C2410C"; c.fillText(v1,c1,y);
+    c.fillStyle="#0E7490"; c.fillText(v2,c2,y);
+    if(unit){ c.textAlign="left"; c.fillStyle="#8DA1AE"; c.fillText(unit,c2+4,y); }
+    y+=11.5;
+  };
+  row("","\u22A5 chain","surface","");
+  row("a",M.pa.toFixed(3),M.a.toFixed(3),"\u00C5");
+  row("b",M.pb.toFixed(3),M.b.toFixed(3),"\u00C5");
+  row("b/a",rq.toFixed(4),rs.toFixed(4),"");
+  row("vs \u221A3",pc(100*(rq/S3-1)),pc(100*(rs/S3-1)),"");
+  y+=4;
+  c.textAlign="left"; c.font=MONO(9.5);
+  if(P.tilt>0.05){
+    c.fillStyle="#51687A";
+    c.fillText("surface = \u22A5 chain \u00D7"+(1/Math.cos(M.t)).toFixed(4)+
+               " along t\u0302",x0,y); y+=11.5;
+    c.fillStyle="#8DA1AE";
+    c.fillText("grey = a chain, foreshortened",x0,y); y+=11.5;
+  }else{
+    c.fillStyle="#51687A";
+    c.fillText("t = 0: the two nets coincide",x0,y); y+=11.5;
+  }
+  c.fillStyle="#8DA1AE";
+  c.fillText("any \u22A5-chain residue from \u221A3 is",x0,y); y+=11.5;
+  c.fillText("backbone strain, not tilt",x0,y);
+}
+
+/* ---- area detector -------------------------------------------------------
+   The image is the raw (2th, a_f) grid the intensity was computed on. Both
+   readings are on it at once rather than behind a toggle: angles on the inside
+   (2th below, a_f left), q on the outside (q_xy above, q_z right).
+
+   The two outer scales are not the same kind of object, and the panel is built
+   so that difference is visible rather than asserted.
+     q_z = k (sin a_f + sin a_i) depends on a_f ALONE, so the right-hand scale
+     is an exact, monotone relabelling of the left-hand one.
+     |Q_xy|^2 = (k cos a_f)^2 + k'^2 - 2 k' (k cos a_f) cos 2th depends on BOTH,
+     so there is no q_xy scale that is right for every row. The top ticks are
+     therefore drawn as the feet of their own iso-q_xy CURVES, computed at every
+     a_f, and reading q_xy off the curve is exact anywhere in the frame. Over a
+     12 deg window those curves lean by about 0.16 deg in 2th -- around one peak
+     width, small but not nothing, which is exactly why they are drawn and not
+     replaced by a straight relabelled axis. */
+const DET_PAD_L=40, DET_PAD_R=30;
+const niceStep=span=>{ const raw=span/4, p=Math.pow(10,Math.floor(Math.log10(raw)));
+  const m=raw/p; return (m<1.5?1:m<3.5?2:m<7.5?5:10)*p; };
+function drawDet(){
+  const [c,w,h]=fit("det"); c.clearRect(0,0,w,h);
+  const padL=DET_PAD_L,padR=DET_PAD_R,padB=17,padT=14;
+  let mx=1e-12; for(let i=0;i<IMG.length;i++) if(IMG[i]>mx) mx=IMG[i];
+  const iw=Math.max(1,Math.round(w-padL-padR)),
+        ih=Math.max(1,Math.round(h-padB-padT));
+  const F=qFrame();
+  const im=c.createImageData(iw,ih);
+  for(let py=0;py<ih;py++){
+    const jA=jOfA((1-py/Math.max(1,ih-1))*AFM);
+    for(let px=0;px<iw;px++){
+      const o=(py*iw+px)<<2;
+      const rgb=hot(IMG[jA*NT+iOfT(-TTH+2*TTH*px/Math.max(1,iw-1))]/mx);
+      im.data[o]=rgb[0];im.data[o+1]=rgb[1];im.data[o+2]=rgb[2];im.data[o+3]=255;
+    }
+  }
+  c.putImageData(im,Math.round(padL),Math.round(padT));
+
+  /* screen mappings, shared by the axes, the iso-q curves and the labels */
+  const XofT=tt=>padL+(tt+TTH)/(2*TTH)*iw;
+  const YofA=af=>padT+ih-af/AFM*ih;
+
+  /* iso-q_xy curves + the top scale they foot on */
+  const sx=niceStep(F.qxMax);
+  c.font=MONO(10); c.fillStyle="#51687A"; c.textAlign="center";
+  for(let qv=0;qv<=F.qxMax+1e-9;qv+=sx) for(const sg of (qv<1e-9?[1]:[1,-1])){
+    let first=true, x0=null;
+    c.strokeStyle="rgba(120,140,155,.20)"; c.lineWidth=1; c.beginPath();
+    for(let jj=0;jj<=24;jj++){
+      const af=AFM*jj/24, row=afFromQz(F.k*(Math.sin(af)+F.si),F);
+      if(!row) continue;
+      const tt=ttFromQxy(qv,row,F);
+      if(tt===null) continue;
+      const X=XofT(sg*tt), Y=YofA(af);
+      if(X<padL||X>padL+iw) continue;
+      first?(c.moveTo(X,Y),x0=X,first=false):c.lineTo(X,Y);
+    }
+    c.stroke();
+    if(x0!==null) c.fillText((sg*qv).toFixed(sx<1?1:0),x0,padT-4);
+  }
+  c.strokeStyle="#C7D3DB"; c.lineWidth=1; c.strokeRect(padL,padT,iw,ih);
+
+  /* 2th below (deg) */
+  for(let d=-40;d<=40;d+=10) c.fillText(d+"\u00B0",XofT(d*D2R),h-4);
+  /* a_f left (deg) */
+  c.textAlign="right";
+  for(let a=0;a<=12;a+=4) c.fillText(a+"\u00B0",padL-4,YofA(a*D2R)+3);
+  /* q_z right: exact, so a plain tick is enough */
+  c.textAlign="left";
+  const sz=niceStep(F.qzMax);
+  for(let qv=0;qv<=F.qzMax+1e-9;qv+=sz){
+    const af=Math.asin(Math.min(1,Math.max(0,qv/F.k-F.si))), Y=YofA(af);
+    if(af>AFM+1e-9) continue;
+    c.strokeStyle="#C7D3DB"; c.beginPath();
+    c.moveTo(padL+iw,Y); c.lineTo(padL+iw+3,Y); c.stroke();
+    c.fillStyle="#51687A"; c.fillText(qv.toFixed(sz<0.2?2:1),padL+iw+5,Y+3);
+  }
+
+  /* peak indices, weakest first so the strongest label ends up on top. A
+     dashed ring and a down-arrow mark a rod whose maximum is below the
+     horizon: what is on the detector is its clipped tail, not the peak. */
+  let anyBelow=false;
+  if(showIdx) for(const p of detPeaks()){
+    const x=XofT(p.tt), y=YofA(p.af);
+    if(x<padL-3||x>padL+iw+3||y<padT-3||y>padT+ih+3) continue;
+    const col=p.keys.length>1?"#14212A":COL[p.keys[0]];
+    c.beginPath(); c.arc(x,y,5.8,0,TAU);
+    c.strokeStyle=col; c.lineWidth=1.5;
+    if(p.below){ anyBelow=true; c.setLineDash([2.5,2.5]); }
+    c.stroke(); c.setLineDash([]);
+    const lab=p.keys.map(kk=>NICE[kk]).join(",")+(p.below?"\u2193":"");
+    const flip=x>padL+iw*0.66;
+    const tx=flip?x-9:x+9, ty=Math.min(padT+ih-3,Math.max(padT+10,y-7));
+    c.textAlign=flip?"right":"left"; c.font=MONO(10.5);
+    c.lineWidth=3.2; c.strokeStyle="rgba(255,255,255,.9)";
+    c.strokeText(lab,tx,ty);
+    c.fillStyle=col; c.fillText(lab,tx,ty);
+  }
+  c.textAlign="left";
+  const sub=document.getElementById("detsub");
+  if(sub) sub.innerHTML="\u2014 2&theta;\u00B0, &alpha;<sub>f</sub>\u00B0 inside; "+
+    "q<sub>xy</sub>, q<sub>z</sub> in &Aring;<sup>&minus;1</sup> outside"+
+    (anyBelow?" &middot; &darr; = below-horizon tail, not a maximum":"");
+}
+
+
+function drawCut(){
+  const [c,w,h]=fit("cut"); c.clearRect(0,0,w,h);
+  const padL=DET_PAD_L,padR=DET_PAD_R,padB=2,padT=3;
+  const M=model(), k=kOf(), iw=w-padL-padR;
+  let mx=1e-12; for(let i=0;i<NT;i++) if(CUT[i]>mx) mx=CUT[i];
+  const X=i=>padL+i/(NT-1)*iw, Y=v=>h-padB-v/mx*(h-padB-padT);
+  c.strokeStyle="#E5EBEF"; c.beginPath();
+  c.moveTo(padL,h-padB); c.lineTo(padL+iw,h-padB); c.stroke();
+  /* where each |G| would land if the rod were in-plane. A tilted rod peaks a
+     little outside its mark, because it is met at a_f > 0 where the horizontal
+     wavevector is only k cos a_f -- the same effect the iso-q_xy curves show. */
+  c.setLineDash([2,3]);
+  for(const q of [...new Set(M.G.map(R=>+R.q.toFixed(4)))]){
+    if(q>2*k) continue;
+    const x0=2*Math.asin(q/(2*k))/(2*TTH)*iw;
+    for(const sg of [1,-1]){
+      const x=padL+iw/2+sg*x0;
+      if(x<padL||x>padL+iw) continue;
+      c.strokeStyle="rgba(180,83,9,.5)";
+      c.beginPath(); c.moveTo(x,padT); c.lineTo(x,h-padB); c.stroke();
+    }
+  }
+  c.setLineDash([]);
+  c.strokeStyle="#14212A"; c.lineWidth=1.6; c.beginPath();
+  for(let i=0;i<NT;i++) i?c.lineTo(X(i),Y(CUT[i])):c.moveTo(X(i),Y(CUT[i]));
+  c.stroke();
+  c.font=MONO(9.5); c.fillStyle="#8DA1AE";
+  c.textAlign="left"; c.fillText("\u222B d\u03B1_f",2,h/2+3);
+}
+
+/* ---- where the peaks land, against photon energy ---------------------------
+   This panel used to plot |G| against 2k(E) with q <= 2k shaded. The condition
+   is real -- ABOVE the shading means |G| > 2k, i.e. lambda > 2d, and no
+   geometry whatever satisfies Bragg -- but for a chain lattice |G| ~ 1.5 A^-1
+   it bites only below E_min = hc|G|/4pi ~ 1.44 keV. At any energy anyone runs
+   GID at, every line sat far inside the band and the panel said the same thing
+   every time.
+
+   What actually moves with energy is WHERE the peaks land, so that is plotted:
+   2theta(E) = 2 asin(|G|/2k). Each curve simply ENDS at its own E_min, where
+   2theta -> 180 deg and the reflection ceases to exist -- the old "above the
+   shading" case, now shown as the curve running off the top rather than as a
+   region you can never reach. The detector's own +-40 deg half-window is
+   shaded, so the energy at which a reflection enters the frame, and how far the
+   pair separates once inside, are both readable directly. */
+function drawEscan(){
+  const [c,w,h]=fit("escan"); c.clearRect(0,0,w,h);
+  const padL=40,padB=18,padT=8,padR=6;
+  const E0=1.2,E1=26, T0=3,T1=200;
+  const X=E=>padL+(Math.log10(E)-Math.log10(E0))/
+    (Math.log10(E1)-Math.log10(E0))*(w-padL-padR);
+  const Y=t=>h-padB-(Math.log10(t)-Math.log10(T0))/
+    (Math.log10(T1)-Math.log10(T0))*(h-padB-padT);
+  const TTHD=TTH*R2D;
+  /* the detector's half-window */
+  c.fillStyle="rgba(180,83,9,.09)";
+  c.fillRect(padL,Y(TTHD),w-padL-padR,h-padB-Y(TTHD));
+  c.strokeStyle="rgba(180,83,9,.55)"; c.lineWidth=1; c.setLineDash([4,3]);
+  c.beginPath(); c.moveTo(padL,Y(TTHD)); c.lineTo(w-padR,Y(TTHD)); c.stroke();
+  c.setLineDash([]);
+  c.font=MONO(9.5); c.fillStyle="#B45309"; c.textAlign="left";
+  halo(c,"detector edge, 2\u03B8 = "+TTHD.toFixed(0)+"\u00B0",padL+4,Y(TTHD)-4);
+
+  const M=model();
+  const uniq=[...new Set(M.G.map(R=>+R.q.toFixed(4)))].sort((a,b)=>a-b);
+  /* current energy */
+  c.strokeStyle="#15803D"; c.lineWidth=1.4; c.setLineDash([4,3]);
+  c.beginPath(); c.moveTo(X(P.energy),padT); c.lineTo(X(P.energy),h-padB);
+  c.stroke(); c.setLineDash([]);
+  for(const q of uniq){
+    const key=M.G.find(R=>+R.q.toFixed(4)===q).key, Emin=HC*q/(2*TAU);
+    c.strokeStyle=COL[key]; c.lineWidth=1.6; c.beginPath();
+    let f=true;
+    for(let e=Math.max(E0,Emin);e<=E1;e*=1.008){
+      const s=q/(2*TAU*e/HC);
+      if(s>1) continue;
+      const td=2*Math.asin(s)*R2D;
+      if(td>T1) continue;
+      const Xp=X(e), Yp=Y(td);
+      f?(c.moveTo(Xp,Yp),f=false):c.lineTo(Xp,Yp);
+    }
+    c.stroke();
+    /* the threshold: an open circle where the curve leaves the top of the
+       frame. 2theta = 180 deg exactly at E_min, so that IS the end of it. */
+    if(Emin>E0){
+      c.beginPath(); c.arc(X(Emin),Y(T1),4,0,TAU);
+      c.fillStyle="#fff"; c.fill();
+      c.strokeStyle=COL[key]; c.lineWidth=1.8; c.stroke();
+    }
+  }
+  /* Values at the current energy, as one block. The three |G| differ by ~2%, so
+     on this scale the curves lie on top of each other and separate dots would
+     be a lie about legibility -- but the SPLIT between them is the number that
+     decides whether the pair is resolvable, so it is stated outright, in units
+     of the peak width the domain size and bandwidth actually give. */
+  const now=[];
+  for(const q of uniq){
+    const key=M.G.find(R=>+R.q.toFixed(4)===q).key, s=q/(2*kOf());
+    if(s>1) continue;
+    const td=2*Math.asin(s), th=td/2;
+    /* sigma_q -> sigma_2theta by d|Q_xy|/d(2theta) = k cos(theta). Node 1 is
+       the central one of the three size nodes, i.e. the nominal domain size;
+       the outer two are the +-20% spread and would over- or under-state it. */
+    const sq=sigmasFor(q)[1].s;
+    now.push({key,q,td:td*R2D,fw:2.3548*sq/(kOf()*Math.cos(th))*R2D});
+  }
+  if(now.length){
+    /* Anchor the value block to the top-right corner rather than floating it
+       beside the dot. 2theta falls monotonically with E, so that corner is
+       empty at every energy, whereas a dot-relative block collides with the
+       detector-edge label at some energies and not others. */
+    c.beginPath(); c.arc(X(P.energy),Y(now[now.length-1].td),3.6,0,TAU);
+    c.fillStyle="#15803D"; c.fill();
+    const ax=w-padR-4;
+    c.font=MONO(9.5); c.textAlign="right";
+    let yy=padT+10;
+    for(const o of now){
+      c.fillStyle=COL[o.key];
+      halo(c,NICE[o.key]+" "+o.td.toFixed(2)+"\u00B0",ax,yy);
+      yy+=10;
+    }
+    /* The closest pair's separation in units of its own width. Both are fixed
+       in q -- sigma_q = hypot(2pi/L/2.3548, q dE/E) contains no E -- and both
+       convert to 2theta through the same k cos(theta), so the RATIO is
+       energy-independent: 0.79 here from 4.5 to 24 keV. Raising the energy
+       slides the pair to smaller 2theta and shrinks the width by the same
+       factor; it resolves nothing. Domain size does. Worth saying outright,
+       because an energy axis invites exactly the opposite assumption. */
+    if(now.length>1){
+      let best=1e9, fw=now[0].fw;
+      for(let i=1;i<now.length;i++)
+        if(now[i].td-now[i-1].td<best){best=now[i].td-now[i-1].td; fw=now[i].fw;}
+      const r=best/fw;
+      c.fillStyle=r>=1?"#15803D":"#B45309";
+      halo(c,"split "+best.toFixed(3)+"\u00B0 = "+r.toFixed(2)+" FWHM",ax,yy);
+      c.fillStyle="#8DA1AE";
+      halo(c,"(set by domain size, not E)",ax,yy+10);
+    }
+  }
+  /* the reach limit, in one line rather than three near-identical ones */
+  const Ecut=Math.max(...uniq.map(q=>HC*q/(2*TAU)));
+  c.font=MONO(9.5); c.fillStyle="#8DA1AE"; c.textAlign="left";
+  halo(c,"curves end at "+Ecut.toFixed(2)+" keV: \u03BB > 2d, "+
+             "no reflection exists below it",padL+4,h-padB-5);
+  /* frame + ticks */
+  c.strokeStyle="#C7D3DB"; c.lineWidth=1;
+  c.beginPath(); c.moveTo(padL,padT); c.lineTo(padL,h-padB);
+  c.lineTo(w-padR,h-padB); c.stroke();
+  c.font=MONO(10); c.fillStyle="#51687A"; c.textAlign="center";
+  for(const e of [1.5,2,3,5,10,20]) c.fillText(e+"",X(e),h-5);
+  c.textAlign="right";
+  for(const t of [5,10,20,50,100]) c.fillText(t+"\u00B0",padL-4,Y(t)+3);
+  c.textAlign="left"; c.fillStyle="#8DA1AE"; c.font=MONO(9.5);
+  c.fillText("2\u03B8",4,padT+9);
+  c.textAlign="right"; c.fillText("keV",w-4,h-5); c.textAlign="left";
+}
+
+/* -------------------------------------------------------------- readout -- */
+let note="", showNets=true, showIdx=true;
+/* The readout is a table, not an essay. Anything that is a fixed fact about the
+   geometry rather than a number belongs in a column header, a legend or the
+   footer -- so "q_z is signed" is carried by the +-q_z header and by the open
+   dots in the reciprocal-space legend, not by a paragraph restating it on every
+   render. The columns are the ones you would actually write in a notebook. */
+/* padEnd counts the combining macron in (1b1) as a character, so the column
+   would sit one space short. Pad on the VISIBLE width instead. */
+const padKey=k=>NICE[k]+
+  " ".repeat(Math.max(0,5-NICE[k].replace(/[̀-ͯ]/g,"").length));
+function readout(){
+  const M=model(), k=kOf(), lam=HC/P.energy, lit=litNow(), si=Math.sin(P.ai*D2R);
+  let t="\u03BB "+lam.toFixed(4)+" \u00C5 \u00B7 "+P.energy.toFixed(2)+
+    " keV \u00B7 2k "+(2*k).toFixed(3)+" \u00C5\u207B\u00B9\n"+
+    "a "+M.a.toFixed(3)+" \u00B7 b "+M.b.toFixed(3)+" \u00C5 \u00B7 "+
+    (2*M.area).toFixed(2)+" \u00C5\u00B2/molec \u00B7 domain "+P.L.toFixed(0)+
+    " \u00C5\n\nrefl   |G|      d      \u00B1q_z     2\u03B8      \u03B1_f\n";
+  const seen=new Set();
+  for(const R of M.G){
+    const kk=R.key+R.q.toFixed(4);
+    if(seen.has(kk)) continue; seen.add(kk);
+    const ok=R.q<=2*k, d=TAU/R.q, qz=Math.abs(R.qz);
+    /* 2th and a_f as the peak is actually met: a_f from |q_z| first, then 2th
+       at that a_f, matching detPeaks and the detector's iso-q_xy curves. */
+    const af=Math.asin(Math.min(1,Math.max(0,qz/k-si)));
+    const F={k,kp:kpOf(),si}, a=ok?angFromQ(R.q,k*(Math.sin(af)+si),F):null;
+    t+=" "+padKey(R.key)+" "+R.q.toFixed(4)+"  "+d.toFixed(3)+"  "+
+       qz.toFixed(4)+"  "+
+       (a?(a[0]*R2D).toFixed(2)+"\u00B0":ok?"off det":"  \u2014  ")+"  "+
+       (a?(a[1]*R2D).toFixed(2)+"\u00B0":"")+"\n";
+  }
+  t+="\n"+(lit.length?
+    "<u>in condition: "+lit.map(L=>NICE[L.key]+" at 2\u03B8 "+
+      (L.tth*R2D).toFixed(2)+"\u00B0, \u03B1_f "+(L.af*R2D).toFixed(2)+
+      "\u00B0</u>").join("\n<u>")
+    :"<b>nothing in condition</b> \u2014 rotate, or open the spread");
+  if(P.tilt<=0.05)
+    t+="\n\n<b>t = 0</b> \u2014 \u03C8 undefined, n\u0302 = z\u0302, all q_z = 0.";
+  if(note) t+="\n\n"+note;
+  document.getElementById("read").innerHTML=t;
+}
+
+/* ------------------------------------------------------------ controls --- */
+/* Every control is a slider PLUS an editable numeric field. Typing a value and
+   pressing Enter (or leaving the field) snaps the slider to it. Values outside
+   the slider's range are clamped and the field is rewritten to the clamped
+   value with a brief red border, so a silent clamp never happens. */
+const S = {};
+function mk(host, o) {
+  const row = document.createElement("div"); row.className = "row";
+  row.innerHTML =
+    `<label for="${o.id}">${o.label}</label>` +
+    `<input type="range" id="${o.id}" min="${o.min}" max="${o.max}" ` +
+    `step="${o.step}" value="${o.val}" style="--acc:${o.acc}" ` +
+    `aria-label="${o.aria || o.label}">` +
+    `<input type="number" class="num" id="n_${o.id}" min="${o.min}" ` +
+    `max="${o.max}" step="${o.step}" value="${o.val}" ` +
+    `aria-label="${o.aria || o.label} (type a value)">` +
+    `<span class="unit" id="u_${o.id}"></span>`;
+  document.getElementById(host).appendChild(row);
+  const rng = row.querySelector("input[type=range]");
+  const num = row.querySelector("input.num");
+  const unit = row.querySelector("span.unit");
+  const show = v => (o.dec === 0 ? String(Math.round(v)) : v.toFixed(o.dec));
+
+  /* one path for every source of change: slider, field, preset, or spin */
+  function apply(v, from) {
+    if (!isFinite(v)) { num.value = show(rng.valueAsNumber); return; }
+    const c = Math.min(o.max, Math.max(o.min, v));
+    o.set(c);
+    rng.value = c;
+    if (from !== "num" || c !== v) num.value = show(c);
+    if (c !== v && from === "num") {
+      num.classList.add("clamped");
+      setTimeout(() => num.classList.remove("clamped"), 900);
+    }
+    unit.textContent = o.unit ? (typeof o.unit === "function" ? o.unit() : o.unit) : "";
+    render();
+  }
+  rng.addEventListener("input", () => apply(rng.valueAsNumber, "rng"));
+  num.addEventListener("change", () => apply(num.valueAsNumber, "num"));
+  num.addEventListener("keydown", e => {
+    if (e.key === "Enter") { apply(num.valueAsNumber, "num"); num.blur(); }
+  });
+  S[o.id] = { rng, num, unit, apply, o, refresh: () => apply(o.get(), "sync") };
+}
+
+mk("gA", {id:"azim", label:"azimuth \u03C6_s", min:0, max:360, step:0.1, val:0,
+  dec:1, unit:"\u00B0", acc:"#15803D", aria:"sample azimuth in degrees",
+  set:v=>{P.azim=v;}, get:()=>P.azim});
+mk("gA", {id:"spread", label:"azim. spread", min:0, max:360, step:1, val:0,
+  dec:0, unit:"\u00B0", acc:"#B45309", aria:"azimuthal spread in degrees",
+  set:v=>{P.spread=v;}, get:()=>P.spread});
+mk("gA", {id:"energy", label:"energy", min:1.45, max:24, step:0.01, val:10,
+  dec:2, unit:"keV", acc:"#6D28D9", aria:"photon energy in keV",
+  set:v=>{P.energy=v;}, get:()=>P.energy});
+mk("gA", {id:"L", label:"domain size", min:40, max:800, step:5, val:200,
+  dec:0, unit:"\u00C5", acc:"#0E7490", aria:"domain size in angstrom",
+  set:v=>{P.L=v;}, get:()=>P.L});
+mk("gB", {id:"a0", label:"a\u2080 (\u22A5 chain)", min:4.2, max:5.6, step:0.005,
+  val:4.8743, dec:3, unit:"\u00C5", acc:"#0E7490",
+  aria:"nearest-neighbour spacing perpendicular to the chain, angstrom",
+  set:v=>{P.a0=v;}, get:()=>P.a0});
+mk("gB", {id:"tilt", label:"tilt t", min:0, max:45, step:0.05, val:18.85,
+  dec:2, unit:"\u00B0", acc:"#C2410C", aria:"chain tilt in degrees",
+  set:v=>{P.tilt=v;}, get:()=>P.tilt});
+mk("gB", {id:"tpsi", label:"tilt azim \u03C8", min:0, max:90, step:1, val:0,
+  dec:0, acc:"#C2410C", aria:"tilt azimuth in degrees",
+  unit:()=>P.tilt<=0.05 ? "n/a" : (P.tpsi<3 ? "\u00B0 NN"
+        : P.tpsi>87 ? "\u00B0 NNN" : "\u00B0"),
+  set:v=>{P.tpsi=v;}, get:()=>P.tpsi});
+mk("gB", {id:"eps", label:"extra strain", min:-8, max:14, step:0.1, val:-3.21,
+  dec:2, unit:"%", acc:"#6D28D9", aria:"extra uniaxial strain in percent",
+  set:v=>{P.eps=v/100;}, get:()=>P.eps*100});
+
+function push(){ for(const k in S) S[k].refresh(); }
+
+/* ------------------------------------------------------------- buttons ---- */
+document.querySelectorAll("button.pre").forEach(b => b.onclick = () => {
+  const pr = PRESETS[b.dataset.pre];
+  Object.assign(P, {a0:pr.a0, tilt:pr.tilt, tpsi:pr.tpsi, eps:pr.eps, L:pr.L});
+  note = pr.note; push();
+});
+document.getElementById("bPow").onclick = () => {
+  P.spread = 360;
+  note = "2D powder: every in-plane orientation is present."; push(); };
+document.getElementById("bSingle").onclick = () => {
+  P.spread = 0;
+  note = "One domain: reflections are isolated events in azimuth."; push(); };
+document.getElementById("bNets").onclick = e => {
+  showNets = !showNets; e.target.classList.toggle("on", showNets); render(); };
+document.getElementById("bIdx").onclick = e => {
+  showIdx = !showIdx; e.target.classList.toggle("on", showIdx); render(); };
+let spinning = false, raf = 0;
+document.getElementById("bSpin").onclick = e => {
+  spinning = !spinning; e.target.classList.toggle("on", spinning);
+  e.target.textContent = spinning ? "Stop" : "Spin";
+  if (spinning) {
+    let last = performance.now();
+    const step = now => {
+      if (!spinning) return;
+      P.azim = (P.azim + (now - last) * 0.015) % 360; last = now;
+      S.azim.refresh(); raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+  } else cancelAnimationFrame(raf);
+};
+document.getElementById("bCheck").onclick = () => {
+  const M = model(), k = kOf(), lam = HC / P.energy;
+  let wB = 0, wR = 0;
+  for (const R of M.G) {
+    if (R.q > 2 * k) continue;
+    const d = TAU / R.q, st = R.q / (2 * k);
+    wB = Math.max(wB, Math.abs(2 * d * st - lam));
+    wR = Math.max(wR, Math.abs(Math.acos(-R.q / (2 * k))
+                               - Math.PI / 2 - Math.asin(st)));
+  }
+  const keep = P.azim; let ev = 0, prev = 0, ms = 0;
+  for (let a = 0; a < 360; a += 0.02) {
+    P.azim = a; const n = litNow().length;
+    ms = Math.max(ms, n); if (n > 0 && prev === 0) ev++; prev = n;
+  }
+  P.azim = keep;
+  const g02 = M.G.find(R => R.key === "02"), g11 = M.G.find(R => R.key === "11"),
+        g1m = M.G.find(R => R.key === "1m1");
+  const sr = Math.min(Math.abs(g02.qz - (g11.qz - g1m.qz)),
+                      Math.abs(g02.qz - (g11.qz + g1m.qz)));
+  const up = M.G.filter(R => R.qz > 1e-9).length,
+        dn = M.G.filter(R => R.qz < -1e-9).length;
+  note = "CHECKS\n  Bragg 2d sin\u03B8 \u2212 \u03BB        max " + wB.toExponential(2) +
+    "\n  \u03C6_G \u2212 (90\u00B0 + \u03B8)          max " + wR.toExponential(2) +
+    "\n  q_z sum-rule residual        " + sr.toExponential(2) +
+    "\n  signed q_z: " + up + " above horizon, " + dn + " below" +
+    "\n  azimuth sweep: " + ev + " events, at most " + ms + " at once" +
+    "\n  A/molecule = " + (2 * M.area).toFixed(3) + " \u00C5\u00B2";
+  render();
+};
+
+/* --------------------------------------------- coupling to an XModFit fit --
+   The ONLY quantity read from the fit is the photon energy: XModFit's XLayers
+   family takes E in keV as a constructor argument and stores it as func.E, so
+   syncing it makes the Ewald sphere match the actual beamline rather than a
+   default. Nothing else is assumed -- XModFit has no in-plane lattice model, so
+   a0/tilt/psi/strain stay under the user's control here. The layer stack is
+   reported for reference only; comparing an area per molecule from GID with a
+   tail-region electron density from XRR is a real cross-check but it needs
+   assumptions this tool does not make for you. */
+let fitInfo = null;
+window.setFromFit = function (cfg) {
+  fitInfo = cfg && Object.keys(cfg).length ? cfg : null;
+  if (fitInfo && isFinite(fitInfo.E)) {
+    const e = Math.min(24, Math.max(1.45, +fitInfo.E));
+    P.energy = e;
+    if (Math.abs(e - fitInfo.E) > 1e-9)
+      fitInfo._clamped = "energy clamped to the slider range";
+  }
+  push();
+  drawFitBar();
+};
+function drawFitBar() {
+  const el = document.getElementById("fitbar");
+  if (!el) return;
+  if (!fitInfo) {
+    el.innerHTML = "<i>standalone: no XModFit fit attached. " +
+      "All parameters are yours to set.</i>";
+    return;
+  }
+  let t = "";
+  if (isFinite(fitInfo.E))
+    t += "energy <b>" + (+fitInfo.E).toFixed(3) + " keV</b> synced from " +
+         (fitInfo.model || "the fit") + "; ";
+  else
+    t += "<i>the selected model exposes no E; energy is yours to set. </i>";
+  if (fitInfo.nlayers)
+    t += fitInfo.nlayers + " layers, total d = " +
+         (+fitInfo.dtot).toFixed(1) + " \u00C5 (reference only). ";
+  t += "<i>Lattice parameters are not taken from the fit \u2014 XModFit has no " +
+       "in-plane lattice model.</i>";
+  if (fitInfo._clamped) t += " <b>" + fitInfo._clamped + "</b>";
+  el.innerHTML = t;
+}
+
+let pending=false;
+function render(){
+  if(pending) return; pending=true;
+  requestAnimationFrame(()=>{ pending=false;
+    computeDetector(); drawEwald(); draw3D(); drawNets(); drawDet();
+    drawCut(); drawEscan(); readout();
+    S.tpsi.unit.textContent = S.tpsi.o.unit(); });
+}
+window.addEventListener("resize",render);
+push();
+setFromFit(XMODFIT_CFG);
+</script>
