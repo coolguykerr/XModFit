@@ -39,7 +39,7 @@ from PyQt5.QtCore import Qt
 
 DS = [os.path.join('Data', 'i2_tim3_1000_test.txt'),
       os.path.join('Data', 'd6_tim3_1000_test.txt')]
-PDB = os.path.join('Data', 'tim3_hmmm_ext_all_bestframe.pdb')
+PDB = os.path.join('Data', '1ubq.pdb')
 PAR = os.path.join('Data', 'i2_tim3_1000_test_fitparam.par')
 
 _OK = {"ok": True}

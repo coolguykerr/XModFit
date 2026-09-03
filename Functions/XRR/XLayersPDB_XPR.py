@@ -104,7 +104,7 @@ class XLayersPDB_XPR:  # Please put the class name same as the function name
       it holds, so an existing setup keeps its old (possibly infinite) ones.
     """
 
-    def __init__(self, x=0.1, E=10.0, fname='./Data/tim3_hmmm_ext_all_bestframe.pdb',
+    def __init__(self, x=0.1, E=10.0, fname='./Data/1ubq.pdb',
                  mpar={'Model': {'Layers': ['top', 'tail', 'head', 'bottom'],
                                  'd': [0.0, 13.4, 10.0, 1.0],
                                  'rho': [0.0, 0.243, 0.453, 0.334]}},

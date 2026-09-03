@@ -8,7 +8,7 @@
 #Fit Iterations=1000
 #Fixed Parameters:
 #param	value
-fname	./Data/tim3_hmmm_ext_all_bestframe.pdb
+fname	./Data/1ubq.pdb
 E	10.0
 dz	0.5
 fslice	0.5

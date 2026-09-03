@@ -452,7 +452,7 @@ def _protarea(key, theta, phi, mode, preset, softbeta):
 # ================================= model ===================================
 
 class XLayersPDB_dev_smooth:  # Please put the class name same as the function name
-    def __init__(self, x=0.1, E=10.0, fname='./Data/tim3_hmmm_ext_all_bestframe.pdb', mpar={
+    def __init__(self, x=0.1, E=10.0, fname='./Data/1ubq.pdb', mpar={
         'Model': {'Layers': ['top', 'bottom'], 'd': [0.0, 1.0], 'rho': [0.0, 0.333],
                   'mu': [0.0, 0.0], 'sig': [3.0, 3.0]}},
                  dz=0.25, fslice=0.5, rrf=True, fix_sig=True, qoff=0.0, yscale=1, bkg=0.0,
@@ -948,7 +948,7 @@ if __name__ == '__main__':
     mpar = {'Model': {'Layers': ['air', 'tail', 'head', 'buffer'],
                       'd': [0.0, 13.4, 10.0, 1.0], 'rho': [0.0, 0.243, 0.453, 0.334],
                       'mu': [0.0, 0.0, 0.0, 0.0], 'sig': [3.4, 3.4, 3.4, 3.4]}}
-    fun = XLayersPDB_dev_smooth(x=x, E=10.0, fname='./tim3_hmmm_ext_all_bestframe.pdb',
+    fun = XLayersPDB_dev_smooth(x=x, E=10.0, fname='./Data/1ubq.pdb',
                                 mpar=mpar, dz=0.25, fslice=0.5, rrf=False, cov=0.1)
     fun.theta, fun.phi, fun.protins = 90.0, 240.0, 18.0
     fun.params['theta'].value, fun.params['phi'].value = 90.0, 240.0
