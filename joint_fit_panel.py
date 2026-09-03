@@ -150,6 +150,28 @@ def _fmt(v):
         return str(v)
 
 
+class JointDatasetList(QListWidget):
+    """Joint-fit dataset list with the same plain-click rule as the main Data list:
+    a plain click on a dataset ALREADY in a multi-selection keeps the whole selection
+    (all joint curves stay overlaid) and just switches which dataset's parameters show
+    (the detail); a plain click on a new dataset collapses (Qt default); Ctrl+click
+    toggles add/remove. Routes the detail switch to ``JointFitPanel._on_joint_detail_click``."""
+    def __init__(self, panel, parent=None):
+        super().__init__(parent)
+        self._panel = panel
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and e.modifiers() == Qt.NoModifier:
+            item = self.itemAt(e.pos())
+            if item is not None and item.isSelected() and len(self.selectedItems()) > 1:
+                try:
+                    self._panel._on_joint_detail_click(item.text())
+                except Exception:
+                    import traceback; traceback.print_exc()
+                return
+        super().mousePressEvent(e)
+
+
 # --------------------------------------------------------------------------- #
 #  the dock widget
 # --------------------------------------------------------------------------- #
@@ -192,7 +214,7 @@ class JointFitPanel(QWidget):
         self.addBtn.clicked.connect(self.add_selected_datasets)
         self.removeBtn = QPushButton("Remove")
         self.removeBtn.clicked.connect(self.remove_selected_datasets)
-        self.datasetList = QListWidget()
+        self.datasetList = JointDatasetList(self)
         self.datasetList.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.datasetList.setItemDelegate(NameDelegate(self.datasetList))   # show basenames
         self.datasetList.itemSelectionChanged.connect(self._on_dataset_list_selection)
@@ -223,6 +245,19 @@ class JointFitPanel(QWidget):
         covl.addWidget(QLabel("Double-click a cell to attach a sidecar (.npz or *_c_factors.txt)."))
         covl.addWidget(self.covTable)
         body.addWidget(covBox)
+
+        # --- per-dataset fit range (xmin:xmax) ---
+        rngBox = QGroupBox("Per-dataset fit range (blank = use the global Xrange box)")
+        rngl = QVBoxLayout(rngBox)
+        self.rangeTable = QTableWidget(0, 3)
+        self.rangeTable.setHorizontalHeaderLabels(["Dataset", "xmin", "xmax"])
+        self.rangeTable.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        # only xmin/xmax are editable; the dataset column is read-only (set per-cell)
+        self.rangeTable.itemChanged.connect(self._on_range_item_changed)
+        rngl.addWidget(QLabel("Double-click xmin/xmax to edit; each row fits only "
+                              "its own q-window."))
+        rngl.addWidget(self.rangeTable)
+        body.addWidget(rngBox)
 
         # --- master/detail dataset selector ---
         selRow = QHBoxLayout()
@@ -261,6 +296,18 @@ class JointFitPanel(QWidget):
         self.runBtn = QPushButton("Run joint fit")
         self.runBtn.clicked.connect(self.run)
         body.addWidget(self.runBtn)
+
+        # --- joint MCMC (its own window; enabled only after a joint fit) ---
+        self.jointMCMCBtn = QPushButton("Joint MCMC / Param Error…")
+        self.jointMCMCBtn.setToolTip(
+            "Open the dedicated joint-fit MCMC window (separate from the "
+            "individual-fit MCMC). Run a joint fit first; the window explains what "
+            "to do if none has been run yet.")
+        # Always enabled so it is discoverable; the host guards on 'no joint fit yet'
+        # with an actionable message (the button was previously left disabled after a
+        # joint fit run via the main Fit button, which never re-enabled it).
+        self.jointMCMCBtn.clicked.connect(lambda: self._p("confInterval_joint_emcee"))
+        body.addWidget(self.jointMCMCBtn)
 
         root.addWidget(self.body)
         self.body.setVisible(False)       # collapsed until 'Enable joint fit' is ticked
@@ -387,9 +434,15 @@ class JointFitPanel(QWidget):
             return
         names = [it.text() for it in self.datasetList.selectedItems()]
         if not names:
+            # blank-click / deselect-all in the joint list -> drop the joint view
+            # (symmetric with a blank-click in the general Data list).
+            self._p("clear_joint_view")
             return
-        # mutual exclusion: selecting joint dataset(s) releases the individual selection
-        self._p("clear_individual_selection")
+        # Selection model (item B2): a PLAIN click is mutually exclusive with the
+        # individual Data list (classic one-view behaviour). Hold Ctrl to KEEP the
+        # individual selection so the two views overlay (host's _maybe_combined_overlay).
+        if not self._p("_overlay_modifier_active"):
+            self._p("clear_individual_selection")
         # mirror the detail into the combo without recursing
         self.datasetSelector.blockSignals(True)
         _idx = self.datasetSelector.findData(names[-1])
@@ -400,6 +453,27 @@ class JointFitPanel(QWidget):
             self._p("show_joint_datasets", names)
         else:
             self._p("show_joint_dataset", names[-1])
+
+    def _on_joint_detail_click(self, name):
+        """Plain click on an already-selected joint dataset within a multi-selection:
+        switch the DETAIL (which dataset's parameters show) WITHOUT collapsing the
+        selection -- all joint curves stay overlaid. Does not touch the individual
+        selection (so a combined overlay is preserved)."""
+        if self._refreshing:
+            return
+        names = [it.text() for it in self.datasetList.selectedItems()]
+        if not names:
+            return
+        ordered = [n for n in names if n != name] + [name]   # clicked = detail (last)
+        self.datasetSelector.blockSignals(True)
+        _idx = self.datasetSelector.findData(name)
+        if _idx >= 0:
+            self.datasetSelector.setCurrentIndex(_idx)
+        self.datasetSelector.blockSignals(False)
+        if getattr(self.parent_app, "show_joint_datasets", None):
+            self._p("show_joint_datasets", ordered)
+        else:
+            self._p("show_joint_dataset", name)
 
     # ---- master/detail selector ----------------------------------------- #
     def _on_selector_changed(self, *args):
@@ -453,6 +527,7 @@ class JointFitPanel(QWidget):
         self._refresh_selector()
         self._refresh_shared_table()
         self._refresh_cov_table()
+        self._refresh_ranges_table()
         self._refresh_readout()
         self._p("_refresh_data_labels")   # update joint-membership marks in the Data list
 
@@ -553,6 +628,55 @@ class JointFitPanel(QWidget):
             self.covTable.setItem(r, 0, nameItem)
             self.covTable.setItem(r, 1, QTableWidgetItem(os.path.basename(e.cov_path) if e.cov_path else ""))
             self.covTable.setItem(r, 2, QTableWidgetItem(os.path.basename(e.raw_path) if e.raw_path else ""))
+
+    # ---- per-dataset fit range ------------------------------------------ #
+    def _refresh_ranges_table(self):
+        """Fill the fit-range table from the spec (one row per dataset).
+
+        xmin/xmax cells show the entry's stored bound, or blank when None
+        (meaning: fall back to the global Xrange box at fit time)."""
+        self._refreshing = True
+        try:
+            self.rangeTable.setRowCount(0)
+            for e in self.spec.datasets:
+                r = self.rangeTable.rowCount()
+                self.rangeTable.insertRow(r)
+                nameItem = QTableWidgetItem(display_name(e.name))
+                nameItem.setData(Qt.UserRole, e.name)
+                nameItem.setFlags(Qt.ItemIsEnabled)          # read-only
+                self.rangeTable.setItem(r, 0, nameItem)
+                self.rangeTable.setItem(
+                    r, 1, QTableWidgetItem("" if e.fit_xmin is None else "%g" % e.fit_xmin))
+                self.rangeTable.setItem(
+                    r, 2, QTableWidgetItem("" if e.fit_xmax is None else "%g" % e.fit_xmax))
+        finally:
+            self._refreshing = False
+
+    def _on_range_item_changed(self, item):
+        """Write an edited xmin/xmax back to the spec entry. Blank clears the
+        bound (-> global fallback); non-numeric text is reverted."""
+        if self._refreshing or item.column() not in (1, 2):
+            return
+        name = self.rangeTable.item(item.row(), 0).data(Qt.UserRole)
+        entry = next((e for e in self.spec.datasets if e.name == name), None)
+        if entry is None:
+            return
+        txt = item.text().strip()
+        val = None
+        if txt != "":
+            try:
+                val = float(txt)
+            except ValueError:
+                # revert to the stored value
+                self._refreshing = True
+                cur = entry.fit_xmin if item.column() == 1 else entry.fit_xmax
+                item.setText("" if cur is None else "%g" % cur)
+                self._refreshing = False
+                return
+        if item.column() == 1:
+            entry.fit_xmin = val
+        else:
+            entry.fit_xmax = val
 
     def _refresh_readout(self):
         jf = getattr(self.parent_app, "fit", None)

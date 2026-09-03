@@ -33,6 +33,10 @@ class PlotWidget(QWidget):
         self.data_num=0
         self.yerr={}
         self.fit={}
+        self.linestyle={}   # per-curve Qt.PenStyle override (e.g. DashLine); None=solid
+        # Optional callable(dname)->str to compute a friendly LEGEND label from a curve
+        # key (the host sets this so the legend shows dataset names, not raw keys).
+        self.legend_formatter=None
         
        
     def createPlotWidget(self):
@@ -55,6 +59,14 @@ class PlotWidget(QWidget):
         self.bgCheckBox.stateChanged.connect(self.bgCheckBoxChanged)
         self.errorbarCheckBox=QCheckBox('Errorbar')
         self.errorbarCheckBox.stateChanged.connect(self.errorbarChanged)
+        # Data line toggle: when OFF (default) DATA curves are drawn as markers only
+        # (no connecting line), so they don't read as a second fit curve when a fit is
+        # overlaid. When ON, data also gets its connecting line. Fit curves are always
+        # lines regardless of this toggle.
+        self.dataLineCheckBox=QCheckBox('Data line')
+        self.dataLineCheckBox.setToolTip('Draw a connecting line through DATA points '
+                                         '(fits are always lines). Off = markers only.')
+        self.dataLineCheckBox.stateChanged.connect(self.dataLineChanged)
         self.plotLayout.addWidget(lineWidthLabel,row=row,col=col)
         col+=1
         self.plotLayout.addWidget(self.lineWidthLineEdit,row=row,col=col)
@@ -66,6 +78,8 @@ class PlotWidget(QWidget):
         self.plotLayout.addWidget(self.bgCheckBox,row=row,col=col)
         col+=1
         self.plotLayout.addWidget(self.errorbarCheckBox,row=row,col=col)
+        col+=1
+        self.plotLayout.addWidget(self.dataLineCheckBox,row=row,col=col)
         col=0
         row+=1
         if self.matplotlib:
@@ -134,7 +148,58 @@ class PlotWidget(QWidget):
         #self.crosshairLabel.setText(u'X=%+0.5f, Y=%+0.5e'%(x,y))
         
         
-    def add_data(self,x,y,yerr=None,name=None,fit=False,color=None):
+    def _legend_text(self,dname):
+        """Friendly legend label for a curve key via the host-supplied formatter;
+        falls back to the raw key."""
+        try:
+            if callable(self.legend_formatter):
+                lbl=self.legend_formatter(dname)
+                if lbl:
+                    return lbl
+        except Exception:
+            pass
+        return dname
+
+    def _pen_for(self,dname,color):
+        """Build the line pen for a curve, honouring the fit flag, the 'Data line'
+        toggle and any per-curve linestyle. Returns None for DATA curves when the line
+        is suppressed (markers-only) -- pyqtgraph then draws symbols with no line."""
+        try:
+            width=float(self.lineWidthLineEdit.text())
+        except Exception:
+            width=2.0
+        style=self.linestyle.get(dname) or Qt.SolidLine
+        is_fit=self.fit.get(dname,False)
+        if not is_fit:
+            # DATA: line only when the toggle is on and width != 0
+            if (not self.dataLineCheckBox.isChecked()) or width==0:
+                return None
+        return pg.mkPen(color=color,width=width,style=style)
+
+    def dataLineChanged(self):
+        """Re-pen every curve honouring the DATA connecting-line toggle, then re-plot.
+        (Plot() alone re-adds existing items without recomputing pens, so the pen must
+        be rebuilt here for the toggle to take effect.)"""
+        for dname in list(self.data.keys()):
+            try:
+                color=self.data[dname].opts['symbolPen'].color()
+            except Exception:
+                try:
+                    color=self.data[dname].opts['pen'].color()
+                except Exception:
+                    continue
+            pen=self._pen_for(dname,color)
+            if pen is None:
+                self.data[dname].opts['pen']=None
+                self.data[dname].updateItems()
+            else:
+                self.data[dname].setPen(pen)
+        try:
+            self.Plot(self.selDataNames)
+        except Exception:
+            pass
+
+    def add_data(self,x,y,yerr=None,name=None,fit=False,color=None,linestyle=None):
         """
         Adds data into the plot where:
         x=Array of x-values
@@ -142,6 +207,8 @@ class PlotWidget(QWidget):
         yerr=Array of yerr-values. If None yerr will be set to sqrt(y)
         name=any string to be used for the key to put the data
         fit= True if the data corresponds to a fit
+        linestyle= optional Qt.PenStyle (e.g. Qt.DashLine) for the line; None=solid.
+                   Used to distinguish overlaid curves (e.g. individual vs joint fit).
         """
         if not (isinstance(yerr,list) or isinstance(yerr,np.ndarray)):
             yerr=np.ones_like(y)
@@ -155,10 +222,11 @@ class PlotWidget(QWidget):
             else:
                 self.yerr[dname]=True
             self.fit[dname]=fit
+            self.linestyle[dname]=linestyle
             if dname in self.data.keys():
                 if color is None:
                     color=self.data[dname].opts['symbolPen'].color()
-                pen=pg.mkPen(color=color,width=float(self.lineWidthLineEdit.text()))
+                pen=self._pen_for(dname,color)
                 symbol='o'
                 if self.fit[dname]:
                     symbol=None
@@ -180,7 +248,7 @@ class PlotWidget(QWidget):
                     color=_pal[_ct % len(_pal)]
                     self._palette_ct=_ct+1
                 #color=self.data[dname].opts['pen'].color()
-                pen=pg.mkPen(color=color,width=float(self.lineWidthLineEdit.text()))
+                pen=self._pen_for(dname,color)
                 symbol='o'
                 if self.fit[dname]:
                     symbol=None
@@ -249,8 +317,10 @@ class PlotWidget(QWidget):
             for dname in self.selDataNames:
                 if self.fit[dname]:
                     plot_type = '-'
-                else:
+                elif self.dataLineCheckBox.isChecked():
                     plot_type = '.-'
+                else:
+                    plot_type = '.'
                 if self.errorbarCheckBox.checkState()==Qt.Checked:
                     try:
                         self.mplPlotData[dname].set_xdata(self.data[dname].xData)
@@ -261,7 +331,7 @@ class PlotWidget(QWidget):
                         self.mplErrorData[dname].set_segments(np.array([[x,yt],[x,yb]]) for x,yt,yb in zip(self.data[dname].xData,self.dataErrPos[dname].yData,self.dataErrNeg[dname].yData))
                         self.mplErrorData[dname].set_linewidth(2)
                     except:
-                        ln,err,bar =self.subplot.errorbar(self.data[dname].xData,self.data[dname].yData,xerr=None,yerr=self.dataErr[dname].opts['top']*2,fmt=plot_type,markersize=int(self.pointSizeLineEdit.text()),linewidth=int(self.lineWidthLineEdit.text()),label=dname)
+                        ln,err,bar =self.subplot.errorbar(self.data[dname].xData,self.data[dname].yData,xerr=None,yerr=self.dataErr[dname].opts['top']*2,fmt=plot_type,markersize=int(self.pointSizeLineEdit.text()),linewidth=int(self.lineWidthLineEdit.text()),label=self._legend_text(dname))
                         self.mplPlotData[dname]=ln
                         self.mplErrorData[dname],=bar
                 else:
@@ -271,7 +341,7 @@ class PlotWidget(QWidget):
                         self.mplPlotData[dname].set_markersize(int(self.pointSizeLineEdit.text()))
                         self.mplPlotData[dname].set_linewidth(int(self.lineWidthLineEdit.text()))
                     except:
-                        self.mplPlotData[dname], =self.subplot.plot(self.data[dname].xData,self.data[dname].yData,plot_type,markersize=int(self.pointSizeLineEdit.text()),linewidth=int(self.lineWidthLineEdit.text()),label=dname)
+                        self.mplPlotData[dname], =self.subplot.plot(self.data[dname].xData,self.data[dname].yData,plot_type,markersize=int(self.pointSizeLineEdit.text()),linewidth=int(self.lineWidthLineEdit.text()),label=self._legend_text(dname))
             if self.xLogCheckBox.checkState()==Qt.Checked:
                 self.subplot.set_xscale('log')
             else:
@@ -294,8 +364,19 @@ class PlotWidget(QWidget):
         else:
             self.plotWidget.plotItem.setLogMode(x=False,y=False)
             self.plotWidget.clear()
-            for names in self.data.keys():
-                self.legendItem.removeItem(names)
+            # Rebuild the legend from scratch each redraw. removeItem(name) matches by the
+            # DISPLAYED label, which now differs from the curve key (legend_formatter), so
+            # per-name removal silently failed and legend entries piled up (every curve,
+            # duplicated, out of order). clear() is authoritative; fall back to removing by
+            # the item reference for older pyqtgraph without LegendItem.clear().
+            try:
+                self.legendItem.clear()
+            except Exception:
+                for _n in list(self.data.keys()):
+                    try:
+                        self.legendItem.removeItem(self.data[_n])
+                    except Exception:
+                        pass
             xlog_res=True
             ylog_res=True
             for dname in self.selDataNames:
@@ -331,7 +412,7 @@ class PlotWidget(QWidget):
                     # self.plotWidget.addItem(self.dataErrNeg[dname])
                     #self.plotWidget.addItem(self.dataErr[dname])
                     #self.dataErr[dname].setCurves(self.dataErrPos[dname],self.dataErrNeg[dname])
-                self.legendItem.addItem(self.data[dname],dname)
+                self.legendItem.addItem(self.data[dname],self._legend_text(dname))
             if self.xLogCheckBox.checkState()==Qt.Checked:
                 self.plotWidget.plotItem.setLogMode(x=True)
             else:
@@ -366,16 +447,17 @@ class PlotWidget(QWidget):
     def updatePlot(self):
         try:
             for dname in self.selDataNames:
-                if self.lineWidthLineEdit.text()=='0' and not self.fit[dname]:
+                # curve color = the symbol's color (data + fit share a color)
+                try:
+                    color=self.data[dname].opts['symbolPen'].color()
+                except Exception:
+                    color=self.data[dname].opts['pen'].color()
+                pen=self._pen_for(dname,color)   # honours 'Data line' toggle + linestyle
+                if pen is None:
                     self.data[dname].opts['pen']=None
                     self.data[dname].updateItems()
                 else:
-                    #try:
-                    self.data[dname].setPen(self.data[dname].opts['symbolPen']) #setting the same color as the symbol
-                    color=self.data[dname].opts['pen'].color()
-                    self.data[dname].setPen(pg.mkPen(color=color,width=float(self.lineWidthLineEdit.text())))
-                    #except:
-                    #    self.data[dname].setPen(pg.mkPen(color='b',width=float(self.lineWidthLineEdit.text())))
+                    self.data[dname].setPen(pen)
                 self.data[dname].opts['symbol']='o'
                 if self.fit[dname]:
                     self.data[dname].setSymbolSize(0)

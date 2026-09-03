@@ -40,6 +40,7 @@ plain Python for validation.
 
 import numpy as np
 from lmfit import fit_report, Minimizer, Parameters
+from Fit_Routines import _window_indices   # one definition of the x window
 
 try:
     from scipy.linalg import solve_triangular as _solve_tri
@@ -109,7 +110,7 @@ class JointFit(QObject):
     #  dataset registration
     # ----------------------------------------------------------------- #
     def add_dataset(self, name, funcClass=None, x=None, y=None, yerr=None,
-                    func=None, cov=None):
+                    func=None, cov=None, mask=None):
         """Register one dataset as a joint-fit objective.
 
         Parameters
@@ -149,6 +150,16 @@ class JointFit(QObject):
             y_use = np.zeros_like(x) if y is None else np.asarray(y, dtype=float)
             yerr_use = np.ones_like(x) if yerr is None else np.asarray(yerr, dtype=float)
 
+        if mask is not None:
+            mask = np.asarray(mask, dtype=bool)
+            # Assert rather than trust: the host builds masks from a DataFrame
+            # column while _primary_curve registers x from the FIRST sub_key only.
+            # Those are row-aligned today, and this is what makes a future
+            # violation fail here at registration instead of silently
+            # misaligning the covariance whitening later.
+            if len(mask) != len(x):
+                raise ValueError("mask for %r has %d points but x has %d"
+                                 % (name, len(mask), len(x)))
         obj = {
             "name": name,
             "func": func,
@@ -157,6 +168,9 @@ class JointFit(QObject):
             "yerr": yerr_use,
             "imin": 0,
             "imax": len(x) - 1,
+            "imask": None,      # window-restricted mask, frozen by _set_ranges
+            "yfit_masked": False,  # did evaluate() already apply imask to yfit?
+            "mask": mask,       # full-length eligibility mask, or None
             "cov": cov,
         }
         self.objectives.append(obj)
@@ -426,12 +440,24 @@ class JointFit(QObject):
                 lp.value = v                       # multipar path (update_parameters)
 
     def evaluate(self):
-        """Evaluate every objective's model on its [imin, imax] slice."""
+        """Evaluate every objective's model on its [imin, imax] slice.
+
+        A model declaring ``__masked_x__ = True`` receives only the ACTIVE points
+        (see Fit.evaluate for the safety taxonomy). ``obj["yfit_masked"]`` records
+        whether that happened, so residual() knows not to mask the result twice.
+        """
         yfits = []
         for obj in self.objectives:
             func = obj["func"]
             func.__fit__ = True
-            func.x = obj["x"][obj["imin"]:obj["imax"] + 1]
+            seg = obj["x"][obj["imin"]:obj["imax"] + 1]
+            im = obj.get("imask")
+            if im is not None and bool(getattr(func, "__masked_x__", False)):
+                seg = seg[im[:len(seg)]]
+                obj["yfit_masked"] = True
+            else:
+                obj["yfit_masked"] = False
+            func.x = seg
             yfits.append(np.asarray(func.y(), dtype=float))
         return yfits
 
@@ -445,15 +471,24 @@ class JointFit(QObject):
         for obj in self.objectives:
             i0, i1 = obj["imin"], obj["imax"] + 1
             cov = obj["cov"]
-            yc.append(cov["y_corr"][i0:i1])
-            sm.append(cov["sigma_meas"][i0:i1])
-            ki.append(np.asarray(cov["k_index"])[i0:i1])
+            # MASK COMPOSITION ORDER, and it matters: (1) slice [imin,imax],
+            # (2) apply this objective's imask, (3) concatenate, (4) apply
+            # _cov_mask. _cov_mask is DEFINED against the output of (3), so imask
+            # must be folded in here AND in residual()'s r assembly, or the
+            # whitening rows silently misalign with the data rows -- no exception,
+            # no warning, just a plausible wrong answer.
+            im = obj.get("imask")
+            sel = (lambda a: a[i0:i1] if im is None else a[i0:i1][im])
+            yc.append(sel(cov["y_corr"]))
+            sm.append(sel(cov["sigma_meas"]))
+            ki.append(sel(np.asarray(cov["k_index"])))
             if self._use_footprint:
                 # missing v on one dataset -> zero sensitivity (no beam coupling
                 # for that dataset), consistent with build_full_covariance's rank-1
                 vseg = cov.get("v", None)
-                vv.append(np.asarray(vseg, dtype=float)[i0:i1] if vseg is not None
-                          else np.zeros(i1 - i0))
+                nseg = (i1 - i0) if im is None else int(np.count_nonzero(im))
+                vv.append(sel(np.asarray(vseg, dtype=float)) if vseg is not None
+                          else np.zeros(nseg))
         yc = np.concatenate(yc)
         sm = np.concatenate(sm)
         ki = np.concatenate(ki).astype(int)
@@ -483,10 +518,22 @@ class JointFit(QObject):
             for obj, fit in zip(self.objectives, yfits):
                 i0, i1 = obj["imin"], obj["imax"] + 1
                 data = obj["y"][i0:i1]           # y_corr (absolute units)
-                r.append(data - fit)
+                im = obj.get("imask")
+                if im is None:
+                    r.append(data - fit)
+                else:                            # see _build_chol on the order
+                    f = np.asarray(fit)
+                    if not obj.get("yfit_masked"):
+                        f = f[im]                # else evaluate() already masked it
+                    r.append(data[im] - f)
             r = np.concatenate(r)
             if self._L is None:
                 self._build_chol()
+            if len(r) != len(self._cov_mask):
+                raise RuntimeError(
+                    "joint residual length %d != covariance mask length %d: the "
+                    "column mask was applied inconsistently between _build_chol "
+                    "and residual" % (len(r), len(self._cov_mask)))
             r = r[self._cov_mask]
             # L is lower-triangular (Cholesky): O(N^2) forward-substitution, NOT
             # a general O(N^3) solve -- this matters a lot at N~10^3 over many
@@ -502,6 +549,13 @@ class JointFit(QObject):
                 i0, i1 = obj["imin"], obj["imax"] + 1
                 data = obj["y"][i0:i1]
                 err = obj["yerr"][i0:i1]
+                im = obj.get("imask")
+                if im is not None:
+                    # before maxd: an excluded hot point must not rescale the
+                    # residual vector, and before any log10 of the data
+                    data, err = data[im], err[im]
+                    if not obj.get("yfit_masked"):
+                        fit = np.asarray(fit)[im]
                 maxd = np.max(data)
                 data = data / maxd
                 err = err / maxd
@@ -534,15 +588,427 @@ class JointFit(QObject):
     # ----------------------------------------------------------------- #
     #  fit driver
     # ----------------------------------------------------------------- #
-    def _set_ranges(self, xmin, xmax):
-        for obj in self.objectives:
+    def _set_ranges(self, xmin, xmax, ranges=None):
+        """Set each objective's [imin, imax] fit window.
+
+        Without ``ranges`` every objective uses the scalar (xmin, xmax) -- the
+        original behavior. With ``ranges`` (a dict keyed by objective NAME, or
+        by index, mapping to a ``(lo, hi)`` pair) each objective uses its own
+        bounds; a missing entry, a ``None`` pair, or a ``None`` within a pair
+        falls back to the scalar. Empty slices are avoided by clamping to the
+        full data extent.
+        """
+        for idx, obj in enumerate(self.objectives):
             x = obj["x"]
-            obj["imin"] = int(np.where(x >= 0.99 * xmin)[0][0])
-            obj["imax"] = int(np.where(x <= xmax)[0][-1])
+            lo, hi = xmin, xmax
+            if ranges:
+                pair = ranges.get(obj["name"], ranges.get(idx, None))
+                if pair is not None:
+                    plo, phi = pair
+                    if plo is not None:
+                        lo = plo
+                    if phi is not None:
+                        hi = phi
+            # shared with Fit.perform_fit: the old 0.99*lo factor moved a
+            # NEGATIVE bound the wrong way and disagreed with the scalar branch
+            obj["imin"], obj["imax"] = _window_indices(x, lo, hi)
+            m = obj.get("mask")
+            obj["imask"] = (None if m is None
+                            else np.asarray(m, bool)[obj["imin"]:obj["imax"] + 1])
+
+    # ----------------------------------------------------------------- #
+    #  per-dataset orientation seeding (theta/phi not both-shared)
+    # ----------------------------------------------------------------- #
+    def orientation_layout(self, params=None):
+        """Describe the theta/phi columns of a fit for orientation seeding/wrapping.
+
+        Uses ``param_map`` to find, per dataset, the master key driving its ``theta``
+        and ``phi`` (bare-shared or ``d{i}_theta``/``d{i}_phi``) and that key's
+        column in the varying-parameter order. Returns ``None`` if no theta/phi
+        varies, else a dict with:
+          ``col``          master_key -> column index (varying params only)
+          ``datasets``     per dataset: {'theta': mkey|None, 'phi': mkey|None}
+          ``both_shared``  one theta AND one phi, each shared across ALL datasets
+          ``neither_shared`` every dataset has its OWN (per-dataset) theta AND phi
+        """
+        p = params if params is not None else self.master_params
+        var_names = [k for k in p if p[k].vary]
+        col = {k: i for i, k in enumerate(var_names)}
+        loc2master = {}
+        for mkey, targets in self.param_map.items():
+            for (idx, lk) in targets:
+                loc2master[(idx, lk)] = mkey
+        K = len(self.objectives)
+        datasets = []
+        any_angle = False
+        for i in range(K):
+            tk = loc2master.get((i, 'theta'))
+            pk = loc2master.get((i, 'phi'))
+            tk = tk if tk in col else None
+            pk = pk if pk in col else None
+            if tk is not None or pk is not None:
+                any_angle = True
+            datasets.append({'theta': tk, 'phi': pk})
+        if not any_angle:
+            return None
+        tkeys = set(d['theta'] for d in datasets if d['theta'] is not None)
+        pkeys = set(d['phi'] for d in datasets if d['phi'] is not None)
+        both_shared = (len(tkeys) == 1 and len(pkeys) == 1
+                       and all(d['theta'] is not None and d['phi'] is not None for d in datasets)
+                       and len(self.param_map.get(next(iter(tkeys)), [])) == K
+                       and len(self.param_map.get(next(iter(pkeys)), [])) == K)
+        neither_shared = (all(d['theta'] is not None and d['phi'] is not None for d in datasets)
+                          and all(len(self.param_map.get(d['theta'], [])) == 1 and
+                                  len(self.param_map.get(d['phi'], [])) == 1 for d in datasets))
+        return {'col': col, 'datasets': datasets, 'loc2master': loc2master,
+                'both_shared': both_shared, 'neither_shared': neither_shared}
+
+    def _build_orientation_seed(self, emcee_params, fit_scale, workers, temperature, rng,
+                                both_shared_mode='joint'):
+        """Precompute (p0, angleindex, anglepairs) from per-dataset single-model
+        orientation landscapes. Each dataset's (theta,phi) is scanned on its OWN model
+        with the shared params PINNED at the joint best-fit, so only orientation basins
+        consistent with the shared structure survive; the scans reuse the single-model
+        grid scan (parallel). Handles neither-shared (per-dataset pairs) and mixed
+        (marginal + conditional). If both-shared and ``both_shared_mode=='individual'``,
+        the single shared (theta,phi) is seeded from the SUM of the per-dataset maps.
+        Returns None when both-shared and the caller wants the JOINT landscape."""
+        from lmfit import minimizer as _mz
+        import pdb_seed_worker as _psw
+
+        lay = self.orientation_layout(emcee_params)
+        if lay is None:
+            return None
+        if lay['both_shared'] and both_shared_mode != 'individual':
+            return None
+        col = lay['col']
+        loc2master = lay['loc2master']
+        ds = lay['datasets']
+        var_names = [k for k in emcee_params if emcee_params[k].vary]
+        nvar = len(var_names)
+        nwalkers = int(self._emcee_nwalkers)
+
+        # pin the shared structure: push the joint best-fit into every model, so the
+        # per-dataset scans hold shared params fixed (only local nuisances profiled).
+        self.push_params(emcee_params)
+
+        base = np.array([emcee_params[k].value for k in var_names], dtype=float)
+        p0 = (1.0 + rng.randn(nwalkers, nvar) * 1e-4) * base
+        angleindex = np.zeros(nvar)
+        anglepairs = []
+        for d in ds:
+            if d['theta'] is not None:
+                angleindex[col[d['theta']]] = 1
+            if d['phi'] is not None:
+                angleindex[col[d['phi']]] = 2
+            anglepairs.append((col[d['theta']] if d['theta'] is not None else None,
+                               col[d['phi']] if d['phi'] is not None else None))
+
+        thetameshrange, phires, phimeshrange, cells = _mz.build_orientation_grid(thetares=10)
+
+        # per-dataset cost maps M_i (single-model scans, shared structure pinned)
+        Mi, ndata_i, ndof_i = {}, {}, {}
+        for i, d in enumerate(ds):
+            if d['theta'] is None and d['phi'] is None:
+                continue
+            func = self.objectives[i]["func"]
+            imin, imax = self.objectives[i]["imin"], self.objectives[i]["imax"]
+            xs = np.asarray(self.objectives[i]["x"])[imin:imax + 1]
+            ys = np.asarray(self.objectives[i]["y"])[imin:imax + 1]
+            es = np.asarray(self.objectives[i]["yerr"])[imin:imax + 1]
+            nuis = [lk for lk in func.params.keys()
+                    if lk not in ('theta', 'phi')
+                    and loc2master.get((i, lk)) in col
+                    and len(self.param_map.get(loc2master.get((i, lk)), [])) == 1]
+            start = [func.params[lk].value for lk in nuis]
+            costs = _psw.map_cell_costs(cells, func, xs, ys, es, fit_scale, nuis, start, workers)
+            Mi[i] = np.array([c[2] for c in costs], dtype=float)
+            ndata_i[i] = len(xs); ndof_i[i] = len(nuis) + 2
+
+        # both-shared 'individual' mode: ONE shared (theta,phi) seeded from the SUM of
+        # the per-dataset landscapes (shared params pinned above).
+        if lay['both_shared']:
+            tcol = col[ds[0]['theta']]; pcol = col[ds[0]['phi']]
+            combined = np.sum([Mi[i] for i in Mi], axis=0)
+            th, ph = _mz.seed_thetaphi_from_costmap(
+                cells, phires, 10, combined,
+                ndata=sum(ndata_i.values()), ndof=sum(ndof_i.values()),
+                nwalkers=nwalkers, rng=rng, temperature=temperature)
+            p0[:, tcol] = th; p0[:, pcol] = ph
+            return p0, angleindex, anglepairs
+
+        theta_members, phi_members = {}, {}
+        for i, d in enumerate(ds):
+            if d['theta'] is not None:
+                theta_members.setdefault(col[d['theta']], []).append(i)
+            if d['phi'] is not None:
+                phi_members.setdefault(col[d['phi']], []).append(i)
+        done_t, done_p = set(), set()
+
+        # (1) per-dataset pairs: theta col AND phi col each used by exactly one dataset
+        for i, d in enumerate(ds):
+            tk, pk = d['theta'], d['phi']
+            if tk is None or pk is None:
+                continue
+            tcol, pcol = col[tk], col[pk]
+            if len(theta_members[tcol]) == 1 and len(phi_members[pcol]) == 1:
+                th, ph = _mz.seed_thetaphi_from_costmap(
+                    cells, phires, 10, Mi[i], ndata_i[i], ndof_i[i],
+                    nwalkers, rng, temperature)
+                p0[:, tcol] = th; p0[:, pcol] = ph
+                done_t.add(tcol); done_p.add(pcol)
+
+        # (2) shared theta + per-dataset phi (mixed): marginal theta + conditional phi_i
+        for tcol, members in theta_members.items():
+            if tcol in done_t or len(members) < 2:
+                continue
+            self._seed_shared_axis(
+                p0, members, ds, col, Mi, ndata_i, ndof_i, thetameshrange, phires,
+                phimeshrange, cells, nwalkers, rng, temperature, shared='theta',
+                shared_col=tcol, done_other=done_p)
+            done_t.add(tcol)
+
+        # (3) shared phi + per-dataset theta (mixed): marginal phi + conditional theta_i
+        for pcol, members in phi_members.items():
+            if pcol in done_p or len(members) < 2:
+                continue
+            self._seed_shared_axis(
+                p0, members, ds, col, Mi, ndata_i, ndof_i, thetameshrange, phires,
+                phimeshrange, cells, nwalkers, rng, temperature, shared='phi',
+                shared_col=pcol, done_other=done_t)
+            done_p.add(pcol)
+
+        return p0, angleindex, anglepairs
+
+    def _resample_regular(self, chi2, thetameshrange, phires, phimeshrange, cells, nphi=72):
+        """Resample a ragged (theta,phi) cost map onto a regular nt x nphi grid by
+        nearest cell, so marginalizing over either axis is a simple array op."""
+        nt = len(thetameshrange)
+        cellcost = {}
+        for (ti, pi, th, ph), c in zip(cells, chi2):
+            cellcost[(ti, pi)] = c
+        R = np.full((nt, nphi), np.inf)
+        for t in range(nt):
+            npc = len(phimeshrange[t])
+            for j in range(nphi):
+                phi = j * 360.0 / nphi
+                pj = int(round(phi / phires[t])) % npc if npc > 0 else 0
+                R[t, j] = cellcost.get((t, pj), np.inf)
+        return R
+
+    def _seed_shared_axis(self, p0, members, ds, col, Mi, ndata_i, ndof_i,
+                          thetameshrange, phires, phimeshrange, cells, nwalkers, rng,
+                          temperature, shared, shared_col, done_other, nphi=72):
+        """Seed a SHARED angle (marginalized over the other, summed across members)
+        and each member's per-dataset OTHER angle conditional on the shared draw."""
+        from lmfit import minimizer as _mz
+        nt = len(thetameshrange)
+        # regular maps per member: rows=theta, cols=phi
+        Rs = {i: self._resample_regular(Mi[i], thetameshrange, phires, phimeshrange, cells, nphi)
+              for i in members}
+        thetavals = np.asarray(thetameshrange, dtype=float)
+        phivals = np.arange(nphi) * 360.0 / nphi
+        thetares = thetavals[1] - thetavals[0] if nt > 1 else 10.0
+        # solid-angle weight per theta ring; uniform over phi
+        lo = np.clip(thetavals - thetares / 2, 0, 180) * np.pi / 180
+        hi = np.clip(thetavals + thetares / 2, 0, 180) * np.pi / 180
+        ring_area = np.clip(np.cos(lo) - np.cos(hi), 1e-12, None)
+        ndata_sum = sum(ndata_i[i] for i in members)
+        ndof_sum = sum(ndof_i[i] for i in members)
+
+        if shared == 'theta':
+            c_shared = np.sum([np.min(Rs[i], axis=1) for i in members], axis=0)   # (nt,)
+            area = ring_area
+            svals, sres = thetavals, thetares
+        else:  # shared == 'phi'
+            c_shared = np.sum([np.min(Rs[i], axis=0) for i in members], axis=0)   # (nphi,)
+            area = np.ones(nphi)
+            svals, sres = phivals, 360.0 / nphi
+
+        chimin = np.min(c_shared) / max(ndata_sum - ndof_sum, 1)
+        probs = _mz._seed_cell_probs(c_shared, area, chimin, temperature=temperature)
+        sidx = _mz._inverse_cdf_draw(probs, nwalkers, rng)
+        sdraw = svals[sidx] + (rng.random_sample(nwalkers) - 0.5) * sres
+        sdraw = np.clip(sdraw, 0, 180) if shared == 'theta' else (sdraw % 360.0)
+        p0[:, shared_col] = sdraw
+
+        # conditional OTHER angle per member, given each walker's shared bin
+        for i in members:
+            R = Rs[i]
+            other_key = 'phi' if shared == 'theta' else 'theta'
+            ocol = col[ds[i][other_key]]
+            ovals = phivals if shared == 'theta' else thetavals
+            ores = (360.0 / nphi) if shared == 'theta' else thetares
+            cm = np.min(R) / max(ndata_i[i] - ndof_i[i], 1)
+            odraw = np.empty(nwalkers)
+            for w in range(nwalkers):
+                row = R[sidx[w], :] if shared == 'theta' else R[:, sidx[w]]
+                pw = np.exp(-0.5 * (row - np.min(row)) / (max(temperature, 1e-6) * max(cm, 1e-12)))
+                s = pw.sum()
+                pw = pw / s if s > 0 else np.ones_like(row) / len(row)
+                j = int(_mz._inverse_cdf_draw(pw, 1, rng)[0])
+                odraw[w] = ovals[j] + (rng.random_sample() - 0.5) * ores
+            odraw = (odraw % 360.0) if shared == 'theta' else np.clip(odraw, 0, 180)
+            p0[:, ocol] = odraw
+            done_other.add(ocol)
+
+    def _attach_joint_parallel(self, fitter, fit_scale, is_weighted, emcee_cores):
+        """Attach a picklable ``JointLogProb`` + spawn-Pool initializer so the emcee
+        SAMPLING runs across ``emcee_cores`` processes (NO-COVARIANCE branch only).
+
+        Shared by every parallel joint-MCMC path -- the orientation-seeded ones
+        (both-shared / per-dataset / mixed, which sample via the angle-aware
+        ``CustomSampler.custom_run_mcmc`` over the pool) and the generic non-PDB path
+        (which steps the ``EnsembleSampler`` manually). ``Minimizer.emcee`` builds the
+        pool from ``fitter._ext_obj_init`` and swaps in ``fitter._ext_objective`` when
+        ``workers > 1``. Returns True on success.
+
+        Covariance/GLS joint MCMC stays serial: the whitened residual is not in
+        ``JointLogProb`` yet, so this is gated on ``not self._use_cov``."""
+        if not (isinstance(emcee_cores, int) and emcee_cores > 1) or self._use_cov:
+            return False
+        try:
+            import pdb_joint_logprob as _pjl
+            var_names = [k for k in self.emcee_params if self.emcee_params[k].vary]
+            bounds = [(self.emcee_params[k].min, self.emcee_params[k].max) for k in var_names]
+            models = [obj["func"] for obj in self.objectives]
+            datas = [(obj["x"][obj["imin"]:obj["imax"] + 1],
+                      obj["y"][obj["imin"]:obj["imax"] + 1],
+                      obj["yerr"][obj["imin"]:obj["imax"] + 1]) for obj in self.objectives]
+            priors = {k: v for k, v in self._priors.items()} if self._priors else {}
+            obj = _pjl.JointLogProb(var_names, bounds, fit_scale, is_weighted,
+                                    self.param_map, priors, self.emcee_params.copy(),
+                                    has_lnsigma=('__lnsigma' in self.emcee_params))
+            fitter._ext_objective = obj
+            fitter._ext_obj_init = (_pjl.init_worker, (models, datas))
+            fitter._ext_workers = int(emcee_cores)
+            return True
+        except Exception:
+            import traceback; traceback.print_exc()
+            return False
+
+    def set_emcee_minimizer(self, fit_scale='Linear', emcee_walkers=100, emcee_steps=100,
+                            emcee_cores=1, emcee_burn=0, reuse_sampler=False, emcee_thin=1,
+                            backend=None, seed_temperature=1.0, seed_mode='joint'):
+        """Build a Minimizer configured for emcee on the JOINT objective.
+
+        Samples the global master_params via the whitened/concatenated joint residual.
+        funcname is 'JointFit'. When the SHARED master params include varying theta &
+        phi (an XLayersPDB joint with one shared orientation), orientation seeding is
+        enabled (``fitter._orient_seed``): Minimizer.emcee runs the (theta,phi) grid
+        scan over the concatenated joint residual and uses the angle-aware CustomSampler
+        (so theta/phi wrap -- else phi random-walks unbounded). That path is SERIAL.
+        Otherwise the generic sampler path is used; the no-covariance branch may run
+        parallel via a picklable JointLogProb."""
+        self.emcee_params = self.result.params.copy()
+        if 'w/o' in fit_scale:
+            self.emcee_params.add('__lnsigma', value=-1.0, vary=True,
+                                  min=np.log(0.001), max=np.log(2.0))
+            is_weighted = False
+        else:
+            is_weighted = True
+
+        # Orientation seeding/wrapping. Classify the theta/phi sharing layout.
+        _pdb = any('XLayersPDB' in type(o["func"]).__name__ for o in self.objectives)
+        lay = self.orientation_layout(self.emcee_params)
+        both_shared = lay is not None and lay['both_shared']
+
+        workers = 1
+        fitter = Minimizer(self.residual, self.emcee_params, fcn_args=(fit_scale,),
+                           iter_cb=self.callback, nan_policy='propagate',
+                           burn=emcee_burn, steps=emcee_steps, thin=emcee_thin,
+                           is_weighted=is_weighted, backend=backend, fiterr=0,
+                           funcname='JointFit', nwalkers=emcee_walkers, workers=workers,
+                           reuse_sampler=reuse_sampler, run_mcmc_kwargs={'store': True},
+                           seed_temperature=seed_temperature)
+
+        if both_shared:
+            fitter._orient_seed = True
+            # Parallel SAMPLING (no-cov): attach the picklable joint objective so the
+            # angle-aware CustomSampler evaluates the joint residual across the pool
+            # while wrapping theta/phi in the main process. Applies to both seed_modes.
+            _par = self._attach_joint_parallel(fitter, fit_scale, is_weighted, emcee_cores)
+            if seed_mode == 'individual':
+                # seed the shared (theta,phi) from the SUM of per-dataset single-model
+                # landscapes (shared params pinned at the joint best-fit); parallel scans.
+                try:
+                    self._emcee_nwalkers = emcee_walkers
+                    seed = self._build_orientation_seed(self.emcee_params, fit_scale,
+                                                        emcee_cores, seed_temperature,
+                                                        np.random.RandomState(),
+                                                        both_shared_mode='individual')
+                except Exception:
+                    import traceback; traceback.print_exc(); seed = None
+                if seed is not None:
+                    p0, angleindex, anglepairs = seed
+                    fitter._angleindex = angleindex
+                    fitter._anglepairs = anglepairs
+                    fitter._seed_pos = p0
+                    print('Joint XLayersPDB both-shared: seeding from INDIVIDUAL per-dataset '
+                          'landscapes (shared params pinned); sampling is %s.'
+                          % ('parallel across %d cores' % emcee_cores if _par else 'serial'))
+                    return fitter
+                # fall through to the joint landscape on failure
+            # 'joint' (default): the in-emcee single-pair joint scan. Cells are
+            # independent and each re-profiles the shared params jointly, so the scan
+            # parallelizes exactly (pdb_joint_seed_worker) while SAMPLING stays serial
+            # (joint objective unpicklable). `_seed_workers` decouples the two.
+            if isinstance(emcee_cores, int) and emcee_cores > 1:
+                if not self._use_cov:
+                    fitter._seed_workers = int(emcee_cores)
+                    print('Joint XLayersPDB both-shared: JOINT-landscape grid scan runs across '
+                          '%d cores; sampling is %s.'
+                          % (emcee_cores, 'parallel across the same cores' if _par else 'serial'))
+                else:
+                    print('Joint covariance fit: orientation scan + sampling serial for now '
+                          '(parallel joint-covariance seeding is a follow-up).')
+            return fitter
+
+        # Per-dataset orientations (neither-shared): precompute p0 + angleindex from
+        # per-dataset single-model scans (shared structure pinned at the joint best-fit).
+        # Seeding scans parallelize across cores; sampling is serial (joint objective
+        # is unpicklable), same as the both-shared case.
+        if lay is not None and not both_shared:
+            try:
+                self._emcee_nwalkers = emcee_walkers
+                seed = self._build_orientation_seed(self.emcee_params, fit_scale,
+                                                    emcee_cores, seed_temperature,
+                                                    np.random.RandomState())
+            except Exception:
+                import traceback; traceback.print_exc(); seed = None
+            if seed is not None:
+                p0, angleindex, anglepairs = seed
+                fitter._orient_seed = True
+                fitter._angleindex = angleindex
+                fitter._anglepairs = anglepairs
+                fitter._seed_pos = p0
+                # Parallel SAMPLING (no-cov): same picklable joint objective; the
+                # per-dataset angle pairing wraps in the main process each step.
+                _par = self._attach_joint_parallel(fitter, fit_scale, is_weighted, emcee_cores)
+                if isinstance(emcee_cores, int) and emcee_cores > 1:
+                    print('Joint XLayersPDB per-dataset orientations: seeding scans parallel; '
+                          'sampling is %s.'
+                          % ('parallel across %d cores' % emcee_cores if _par else 'serial'))
+                return fitter
+            if _pdb:
+                print('Joint fit: orientation seeding could not be built (unexpected); '
+                      'using the generic path (no seeding/wrapping).')
+
+        # Generic (non-orientation) parallel joint sampling: only the no-covariance
+        # branch is supported for now (the whitened GLS residual needs bit-for-bit
+        # validation against a covariance dataset first). The generic EnsembleSampler
+        # steps manually over the pool (no angle wrapping needed here).
+        self._attach_joint_parallel(fitter, fit_scale, is_weighted, emcee_cores)
+        return fitter
 
     def perform_fit(self, xmin, xmax, fit_scale="Linear", fit_method="leastsq",
-                    maxiter=1000, **fit_kws):
-        """Run a joint least-squares fit.  (emcee is Axis-1 only; not wired here.)
+                    maxiter=1000, emcee_walkers=100, emcee_steps=100, emcee_burn=0,
+                    emcee_cores=1, reuse_sampler=False, emcee_thin=1, backend=None,
+                    ranges=None, seed_temperature=1.0, seed_mode='joint', **fit_kws):
+        """Run a joint fit. Least-squares family as before; emcee samples the
+        joint objective. The no-covariance branch samples in PARALLEL across
+        ``emcee_cores`` when >1 (a picklable JointLogProb attached by
+        set_emcee_minimizer); the covariance/GLS branch stays serial for now.
 
         Extra keyword args (e.g. ``ftol``/``xtol``/``gtol`` for the
         ``least_squares`` TRF backend) are forwarded to ``Minimizer.minimize``
@@ -550,9 +1016,26 @@ class JointFit(QObject):
         extra kwargs the behaviour is unchanged."""
         self.Niter = 0
         self.fit_abort = False
-        self._set_ranges(xmin, xmax)
+        self._set_ranges(xmin, xmax, ranges=ranges)
         self._L = None                      # force Cholesky rebuild for new range
         self._cov_ready = False
+
+        if fit_method == "emcee":
+            self.fitter = self.set_emcee_minimizer(
+                fit_scale=fit_scale, emcee_walkers=emcee_walkers, emcee_steps=emcee_steps,
+                emcee_cores=emcee_cores, emcee_burn=emcee_burn, reuse_sampler=reuse_sampler,
+                emcee_thin=emcee_thin, backend=backend, seed_temperature=seed_temperature,
+                seed_mode=seed_mode)
+            # Parallel only for the no-covariance branch (set_emcee_minimizer attaches a
+            # picklable objective there); covariance/GLS joint MCMC stays serial for now.
+            _workers = emcee_cores if (isinstance(emcee_cores, int) and emcee_cores > 1
+                                       and not self._use_cov
+                                       and getattr(self.fitter, '_ext_objective', None) is not None) else 1
+            self.result = self.fitter.minimize(
+                method='emcee', params=self.emcee_params, burn=0, steps=emcee_steps,
+                thin=emcee_thin, is_weighted=('w/o' not in fit_scale), nwalkers=emcee_walkers,
+                workers=_workers, reuse_sampler=reuse_sampler)
+            return fit_report(self.result), 'None'
 
         if fit_method == "leastsq":
             self.fitter = Minimizer(self.residual, self.master_params,

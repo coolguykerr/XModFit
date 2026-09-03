@@ -184,13 +184,19 @@ def format_jpar(settings, blocks, shares):
 
     settings : dict with 'fit_range','fit_method','fit_scale','fit_iterations'
     blocks   : list of dicts, each:
-        {'path','category','func','xrange','cov'(opt),'raw'(opt),
+        {'path','category','func','xrange','fitrange'(opt),'cov'(opt),'raw'(opt),
          'fixed':[..],'sfit':[..],'mfit':[..]}
+        'xrange' is the model x-grid (a linspace expr); 'fitrange' is the
+        per-dataset '<xmin>:<xmax>' fit window (blank => scalar Xrange).
+        'collimits' is the per-dataset 'name:lo:hi;...' limits on NON-x columns
+        (blank => none). Unknown '#' lines are skipped by the parser, so old and
+        new files load in either direction.
     shares   : list of dicts {'bare':bool,'name':str|None,
                               'endpoints':[(path, local_key), ...]}
     """
     out = [_MAGIC,
            '#Fit Range=%s' % settings.get('fit_range', ''),
+           '#Column Limits=%s' % settings.get('column_limits', ''),
            '#Fit Method=%s' % settings.get('fit_method', ''),
            '#Fit Scale=%s' % settings.get('fit_scale', ''),
            '#Fit Iterations=%s' % settings.get('fit_iterations', '')]
@@ -199,6 +205,9 @@ def format_jpar(settings, blocks, shares):
         out.append('#Category: %s' % b.get('category', ''))
         out.append('#Function: %s' % b.get('func', ''))
         out.append('#Xrange=%s' % b.get('xrange', ''))
+        out.append('#FitRange=%s' % b.get('fitrange', ''))
+        if b.get('collimits'):     # per-dataset limits on non-x data columns
+            out.append('#ColumnLimits=%s' % b['collimits'])
         if b.get('cov'):
             out.append('#Cov: %s' % b['cov'])
         if b.get('raw'):
@@ -255,6 +264,8 @@ def parse_jpar(text):
             continue
         if line.startswith('#Fit Range='):
             settings['fit_range'] = line.split('=', 1)[1]; continue
+        if line.startswith('#Column Limits='):
+            settings['column_limits'] = line.split('=', 1)[1]; continue
         if line.startswith('#Fit Method='):
             settings['fit_method'] = line.split('=', 1)[1]; continue
         if line.startswith('#Fit Scale='):
@@ -263,7 +274,8 @@ def parse_jpar(text):
             settings['fit_iterations'] = line.split('=', 1)[1]; continue
         if line.startswith('#Dataset:'):
             cur = {'path': line.split(':', 1)[1].strip(), 'category': '', 'func': '',
-                   'xrange': '', 'cov': None, 'raw': None,
+                   'xrange': '', 'fitrange': '', 'collimits': '',
+                   'cov': None, 'raw': None,
                    'fixed': [], 'sfit': [], 'mfit': []}
             blocks.append(cur); section = None; in_shares = False
             continue
@@ -275,6 +287,12 @@ def parse_jpar(text):
             continue
         if line.startswith('#Xrange='):
             if cur is not None: cur['xrange'] = line.split('=', 1)[1]
+            continue
+        if line.startswith('#FitRange='):    # per-dataset [xmin:xmax] fit window
+            if cur is not None: cur['fitrange'] = line.split('=', 1)[1]
+            continue
+        if line.startswith('#ColumnLimits='):   # per-dataset non-x column limits
+            if cur is not None: cur['collimits'] = line.split('=', 1)[1]
             continue
         if line.startswith('#Cov:'):
             if cur is not None: cur['cov'] = line.split(':', 1)[1].strip()

@@ -60,12 +60,27 @@ class DatasetEntry:
                  *_c_factors.txt needing ``raw_path``).  Attaching one on ANY
                  dataset turns on Axis-2 GLS whitening for the whole fit.
     raw_path   : original 4-column data file, required only for *_c_factors.txt.
+    fit_xmin   : optional per-dataset lower fit bound (q). ``None`` -> fall back
+                 to the joint fit's scalar Xrange. Independent of ``model.x``
+                 (the model's evaluation grid); this is the [imin,imax] window.
+    fit_xmax   : optional per-dataset upper fit bound (q). ``None`` -> scalar.
+    limits     : optional {column_name: (lo, hi)} fit limits on data columns OTHER
+                 than x. The x window stays in fit_xmin/fit_xmax -- those ARE the
+                 'x' entry, and not migrating them keeps every existing caller and
+                 the .jpar round-trip untouched. A column limit is not an interval
+                 in index space, so the engine applies it as a boolean mask; the
+                 mask itself is built by the HOST (which owns the DataFrames) and
+                 passed to compile(), because this module is deliberately free of
+                 XModFit data structures.
     """
     name: str
     model_class: Optional[type] = None
     model: Optional[object] = None
     cov_path: Optional[str] = None
     raw_path: Optional[str] = None
+    fit_xmin: Optional[float] = None
+    fit_xmax: Optional[float] = None
+    limits: Optional[Dict[str, Tuple[Optional[float], Optional[float]]]] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -114,7 +129,8 @@ class JointFitSpec:
 
     # ---- dataset selection / add / remove --------------------------------- #
     def add_dataset(self, name, model_class=None, model=None,
-                    cov_path=None, raw_path=None):
+                    cov_path=None, raw_path=None, fit_xmin=None, fit_xmax=None,
+                    limits=None):
         """Add a dataset (idempotent on name: re-adding UPDATES the entry)."""
         for e in self.datasets:
             if e.name == name:
@@ -122,10 +138,14 @@ class JointFitSpec:
                 if model is not None:       e.model = model
                 if cov_path is not None:    e.cov_path = cov_path
                 if raw_path is not None:    e.raw_path = raw_path
+                if fit_xmin is not None:    e.fit_xmin = fit_xmin
+                if fit_xmax is not None:    e.fit_xmax = fit_xmax
+                if limits is not None:      e.limits = limits
                 return e
         e = DatasetEntry(name=name,
                          model_class=model_class or self.default_model_class,
-                         model=model, cov_path=cov_path, raw_path=raw_path)
+                         model=model, cov_path=cov_path, raw_path=raw_path,
+                         fit_xmin=fit_xmin, fit_xmax=fit_xmax, limits=limits)
         self.datasets.append(e)
         return e
 
@@ -208,7 +228,7 @@ class JointFitSpec:
         return "per-dataset"
 
     # ---- compile to a JointFit -------------------------------------------- #
-    def compile(self, data) -> JointFit:
+    def compile(self, data, masks=None) -> JointFit:
         """Build a fresh ``JointFit`` from this spec + XModFit's ``self.data``.
 
         ``data`` is XModFit's ``data[fname][curve] -> {'x','y','yerr',...}``.
@@ -235,12 +255,14 @@ class JointFitSpec:
             if e.cov_path:
                 cov = jcov.load_dataset_cov(e.cov_path, x=x, raw_path=e.raw_path)
             if e.model is not None:
-                jf.add_dataset(e.name, func=e.model, x=x, y=y, yerr=yerr, cov=cov)
+                jf.add_dataset(e.name, func=e.model, x=x, y=y, yerr=yerr, cov=cov,
+                               mask=(masks or {}).get(e.name))
             else:
                 mc = e.model_class or self.default_model_class
                 if mc is None:
                     raise ValueError(f"dataset '{e.name}' has no model class")
-                jf.add_dataset(e.name, funcClass=mc, x=x, y=y, yerr=yerr, cov=cov)
+                jf.add_dataset(e.name, funcClass=mc, x=x, y=y, yerr=yerr, cov=cov,
+                               mask=(masks or {}).get(e.name))
             name_to_idx[e.name] = idx
 
         # translate name-keyed groups -> engine (idx, local_key) endpoint groups,

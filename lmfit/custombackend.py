@@ -29,6 +29,11 @@ class CustomBackend(Backend):
                 chain for each parameter.
 
         """
-        super(CustomBackend, self).get_autocorr_time(discard=0, thin=1, **kwargs)
+        # NB: the base emcee Backend.get_autocorr_time is a pure function
+        # (get_chain -> integrated_time, no side effects). Calling super() here read
+        # the FULL chain (discard=0) and computed a standard autocorrelation whose
+        # result was thrown away -- so every call autocorrelated twice, and the
+        # discarded one grew with chain length. Dropped; the real (angle-aware,
+        # windowed-by-discard) estimate below is what we return.
         x = self.get_chain(discard=discard, thin=thin)
         return thin * customautocorr.integrated_time(x, angleindex, **kwargs)

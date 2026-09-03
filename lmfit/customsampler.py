@@ -20,6 +20,7 @@ class CustomSampler(EnsembleSampler):
         ndim,
         log_prob_fn,
         angleindex=[],
+        anglepairs=None,
         pool=None,
         moves=None,
         args=None,
@@ -32,6 +33,16 @@ class CustomSampler(EnsembleSampler):
                          parameter_names)
 
         self.angleindex = angleindex
+        # Optional explicit theta/phi pairing [(theta_col_or_None, phi_col_or_None), ...],
+        # one entry per dataset (shared columns repeat). When set, angle wrapping pairs
+        # each phi with ITS theta (handles unequal counts / a shared theta driving many
+        # phis); when None, the legacy sorted-index angleindex wrapping is used.
+        self.anglepairs = anglepairs
+
+        # Optional per-step hook (set by Minimizer.emcee for the parallel path) used to
+        # drive GUI progress and check the user abort flag from the main process, since
+        # pool workers can neither emit the Qt progress signal nor see the abort flag.
+        self.step_callback = None
 
         self.backend = CustomBackend() if backend is None else backend
 
@@ -222,7 +233,34 @@ class CustomSampler(EnsembleSampler):
                         move.tune(state, accepted)
 
                     # Wrap angle values
-                    if len(thetaind) != 0 and len(phiind) != 0:
+                    if getattr(self, 'anglepairs', None):
+                        # Explicit per-dataset pairing: fold each distinct theta column
+                        # ONCE (recording its reflection mask), then wrap each phi with
+                        # its paired theta's reflection (+180). Handles unequal counts
+                        # and a shared theta driving several phis. A phi shared by
+                        # multiple thetas is degenerate -> wrap %360 only.
+                        coords = state.coords
+                        reflect = {}
+                        for (tcol, pcol) in self.anglepairs:
+                            if tcol is not None and tcol not in reflect:
+                                th = coords[:, tcol]
+                                mask = (th % 360) > 180
+                                reflect[tcol] = mask
+                                coords[:, tcol] = np.where(mask, 360 - (th % 360), th % 360)
+                        phi2thetas = {}
+                        for (tcol, pcol) in self.anglepairs:
+                            if pcol is not None:
+                                phi2thetas.setdefault(pcol, set()).add(tcol)
+                        for pcol, tcols in phi2thetas.items():
+                            ph = coords[:, pcol]
+                            real = [t for t in tcols if t is not None]
+                            if len(real) == 1:
+                                mask = reflect[real[0]]
+                                coords[:, pcol] = np.where(mask, (ph + 180) % 360, ph % 360)
+                            else:
+                                coords[:, pcol] = ph % 360
+                        state.coords = coords
+                    elif len(thetaind) != 0 and len(phiind) != 0:
                         theta = state.coords[:, thetaind]
                         phi = state.coords[:, phiind]
                         state.coords[:, thetaind] = np.piecewise(theta,
@@ -250,6 +288,11 @@ class CustomSampler(EnsembleSampler):
 
                     pbar.update(1)
                     i += 1
+
+                # Per-step hook (main process): progress + abort. Runs once per stored
+                # step; may raise to abort the run (caught by Minimizer.emcee).
+                if self.step_callback is not None:
+                    self.step_callback(self.iteration)
 
                 # Yield the result as an iterator so that the user can do all
                 # sorts of fun stuff with the results so far.

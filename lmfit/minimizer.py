@@ -51,6 +51,17 @@ try:
 except ImportError:
     HAS_EMCEE = False
 
+# The custom (angle-aware) autocorrelation raises its OWN AutocorrError class, and
+# emcee's EnsembleSampler.get_autocorr_time delegates to the backend -- so with a
+# CustomBackend/CustomHDFBackend the raised class is lmfit.customautocorr.AutocorrError,
+# NOT emcee.autocorr.AutocorrError. Catch both so a short chain (the usual case for a
+# manually-stopped MCMC) doesn't escape as an unhandled exception.
+try:
+    from .customautocorr import AutocorrError as _CustomAutocorrError
+    _AUTOCORR_ERRORS = (AutocorrError, _CustomAutocorrError)
+except Exception:
+    _AUTOCORR_ERRORS = (AutocorrError,)
+
 # check for pandas
 try:
     import pandas as pd
@@ -73,6 +84,204 @@ try:
     HAS_DILL = True
 except ImportError:
     HAS_DILL = False
+
+# XLayersPDB-family functions get the special emcee handling (orientation grid
+# seeding, angle wrapping/autocorrelation via CustomSampler/CustomHDFBackend, and
+# the picklable parallel objective). XLayersPDB_dev_smooth is the erf-smoothed
+# variant and is treated identically here; XLayersPDB_XPR is the Julia-backed
+# smoothed variant, whose theta/phi carry the same [0,180]x[0,360] fundamental
+# domain and so need the same wrapping and orientation seeding.
+_PDB_FUNCNAMES = ('XLayersPDB', 'XLayersPDB_box', 'XLayersPDB_G', 'XLayersPDB_H',
+                  'XLayersPDB_dev_smooth', 'XLayersPDB_XPR')
+
+
+# --------------------------------------------------------------------------- #
+#  Multimodal orientation-seeding for XLayersPDB* MCMC
+#
+#  The (theta, phi) orientation posterior is typically multimodal. These pure
+#  helpers turn the Phase-1 orientation chi^2 grid map into a walker-seed
+#  distribution that (a) is area(solid-angle)-correct, (b) is temperature-tunable,
+#  and (c) guarantees walkers in every detected basin so narrow secondary modes
+#  are never missed. They take arrays/None only (no model, no self), so the
+#  distribution logic is unit-testable on synthetic maps.
+# --------------------------------------------------------------------------- #
+SEED_TEMPERATURE = 1.0      # T in exp(-0.5*chi2/(T*chimin)); larger -> flatter -> more mode spread
+SEED_UNIFORM_FRAC = 0.1     # solid-angle-uniform floor blended into the seed distribution
+WALKERS_PER_BASIN = 2       # walkers forced into each detected orientation basin
+SEED_BASIN_REL_TOL = 0.5    # a local min is a basin if its relative chi2 excess over the
+                            # global min is <= this (keeps real wells, drops deep noise)
+
+
+def _pdb_sampler_moves():
+    """Single source of truth for the XLayersPDB emcee move mix (seed + reuse
+    branches). Built lazily because ``emcee`` is an optional import."""
+    return [(emcee.moves.StretchMove(), 0.3), (emcee.moves.KDEMove(), 0.3),
+            (emcee.moves.DEMove(), 0.25), (emcee.moves.DESnookerMove(), 0.15)]
+
+
+def _cell_solid_angles(cell_theta, thetares, cell_dphi):
+    """Per-cell solid angle Omega = (cos theta_lo - cos theta_hi) * dphi_rad, with
+    the theta band clipped to [0, 180]. ``cell_theta`` (deg) and ``cell_dphi`` (deg,
+    = phires for that ring) are per-cell arrays. Sum over a full grid is ~4*pi."""
+    th = np.asarray(cell_theta, dtype=float)
+    lo = np.clip(th - thetares / 2.0, 0.0, 180.0) * np.pi / 180.0
+    hi = np.clip(th + thetares / 2.0, 0.0, 180.0) * np.pi / 180.0
+    dphi = np.asarray(cell_dphi, dtype=float) * np.pi / 180.0
+    omega = (np.cos(lo) - np.cos(hi)) * dphi
+    return np.clip(omega, 1e-12, None)
+
+
+def _seed_cell_probs(cell_chi2, cell_area, chimin, temperature=SEED_TEMPERATURE,
+                     uniform_frac=SEED_UNIFORM_FRAC):
+    """Normalized categorical seed probability per cell: a blend of the tempered
+    posterior (area * exp(-0.5*chi2/(T*chimin))) and a solid-angle-uniform floor.
+
+    ``chi2`` is the per-cell least_squares cost (== chi^2/2); ``chimin`` the
+    reduced-chi^2 scale (min cost / dof). T -> inf approaches the area-uniform
+    distribution; T -> 0 concentrates on the minimum-chi^2 cell."""
+    chi2 = np.asarray(cell_chi2, dtype=float)
+    area = np.asarray(cell_area, dtype=float)
+    T = max(float(temperature), 1e-6)
+    cm = max(float(chimin), 1e-12)
+    # subtract the min for numerical stability (constant factor -> cancels on norm)
+    z = -0.5 * (chi2 - np.min(chi2)) / (T * cm)
+    lik = area * np.exp(z)
+    slik = np.sum(lik)
+    post = lik / slik if slik > 0 else area / np.sum(area)
+    unif = area / np.sum(area)
+    u = float(np.clip(uniform_frac, 0.0, 1.0))
+    p = (1.0 - u) * post + u * unif
+    return p / np.sum(p)
+
+
+def _inverse_cdf_draw(probs, n, rng):
+    """Draw ``n`` cell indices from a categorical distribution via inverse-CDF
+    (exact, O(1) per draw). Replaces the old rejection loop."""
+    cdf = np.cumsum(np.asarray(probs, dtype=float))
+    cdf[-1] = 1.0                                    # guard floating-point drift
+    return np.searchsorted(cdf, rng.random_sample(n), side='right').clip(0, len(cdf) - 1)
+
+
+def _detect_orientation_basins(cell_ti, cell_pi, cell_theta, cell_phi, cell_chi2,
+                               n_rings, rel_tol=SEED_BASIN_REL_TOL):
+    """Flat-array indices of local-minimum cells (orientation basins).
+
+    A cell is a basin if its chi2 <= its same-ring phi-neighbors (wrapped) and <=
+    the nearest-phi cell in the theta +/- 1 rings, and its relative excess over the
+    global min is <= ``rel_tol``. Near-duplicate wells (within ~15 deg theta /
+    25 deg phi) are merged, keeping the lowest-chi2 representative."""
+    cell_ti = np.asarray(cell_ti)
+    cell_pi = np.asarray(cell_pi)
+    cell_theta = np.asarray(cell_theta, dtype=float)
+    cell_phi = np.asarray(cell_phi, dtype=float)
+    cell_chi2 = np.asarray(cell_chi2, dtype=float)
+    # flat indices grouped by ring, ordered by phi index
+    ring_idx = []
+    for ti in range(n_rings):
+        idx = np.where(cell_ti == ti)[0]
+        ring_idx.append(idx[np.argsort(cell_pi[idx])] if len(idx) else idx)
+    gmin = np.min(cell_chi2)
+    cand = []
+    for ti in range(n_rings):
+        idxs = ring_idx[ti]
+        m = len(idxs)
+        if m == 0:
+            continue
+        chi = cell_chi2[idxs]
+        phi = cell_phi[idxs]
+        for k in range(m):
+            nb = []
+            if m > 1:
+                nb.append(chi[(k - 1) % m])
+                nb.append(chi[(k + 1) % m])
+            for tj in (ti - 1, ti + 1):
+                if 0 <= tj < n_rings and len(ring_idx[tj]):
+                    jphi = cell_phi[ring_idx[tj]]
+                    j = int(np.argmin(np.abs(((jphi - phi[k] + 180.0) % 360.0) - 180.0)))
+                    nb.append(cell_chi2[ring_idx[tj]][j])
+            if nb and chi[k] <= np.min(nb) + 1e-12:
+                excess = (chi[k] - gmin) / (abs(gmin) + 1e-12)
+                if excess <= rel_tol:
+                    cand.append(idxs[k])
+    # merge near-duplicate wells, keep the lowest chi2 first
+    cand = sorted(cand, key=lambda i: cell_chi2[i])
+    kept = []
+    for i in cand:
+        dup = False
+        for j in kept:
+            dth = abs(cell_theta[i] - cell_theta[j])
+            dph = abs(((cell_phi[i] - cell_phi[j] + 180.0) % 360.0) - 180.0)
+            if dth <= 15.0 and dph <= 25.0:
+                dup = True
+                break
+        if not dup:
+            kept.append(i)
+    return kept
+
+
+def build_orientation_grid(thetares=10):
+    """The standard ~uniform-on-sphere (theta,phi) seeding grid.
+
+    Mirrors the inline grid built in ``Minimizer.emcee`` so the joint per-dataset
+    seeder (Joint_Fit_Routines) can reuse the identical cells. Returns
+    ``(thetameshrange, phires, phimeshrange, cells)`` where cells is a flat list of
+    ``(theta_idx, phi_idx, theta_deg, phi_deg)``."""
+    thetameshrange = np.arange(0, 180 + thetares, thetares)
+    phires = np.zeros(len(thetameshrange))
+    phimeshrange = [np.array([]) for _ in thetameshrange]
+    cells = []
+    for ti, thetamesh in enumerate(thetameshrange):
+        if thetamesh == 0 or thetamesh == 180:
+            phires[ti] = 360
+        else:
+            phires[ti] = int(360 / np.round((np.cos((thetamesh - thetares / 2) * np.pi / 180) -
+                                             np.cos((thetamesh + thetares / 2) * np.pi / 180)) /
+                                            (1 - np.cos((thetares / 2) * np.pi / 180))))
+        phimeshrange[ti] = np.arange(0, 360, phires[ti])
+        for pi, phimesh in enumerate(phimeshrange[ti]):
+            cells.append((ti, pi, float(thetamesh), float(phimesh)))
+    return thetameshrange, phires, phimeshrange, cells
+
+
+def seed_thetaphi_from_costmap(cells, phires, thetares, cell_chi2, ndata, ndof,
+                               nwalkers, rng, temperature=SEED_TEMPERATURE,
+                               uniform_frac=SEED_UNIFORM_FRAC,
+                               walkers_per_basin=WALKERS_PER_BASIN):
+    """Turn an orientation cost map into per-walker (theta, phi) draws.
+
+    Composes the pure seed helpers exactly as ``Minimizer.emcee``'s single-pair
+    block does (area-weighted tempered categorical + inverse-CDF + guaranteed
+    basin walkers + intra-cell jitter). ``cell_chi2`` is aligned to ``cells``
+    (least_squares cost == chi^2/2). Returns ``(theta_draw, phi_draw)`` arrays of
+    length ``nwalkers``. Reused by the joint per-dataset seeder."""
+    cell_ti = np.array([c[0] for c in cells])
+    cell_pi = np.array([c[1] for c in cells])
+    cell_theta = np.array([c[2] for c in cells], dtype=float)
+    cell_phi = np.array([c[3] for c in cells], dtype=float)
+    chi2 = np.asarray(cell_chi2, dtype=float)
+    cell_dphi = np.array([phires[c[0]] for c in cells], dtype=float)
+    cell_area = _cell_solid_angles(cell_theta, thetares, cell_dphi)
+    chimin = np.min(chi2) / max(ndata - ndof, 1)
+    probs = _seed_cell_probs(chi2, cell_area, chimin, temperature=temperature,
+                             uniform_frac=uniform_frac)
+    walker_cells = _inverse_cdf_draw(probs, nwalkers, rng)
+    n_rings = int(np.max(cell_ti)) + 1
+    basins = _detect_orientation_basins(cell_ti, cell_pi, cell_theta, cell_phi, chi2,
+                                        n_rings, rel_tol=SEED_BASIN_REL_TOL)
+    if basins:
+        per = max(int(walkers_per_basin), 1)
+        forced = []
+        for b in basins:
+            forced.extend([b] * per)
+        forced = forced[:max(nwalkers // 2, 1)]
+        walker_cells[:len(forced)] = forced
+    theta_draw = np.empty(nwalkers)
+    phi_draw = np.empty(nwalkers)
+    for w in range(nwalkers):
+        ci = int(walker_cells[w])
+        theta_draw[w] = float(np.clip(cell_theta[ci] + (rng.rand() - 0.5) * thetares, 0.0, 180.0))
+        phi_draw[w] = float((cell_phi[ci] + (rng.rand() - 0.5) * cell_dphi[ci]) % 360.0)
+    return theta_draw, phi_draw
 
 
 # define the namedtuple here so pickle will work with the MinimizerResult
@@ -1303,12 +1512,18 @@ class Minimizer:
                 lnprob = np.array([-1.e100])
 
             if float_behavior == 'posterior':
-                if ((funcname == 'XLayersPDB') or (funcname == 'XLayersPDB_box')) or ((funcname == 'XLayersPDB_G') or (funcname == 'XLayersPDB_H')):
-                    angleind = np.where(var_names == 'theta')[0]
-                    lnprior = np.log(np.sin(theta(angleind) * np.pi / 180) / 2)
-                    if np.isinf(lnprior):
-                        lnprior = np.array([-1.e100])
-                    lnprob += lnprior
+                if funcname in _PDB_FUNCNAMES:
+                    # sin(theta) prior (uniform-on-sphere). NB: this scalar-posterior
+                    # branch is dead for the vector XRR residual, but the old
+                    # `theta(angleind)` was a NameError-in-waiting -- index the theta
+                    # value out of the parameter vector instead.
+                    angleind = np.where(np.asarray(var_names) == 'theta')[0]
+                    if len(angleind):
+                        theta_val = np.asarray(theta)[angleind[0]]
+                        lnprior = np.log(np.sin(theta_val * np.pi / 180) / 2)
+                        if not np.isfinite(lnprior):
+                            lnprior = -1.e100
+                        lnprob = lnprob + lnprior
             elif float_behavior == 'chi2':
                 lnprob *= -0.5
             else:
@@ -1319,7 +1534,9 @@ class Minimizer:
     def emcee(self, params=None, steps=1000, nwalkers=100, burn=0, thin=1,
               ntemps=1, pos=None, reuse_sampler=False, workers=1,
               float_behavior='posterior', is_weighted=True, seed=None,
-              progress=True, backend=None, fiterr=0, funcname='', run_mcmc_kwargs={}):
+              progress=True, backend=None, fiterr=0, funcname='', run_mcmc_kwargs={},
+              seed_temperature=SEED_TEMPERATURE, seed_uniform_frac=SEED_UNIFORM_FRAC,
+              walkers_per_basin=WALKERS_PER_BASIN):
         r"""Bayesian sampling of the posterior distribution.
 
         The method uses the ``emcee`` Markov Chain Monte Carlo package and
@@ -1588,15 +1805,26 @@ class Minimizer:
 
         sampler_kwargs['args'] = lnprob_args
         sampler_kwargs['kwargs'] = lnprob_kwargs
+        # Always bind self.backend: it is read unconditionally further down (the
+        # walker-seeding branches reset it, and the attrs write guards on it being
+        # None), and XModFit legitimately passes backend=None whenever the user
+        # cancels the "Start MCMC file as" dialog or an imported backend's parameter
+        # count does not match. Leaving the attribute unset turned that into an
+        # AttributeError the moment emcee actually ran.
+        self.backend = backend
         if backend is not None:
-            self.backend=backend
             sampler_kwargs['backend'] = self.backend
 
         # set up the random number generator
         rng = _make_random_gen(seed)
 
-        if (((funcname == 'XLayersPDB') or (funcname == 'XLayersPDB_box')) or (
-                (funcname == 'XLayersPDB_G') or (funcname == 'XLayersPDB_H'))):
+        # Orientation seeding / angle-wrapping applies to single-model XLayersPDB* fits
+        # AND to a JOINT fit whose shared master params include theta/phi (the caller,
+        # JointFit.set_emcee_minimizer, sets self._orient_seed in that case). Both use the
+        # (theta,phi) grid seeding, the angle-aware CustomSampler, and angleindex.
+        orient_seed = (funcname in _PDB_FUNCNAMES) or bool(getattr(self, '_orient_seed', False))
+
+        if orient_seed:
             ind = 0
             angleindex = np.zeros(len(result.var_names))
             p0 = np.zeros((nwalkers, self.nvarys))
@@ -1614,10 +1842,20 @@ class Minimizer:
                 else:
                     angleindex[ind] = 0
                 ind += 1
+            # A joint per-dataset seeder (JointFit.set_emcee_minimizer) computes the
+            # angleindex itself (per-dataset theta/phi are named d{i}_theta, which the
+            # bare-name test above misses) and precomputes p0; honour those.
+            if getattr(self, '_angleindex', None) is not None:
+                angleindex = np.asarray(self._angleindex, dtype=float)
 
         # now initialise the samplers
         if reuse_sampler:
-            if auto_pool is not None:
+            # NB: the sampler is (re)created below with `pool` already in
+            # sampler_kwargs, and XModFit builds a FRESH Minimizer for every run,
+            # so self.sampler does not exist here on a load-and-continue. Only touch
+            # it if a live sampler is actually being reused (guards the AttributeError
+            # seen with cores>1 + "load sampler, sample more").
+            if auto_pool is not None and getattr(self, 'sampler', None) is not None:
                 self.sampler.pool = auto_pool
             if backend is not None:
                 p0 = self.backend.get_last_sample().coords
@@ -1627,9 +1865,14 @@ class Minimizer:
                 raise ValueError("You cannot reuse the sampler if the number "
                                  "of varying parameters has changed")
 
-        elif (((funcname == 'XLayersPDB') or (funcname == 'XLayersPDB_box')) or ((funcname == 'XLayersPDB_G') or (funcname == 'XLayersPDB_H'))) and not reuse_sampler:
+        elif orient_seed and not reuse_sampler:
 
-            if thetaflag == 1 and phiflag == 1:
+            if getattr(self, '_seed_pos', None) is not None:
+                # Joint per-dataset orientation seed precomputed by JointFit (each
+                # dataset's (theta,phi) scanned on its own model with shared params
+                # pinned at the joint best-fit). Skip the single-pair grid scan.
+                p0 = np.array(self._seed_pos, dtype=float)
+            elif thetaflag == 1 and phiflag == 1:
                 start_vals = np.delete(var_arr, [thetaind, phiind])
                 mesh_params = copy.copy(result.params)
                 mesh_params['theta'].vary = 0
@@ -1642,16 +1885,14 @@ class Minimizer:
                 phires = np.zeros(len(thetameshrange))
                 phimeshrange = [np.array([]) for _ in thetameshrange]
 
-                chiminarray = np.zeros(len(thetameshrange))
                 chi2mesh = [np.array([]) for _ in thetameshrange]
 
-                likelihood_profile = [np.array([]) for _ in thetameshrange]
-                likelihood_sumarray = np.zeros(len(thetameshrange))
-                likelihood_maxarray = np.zeros(len(thetameshrange))
-                """chi2mesh = np.zeros((len(thetameshrange), len(phimeshrange)), dtype=float)"""
-
-                uniform_inverse = 0
-
+                # Build the (theta, phi) grid containers (phires/phimeshrange/chi2mesh),
+                # exactly as before, and collect the flat list of cells. The per-cell chi^2
+                # profiles out the nuisance params via an independent, deterministic
+                # least_squares, so the cells can be evaluated serially or in parallel
+                # (workers > 1) with an identical resulting map.
+                cells = []  # (thetameshind, phimeshind, thetamesh, phimesh)
                 thetameshind = 0
                 for thetamesh in thetameshrange:
                     if thetamesh == 0 or thetamesh == 180:
@@ -1663,47 +1904,118 @@ class Minimizer:
                     phimeshrange[thetameshind] = np.arange(0, 360, phires[thetameshind])
                     chi2mesh[thetameshind] = np.zeros(len(phimeshrange[thetameshind]), dtype=float)
 
-                    uniform_inverse += len(phimeshrange)
-
                     phimeshind = 0
                     for phimesh in phimeshrange[thetameshind]:
+                        cells.append((thetameshind, phimeshind, thetamesh, phimesh))
+                        phimeshind += 1
+                    thetameshind += 1
+
+                # Number of residuals (data points) for the reduced-chi^2 normalization,
+                # replacing the old len(ret.fun) now that the loop no longer keeps `ret`.
+                ndata = len(np.atleast_1d(self.__walkerresidual(
+                    start_vals, result_mesh, apply_bounds_transformation=False)))
+
+                # Parallel grid scan: the cells are independent, so ship the model(s) to
+                # a spawn Pool and evaluate concurrently. `_seed_workers` decouples the
+                # SEED-scan parallelism from the SAMPLING pool (`workers`), so a joint
+                # fit can scan across cores while sampling stays serial (its objective is
+                # unpicklable). Falls back to the serial loop on any failure.
+                seed_workers = getattr(self, '_seed_workers', workers)
+                seed_scale = self.userargs[0] if self.userargs else 'Linear'
+                fitobj = getattr(self.userfcn, '__self__', None)
+                parallel_ok = False
+                if isinstance(seed_workers, int) and seed_workers > 1:
+                    try:
+                        if (funcname in _PDB_FUNCNAMES) and getattr(fitobj, 'func', None) is not None \
+                                and not isinstance(getattr(fitobj, 'x', None), dict):
+                            # single-model XLayersPDB: one model shipped
+                            imin, imax = fitobj.imin, fitobj.imax
+                            xs = np.asarray(fitobj.x)[imin:imax + 1]
+                            ys = np.asarray(fitobj.y)[imin:imax + 1]
+                            es = np.asarray(fitobj.yerr)[imin:imax + 1]
+                            import pdb_seed_worker as _psw
+                            costs = _psw.map_cell_costs(
+                                cells, fitobj.func, xs, ys, es, seed_scale,
+                                list(result_mesh.var_names), start_vals, seed_workers)
+                            for (ti, pi, cost) in costs:
+                                chi2mesh[ti][pi] = cost
+                            parallel_ok = True
+                        elif hasattr(fitobj, 'objectives') and not getattr(fitobj, '_use_cov', False):
+                            # JOINT both-shared: ship ALL models; each cell re-profiles the
+                            # shared+local nuisances jointly (exact == the serial scan).
+                            import pdb_joint_seed_worker as _pjs
+                            models = [o["func"] for o in fitobj.objectives]
+                            datas = [(np.asarray(o["x"])[o["imin"]:o["imax"] + 1],
+                                      np.asarray(o["y"])[o["imin"]:o["imax"] + 1],
+                                      np.asarray(o["yerr"])[o["imin"]:o["imax"] + 1])
+                                     for o in fitobj.objectives]
+                            priors = dict(getattr(fitobj, '_priors', {}) or {})
+                            scan = _pjs.JointSeedScan(list(result.var_names), fitobj.param_map,
+                                                      seed_scale, result.params.copy(), priors,
+                                                      theta_key='theta', phi_key='phi')
+                            costs = _pjs.map_cell_costs(cells, scan, models, datas, seed_workers)
+                            for (ti, pi, cost) in costs:
+                                chi2mesh[ti][pi] = cost
+                            parallel_ok = True
+                    except Exception:
+                        import traceback; traceback.print_exc()
+                        parallel_ok = False  # fall through to the serial scan
+
+                # NB no analytic Jacobian here even when the model has one: these
+                # sub-fits profile only the nuisance parameters (typically 2), where
+                # finite differences are 3 evaluations and already cheaper than one
+                # AD pass -- and in the parallel path every worker would additionally
+                # pay ForwardDiff's ~3 s specialisation. Measured: 30 s -> 34 s
+                # serial, 51 s -> 74 s at 16 workers. It pays for the top-level fit
+                # (see Fit.can_jac), not here.
+                if not parallel_ok:
+                    for (ti, pi, thetamesh, phimesh) in cells:
                         result_mesh.params['theta'].value = thetamesh
                         result_mesh.params['phi'].value = phimesh
                         ret = least_squares(self.__walkerresidual, start_vals, args=[result_mesh],
                                             kwargs=dict(apply_bounds_transformation=False))
-                        chi2mesh[thetameshind][phimeshind] = ret.cost
-                        phimeshind += 1
-                    chiminarray[thetameshind] = np.min(chi2mesh[thetameshind])
-                    thetameshind += 1
+                        chi2mesh[ti][pi] = ret.cost
 
-                chimin = np.min(np.array(chiminarray))/(len(ret.fun) - len(result_mesh.var_names))
+                # --- Phase 2/3: multimodal seed distribution + walker draw --------
+                # Flatten the ragged (theta,phi) grid into per-cell arrays (aligned
+                # with `cells`), then turn the cost map into an area-correct,
+                # temperature-tuned categorical over cells (replaces the old
+                # 0.5*likelihood + 0.5*uniform mix + rejection loop).
+                cell_ti = np.array([c[0] for c in cells])
+                cell_pi = np.array([c[1] for c in cells])
+                cell_theta = np.array([c[2] for c in cells], dtype=float)
+                cell_phi = np.array([c[3] for c in cells], dtype=float)
+                cell_chi2 = np.array([chi2mesh[c[0]][c[1]] for c in cells], dtype=float)
+                cell_dphi = np.array([phires[c[0]] for c in cells], dtype=float)
+                cell_area = _cell_solid_angles(cell_theta, thetares, cell_dphi)
 
-                for thetameshind in np.arange(len(thetameshrange)):
-                    likelihood_profile[thetameshind] = np.exp(-0.5 * chi2mesh[thetameshind] / chimin)
-                    likelihood_sumarray[thetameshind] = np.sum(likelihood_profile[thetameshind])
+                # reduced-chi^2 scale (matches the old `chimin`)
+                chimin = np.min(cell_chi2) / max(ndata - len(result_mesh.var_names), 1)
 
-                likelihood_sum = np.sum(np.array(likelihood_sumarray))
+                # Item 1+2: area-correct, temperature-tuned categorical over cells
+                probs = _seed_cell_probs(cell_chi2, cell_area, chimin,
+                                         temperature=seed_temperature,
+                                         uniform_frac=seed_uniform_frac)
+                walker_cells = _inverse_cdf_draw(probs, nwalkers, rng)
 
-                for thetameshind in np.arange(len(thetameshrange)):
-                    likelihood_profile[thetameshind] = (0.5 * likelihood_profile[thetameshind] * (1 / likelihood_sum) +
-                                                        0.5 / uniform_inverse)
-                    likelihood_maxarray[thetameshind] = np.max(likelihood_profile[thetameshind])
-
-                """p0[:, thetaind] = np.arccos(2 * rng.rand(nwalkers) - 1) * 180 / np.pi
-                p0[:, phiind] = rng.rand(nwalkers) * 360"""
-
-                likelihood_max = np.max(np.array(likelihood_maxarray))
+                # Item 3: guarantee walkers in every detected basin (narrow modes)
+                basins = _detect_orientation_basins(cell_ti, cell_pi, cell_theta,
+                                                    cell_phi, cell_chi2,
+                                                    len(thetameshrange),
+                                                    rel_tol=SEED_BASIN_REL_TOL)
+                if basins:
+                    per = max(int(walkers_per_basin), 1)
+                    forced = []
+                    for b in basins:
+                        forced.extend([b] * per)
+                    forced = forced[:max(nwalkers // 2, 1)]     # never overrun half the walkers
+                    walker_cells[:len(forced)] = forced
 
                 for walkind in range(nwalkers):
-                    while True:
-                        thetarand = np.arccos(2 * rng.rand(1) - 1) * 180 / np.pi
-                        phirand = rng.rand(1) * 360
-                        ylikelihood = rng.rand(1) * likelihood_max
-                        thetameshind = int(np.round(thetarand / thetares))
-                        phimeshind = int((np.round(phirand / phires[thetameshind]) % (360 / phires[thetameshind])))
-                        pdf = likelihood_profile[thetameshind][phimeshind]
-                        if ylikelihood < pdf:
-                            break
+                    # jitter uniformly within the chosen cell (Item 1)
+                    ci = int(walker_cells[walkind])
+                    thetarand = float(np.clip(cell_theta[ci] + (rng.rand() - 0.5) * thetares, 0.0, 180.0))
+                    phirand = float((cell_phi[ci] + (rng.rand() - 0.5) * cell_dphi[ci]) % 360.0)
                     p0[walkind, thetaind] = thetarand
                     p0[walkind, phiind] = phirand
 
@@ -1765,37 +2077,148 @@ class Minimizer:
                         p0[:, ind] = (1 + rng.randn(nwalkers) * fiterr[ind]) * var_arr[ind]
                     ind += 1
 
-            sampler_kwargs.setdefault('moves', [(emcee.moves.StretchMove(), 0.3), (emcee.moves.KDEMove(), 0.3), (emcee.moves.DEMove(), 0.25), (emcee.moves.DESnookerMove(), 0.15)])
+            sampler_kwargs.setdefault('moves', _pdb_sampler_moves())
             sampler_kwargs.setdefault('pool', auto_pool)
             sampler_kwargs.setdefault('angleindex', angleindex)
-            self.backend.reset(nwalkers, self.nvarys)
+            if self.backend is not None:
+                self.backend.reset(nwalkers, self.nvarys)
 
-        elif (((funcname == 'XLayersPDB') or (funcname == 'XLayersPDB_box')) or (
-                (funcname == 'XLayersPDB_G') or (funcname == 'XLayersPDB_H'))) and reuse_sampler:
-
-            sampler_kwargs.setdefault('moves', [(emcee.moves.StretchMove(), 0.3), (emcee.moves.KDEMove(), 0.3),
-                                                (emcee.moves.DEMove(), 0.25), (emcee.moves.DESnookerMove(), 0.15)])
-            sampler_kwargs.setdefault('pool', auto_pool)
-            sampler_kwargs.setdefault('angleindex', angleindex)
-            self.backend.reset(nwalkers, self.nvarys)
-
+        # (No `elif pdb and reuse_sampler` branch: reuse is fully handled by the
+        # `if reuse_sampler` branch above; the PDB moves/angleindex are applied for
+        # both fresh and resumed runs just before the sampler is created. A reset here
+        # would have WIPED the resumed chain.)
         else:
             p0 = 1 + rng.randn(nwalkers, self.nvarys) * 1.e-4
             p0 *= var_arr
             sampler_kwargs.setdefault('pool', auto_pool)
-            self.backend.reset(nwalkers, self.nvarys)
+            if self.backend is not None:
+                self.backend.reset(nwalkers, self.nvarys)
         if self.backend is not None:
             #Adding data, fitting function and fitting parameters to the backend file
             with self.backend.open("a") as f:
                 f[self.backend.name].attrs.update(result.params)
         self.result.nfev = np.array([0])
 
-        if ((funcname == 'XLayersPDB') or (funcname == 'XLayersPDB_box')) or ((funcname == 'XLayersPDB_G') or (funcname == 'XLayersPDB_H')):
+        pdb_names = funcname in _PDB_FUNCNAMES
+
+        # For XLayersPDB* at workers>1, replace the Qt-bound self._lnprob (which is
+        # unpicklable, so multiprocessing.Pool.map crashes) with a picklable standalone
+        # objective that ships only the model via a Pool initializer. Serial (workers<=1)
+        # keeps self._lnprob unchanged, so the existing single-core path is untouched.
+        logprob_fn = self._lnprob
+        pdb_step_cb = None
+        if pdb_names and isinstance(workers, int) and workers > 1:
+            try:
+                fitobj = getattr(self.userfcn, '__self__', None)
+                model = getattr(fitobj, 'func', None)
+                fit_scale = self.userargs[0] if self.userargs else 'Linear'
+                if model is not None and not isinstance(getattr(fitobj, 'x', None), dict):
+                    imin, imax = fitobj.imin, fitobj.imax
+                    xs = np.asarray(fitobj.x)[imin:imax + 1]
+                    ys = np.asarray(fitobj.y)[imin:imax + 1]
+                    es = np.asarray(fitobj.yerr)[imin:imax + 1]
+                    import pdb_logprob as _plp
+                    logprob_fn = _plp.PdbLogProb(result.var_names, bounds, fit_scale,
+                                                 is_weighted, has_lnsigma=('__lnsigma' in params))
+                    if auto_pool is not None:
+                        auto_pool.terminate()
+                    auto_pool = multiprocessing.get_context('spawn').Pool(
+                        workers, initializer=_plp.init_worker, initargs=(model, xs, ys, es))
+                    sampler_kwargs['pool'] = auto_pool
+                    sampler_kwargs.pop('args', None)
+                    sampler_kwargs.pop('kwargs', None)
+
+                    # Per-step progress + abort in the main process.
+                    _params, _fitobj, _fit_scale, _nw = params, fitobj, fit_scale, nwalkers
+
+                    def _step_cb(iteration):
+                        self.result.nfev = self.result.nfev + _nw
+                        if callable(self.iter_cb) and self.iter_cb(
+                                _params, self.result.nfev, np.zeros(1), *self.userargs):
+                            self._abort = True
+                        if getattr(self, '_abort', False):
+                            raise AbortFitException("fit aborted by user.")
+                        try:
+                            _fitobj.functionCalled.emit(
+                                _params, int(np.asarray(self.result.nfev).ravel()[0]),
+                                np.zeros(1), _fit_scale)
+                        except Exception:
+                            pass
+                    pdb_step_cb = _step_cb
+            except Exception:
+                logprob_fn = self._lnprob
+                sampler_kwargs['pool'] = None  # safe serial fallback
+
+        # Generic external picklable objective (e.g. parallel joint-fit MCMC): a caller
+        # (JointFit.set_emcee_minimizer) may attach `_ext_objective` (a picklable callable)
+        # and `_ext_obj_init` = (initializer, initargs) to run the non-PDB sampler across a
+        # process pool. Serial (workers<=1) or absent -> unchanged self._lnprob path.
+        ext_obj = getattr(self, '_ext_objective', None)
+        ext_parallel = (not pdb_names) and (ext_obj is not None)
+        ext_step_cb = None
+        if ext_parallel and isinstance(workers, int) and workers > 1:
+            try:
+                init_fn, init_args = self._ext_obj_init
+                if auto_pool is not None:
+                    auto_pool.terminate()
+                auto_pool = multiprocessing.get_context('spawn').Pool(
+                    workers, initializer=init_fn, initargs=init_args)
+                sampler_kwargs['pool'] = auto_pool
+                sampler_kwargs.pop('args', None)
+                sampler_kwargs.pop('kwargs', None)
+                logprob_fn = ext_obj
+                _fitobjE, _paramsE = getattr(self.userfcn, '__self__', None), params
+                _fsE = self.userargs[0] if self.userargs else 'Linear'
+                _nwE = nwalkers
+
+                def _ext_step(iteration):
+                    self.result.nfev = self.result.nfev + _nwE
+                    if callable(self.iter_cb) and self.iter_cb(
+                            _paramsE, self.result.nfev, np.zeros(1), *self.userargs):
+                        self._abort = True
+                    if getattr(self, '_abort', False):
+                        raise AbortFitException("fit aborted by user.")
+                    try:
+                        _fitobjE.functionCalled.emit(
+                            _paramsE, int(np.asarray(self.result.nfev).ravel()[0]),
+                            np.zeros(1), _fsE)
+                    except Exception:
+                        pass
+                ext_step_cb = _ext_step
+            except Exception:
+                logprob_fn = self._lnprob
+                sampler_kwargs['pool'] = None
+                ext_step_cb = None
+
+        # Ensure the CustomSampler ALWAYS gets the angle-wrapping index + move mix,
+        # including on RESUME. The `if reuse_sampler:` branch above catches every reuse
+        # case and (unlike the fresh-seed branch) does not populate these, so a resumed
+        # XLayersPDB run was building the sampler WITHOUT angleindex -> theta/phi stopped
+        # wrapping and phi random-walked off to +/-thousands. setdefault keeps the
+        # fresh-run values untouched. (No backend.reset here -- resume must not wipe the
+        # persisted chain.)
+        if orient_seed:
+            sampler_kwargs.setdefault('moves', _pdb_sampler_moves())
+            sampler_kwargs.setdefault('angleindex', angleindex)
+            # explicit theta/phi pairing for the joint mixed/per-dataset wrapping
+            if getattr(self, '_anglepairs', None) is not None:
+                sampler_kwargs.setdefault('anglepairs', self._anglepairs)
+        sampler_kwargs.setdefault('pool', auto_pool)
+
+        if orient_seed:
+            # angle-aware sampler: wraps theta/phi each step (needed for a joint fit with
+            # shared theta/phi too, else phi random-walks unbounded like the single-fit bug)
             self.sampler = lmfit.customsampler.CustomSampler(nwalkers, self.nvarys,
-                                                             self._lnprob, **sampler_kwargs)
+                                                             logprob_fn, **sampler_kwargs)
+            # Per-step progress/abort hook. For a single-model XLayersPDB parallel run
+            # it is `pdb_step_cb`; for an orientation-seeded JOINT parallel run the pool
+            # + picklable JointLogProb come from the `_ext_objective` block, so the hook
+            # there (`ext_step_cb`) drives progress -- custom_run_mcmc (chosen below for
+            # orient_seed) evaluates via the pool AND wraps theta/phi in the main process.
+            self.sampler.step_callback = pdb_step_cb if pdb_step_cb is not None else ext_step_cb
         else:
             self.sampler = emcee.EnsembleSampler(nwalkers, self.nvarys,
-                                                 self._lnprob, **sampler_kwargs)
+                                                 logprob_fn, **sampler_kwargs)
         # user supplies an initialisation position for the chain
         # If you try to run the sampler with p0 of a wrong size then you'll get
         # a ValueError. Note, you can't initialise with a position if you are
@@ -1820,8 +2243,14 @@ class Minimizer:
 
         # now do a production run, sampling all the time
         try:
-            if ((funcname == 'XLayersPDB') or (funcname == 'XLayersPDB_box')) or ((funcname == 'XLayersPDB_G') or (funcname == 'XLayersPDB_H')):
+            if orient_seed:
                 output = self.sampler.custom_run_mcmc(p0, steps, progress=progress, **run_mcmc_kwargs)
+            elif ext_step_cb is not None:
+                # Parallel external objective: step manually so progress + abort run in
+                # the main process (pool workers can't emit the Qt signal / see abort).
+                output = None
+                for output in self.sampler.sample(p0, iterations=steps, store=True):
+                    ext_step_cb(self.sampler.iteration)
             else:
                 output = self.sampler.run_mcmc(p0, steps, progress=progress, **run_mcmc_kwargs)
             self._lastpos = output.coords
@@ -1830,9 +2259,16 @@ class Minimizer:
             result.message = "Fit aborted by user callback. Could not estimate error-bars."
             result.success = False
             result.nfev = self.result.nfev
-        # discard the burn samples and thin
-        chain = self.sampler.get_chain(thin=thin, discard=burn)[..., :, :]
-        lnprobability = self.sampler.get_log_prob(thin=thin, discard=burn)[..., :]
+        # discard the burn samples and thin. If the run was aborted before the first
+        # step was stored, the backend has nothing and get_chain raises -- treat that as
+        # an empty (0-step) chain rather than crashing the whole confidence-interval run.
+        try:
+            chain = self.sampler.get_chain(thin=thin, discard=burn)[..., :, :]
+            lnprobability = self.sampler.get_log_prob(thin=thin, discard=burn)[..., :]
+        except (AttributeError, ValueError):
+            result.aborted = True
+            chain = np.zeros((0, nwalkers, self.nvarys))
+            lnprobability = np.zeros((0, nwalkers))
         flatchain = chain.reshape((-1, self.nvarys))
         if not result.aborted:
             quantiles = np.percentile(flatchain, [15.87, 50, 84.13], axis=0)
@@ -1861,8 +2297,13 @@ class Minimizer:
 
         try:
             result.acor = self.sampler.get_autocorr_time()
-        except AutocorrError as e:
+        except _AUTOCORR_ERRORS as e:
             print(str(e))
+        except (AttributeError, ValueError) as e:
+            # nothing stored yet (aborted before the first step) or a degenerate short
+            # chain: result.acor is optional (reporting only), so don't let it abort the
+            # whole confidence-interval run.
+            print('autocorrelation time unavailable: %s' % str(e)[:100])
         result.acceptance_fraction = self.sampler.acceptance_fraction
 
         # Calculate the residual with the "best fit" parameters

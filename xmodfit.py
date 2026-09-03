@@ -2,9 +2,10 @@ import importlib
 
 from PyQt5.QtWidgets import QWidget, QApplication, QPushButton, QLabel, QLineEdit, QVBoxLayout, QMessageBox, QCheckBox, \
     QComboBox, QListWidget, QDialog, QFileDialog, QAbstractItemView, QSplitter, QSizePolicy, QAbstractScrollArea, QHBoxLayout, QTextEdit, QShortcut,\
-    QProgressDialog, QDesktopWidget, QSlider, QTabWidget, QMenuBar, QAction, QTableWidgetSelectionRange, QProgressBar, QMenu, QTableWidgetItem, QTreeWidgetItem
+    QProgressDialog, QDesktopWidget, QSlider, QTabWidget, QMenuBar, QAction, QTableWidgetSelectionRange, QProgressBar, QMenu, QTableWidgetItem, QTreeWidgetItem,\
+    QListWidgetItem, QTableWidget, QHeaderView, QDoubleSpinBox, QToolButton, QDialogButtonBox
 from PyQt5.QtGui import QKeySequence, QFont, QDoubleValidator, QIntValidator, QTextCursor
-from PyQt5.QtCore import Qt, QProcess, QObject
+from PyQt5.QtCore import Qt, QProcess, QObject, QEvent
 from PyQt5 import uic
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
@@ -45,12 +46,195 @@ import utils
 import xraydb
 from ConsoleWidget import ConsoleWidget
 from collections import OrderedDict
+try:
+    from collections.abc import MutableMapping
+except ImportError:            # Python 2 fallback, harmless here
+    from collections import MutableMapping
 import datetime
+import json
+import hashlib
 from emcee import backends
 from lmfit.customhdf import CustomHDFBackend
 from joint_fit_panel import JointFitPanel, NameDelegate
+from Image2DWidget import Image2DWidget
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
+# Keys of an output_params entry that are METADATA, not plottable variables. The
+# generated-parameter list shows every OTHER key, so this is what keeps an image
+# entry reading as "map2d_data : ['x', 'y', 'z']".
+#
+# 'meta' is DELIBERATELY absent: it is currently shown in that list and
+# saveGenParameters branches on the literal strings "['x', 'y', 'meta']" and
+# "['x', 'y', 'z', 'meta']" (see saveGenParameters), so filtering it here would
+# silently break saving of every existing generated output.
+OP_META_KEYS = ('names', 'plotType', 'role', 'panel', 'cmap', 'zscale', 'levels')
+
+
+class _LimitProxy(MutableMapping):
+    """Backwards-compatible view of ``limits[data_key]['x']`` as xmin / xmax.
+
+    Fit limits generalize from "x has a range" to "any named data column has an
+    optional (lo, hi)", stored as ``self.limits[data_key] = {col: (lo, hi)}``.
+    ``'x'`` is a reserved column name meaning "whichever DataFrame column is
+    plotted as x".
+
+    This view exists so that every pre-existing ``self.xmin[key]`` /
+    ``self.xmax[key]`` read, write and delete keeps working verbatim -- which is
+    what makes the generalization a refactor of one store rather than a rewrite of
+    twenty call sites.
+
+    ``index`` is 0 for the low bound and 1 for the high bound.
+    """
+
+    def __init__(self, store, index):
+        self._store = store
+        self._i = int(index)
+
+    def __getitem__(self, key):
+        return self._store[key]['x'][self._i]
+
+    def __setitem__(self, key, value):
+        d = self._store.setdefault(key, {})
+        pair = list(d.get('x', (None, None)))
+        pair[self._i] = value
+        d['x'] = tuple(pair)
+
+    def __delitem__(self, key):
+        # Tolerant of a repeated delete: callers do `del self.xmin[k]` followed by
+        # `del self.xmax[k]`, and both refer to the same underlying 'x' entry.
+        # A missing DATASET still raises, as a mapping should.
+        d = self._store[key]
+        d.pop('x', None)
+
+    def __iter__(self):
+        return iter([k for k, v in self._store.items() if 'x' in v])
+
+    def __len__(self):
+        return sum(1 for v in self._store.values() if 'x' in v)
+
+    def __repr__(self):
+        return '%s(%r)' % (type(self).__name__, dict(self))
+
+
+
+class ColumnLimitsDialog(QDialog):
+    """Per-column fit limits for the selected dataset(s).
+
+    Deliberately the same idiom as joint_fit_panel's per-dataset rangeTable:
+    blank means unbounded, a non-numeric entry reverts, and the name column is
+    read-only. Row 0 is the reserved 'x' column and is two-way bound to the main
+    window's Xmin:Xmax line edit, so there is exactly one x window, not two.
+
+    Non-modal on purpose: you want to watch the plot while narrowing a window.
+    """
+
+    def __init__(self, parent, names):
+        QDialog.__init__(self, parent)
+        self.host = parent
+        self.names = list(names)
+        self.setWindowTitle('Fit limits by data column')
+        self._loading = False
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel('Blank = unbounded. Row "x" mirrors Xmin:Xmax.\n'
+                             'Applies to every selected dataset.'))
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(['Column', 'min', 'max'])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.itemChanged.connect(self._on_item_changed)
+        lay.addWidget(self.table)
+        self.statusLabel = QLabel('')
+        lay.addWidget(self.statusLabel)
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.rejected.connect(self.close)
+        clear = bb.addButton('Clear all', QDialogButtonBox.ResetRole)
+        clear.clicked.connect(self._clear_all)
+        lay.addWidget(bb)
+        self.resize(430, 320)
+        self.refresh()
+
+    # ------------------------------------------------------------------ ui --
+    def refresh(self):
+        """Rebuild from the host's current selection."""
+        self._loading = True
+        try:
+            keys = self.host.sfnames or []
+            cols = self.host.available_columns(keys[-1]) if keys else [('x', 'x')]
+            self.table.setRowCount(len(cols))
+            self._cols = [c for c, _ in cols]
+            for r, (col, label) in enumerate(cols):
+                it = QTableWidgetItem(label)
+                it.setFlags(Qt.ItemIsEnabled)
+                self.table.setItem(r, 0, it)
+                lo, hi = self._shared_value(keys, col)
+                for c, v in ((1, lo), (2, hi)):
+                    self.table.setItem(r, c, QTableWidgetItem(v))
+            self._update_status(keys)
+        finally:
+            self._loading = False
+
+    def _shared_value(self, keys, col):
+        """(lo_text, hi_text): the shared value, '' if unset, '<varies>' if the
+        selected datasets disagree -- mirroring how the x line edit aggregates."""
+        vals = []
+        for k in keys:
+            pair = (self.host.limits.get(k, {}) or {}).get(col, (None, None))
+            vals.append(tuple(pair))
+        if not vals:
+            return '', ''
+        out = []
+        for i in (0, 1):
+            s = set(v[i] for v in vals)
+            if len(s) > 1:
+                out.append('<varies>')
+            else:
+                v = vals[0][i]
+                out.append('' if v is None else ('%g' % v))
+        return out[0], out[1]
+
+    def _update_status(self, keys):
+        n_lim = 0
+        n_act = None
+        for k in keys:
+            lim = self.host.limits.get(k, {}) or {}
+            n_lim = max(n_lim, len([c for c in lim if c != 'x']))
+            m = self.host._column_mask(k)
+            if m is not None:
+                n_act = int(np.count_nonzero(m)) if n_act is None else n_act
+        msg = '%d extra column limit(s)' % n_lim
+        if n_act is not None:
+            msg += '   |   %d active point(s)' % n_act
+            if n_act == 0:
+                msg += '  <-- nothing left to fit'
+        self.statusLabel.setText(msg)
+        self.statusLabel.setStyleSheet('color: red' if n_act == 0 else '')
+        self.host._refresh_limits_badge()
+
+    # --------------------------------------------------------------- edits --
+    def _on_item_changed(self, item):
+        if self._loading or item.column() not in (1, 2):
+            return
+        col = self._cols[item.row()]
+        txt = item.text().strip()
+        if txt in ('', '<varies>'):
+            val = None
+        else:
+            try:
+                val = float(txt)
+            except ValueError:
+                self._loading = True                 # revert, like rangeTable does
+                item.setText('')
+                self._loading = False
+                val = None
+        self.host.set_column_limit(col, item.column() - 1, val)
+        self.refresh()
+
+    def _clear_all(self):
+        for k in list(self.host.sfnames or []):
+            keep = (self.host.limits.get(k, {}) or {}).get('x')
+            self.host.limits[k] = ({'x': keep} if keep is not None else {})
+        self.host.update_plot()
+        self.refresh()
 
 
 class minMaxDialog(QDialog):
@@ -227,6 +411,45 @@ class FitResultDialog(QDialog):
         self.reject()
 
 
+class DataListWidget(QListWidget):
+    """Data-file list with a custom plain-click rule for multi-selection.
+
+    Qt's ExtendedSelection collapses a multi-selection on any plain click. We want:
+      * plain click on a dataset ALREADY in a multi-selection -> keep the whole
+        selection (all curves/EDPs stay co-plotted) and just switch which dataset's
+        parameters fill the tables (the "detail");
+      * plain click on a NEW dataset -> collapse to it (Qt default);
+      * Ctrl+click -> toggle add/remove (Qt default).
+    The detail switch is delegated to the host's ``_set_detail_dataset`` (which also
+    honours the "don't overwrite the tables for an unfit dataset" rule)."""
+    def __init__(self, app, parent=None):
+        super().__init__(parent)
+        self._app = app
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and e.modifiers() == Qt.NoModifier:
+            item = self.itemAt(e.pos())
+            if item is not None and item.isSelected() and len(self.selectedItems()) > 1:
+                # within-selection plain click: switch detail, DON'T collapse
+                try:
+                    self._app._set_detail_dataset(item.text())
+                except Exception:
+                    import traceback; traceback.print_exc()
+                return
+        super().mousePressEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        # keep double-click -> open-data-dialog working regardless of the press rule
+        item = self.itemAt(e.pos())
+        if item is not None:
+            try:
+                self._app.openDataDialog(item)
+            except Exception:
+                import traceback; traceback.print_exc()
+            return
+        super().mouseDoubleClickEvent(e)
+
+
 class XModFit(QWidget):
     """
     This widget class is developed to provide an end-user a *Graphical User Interface* by which either they can \
@@ -303,8 +526,12 @@ class XModFit(QWidget):
         
         self.data={}
         self.meta={}
-        self.xmin={}
-        self.xmax={}
+        # Fit limits, generalized: limits[data_key] = {col_name: (lo, hi)}, with
+        # 'x' reserved for the plotted x column. xmin/xmax are MutableMapping
+        # views onto the 'x' entry, so every existing call site is untouched.
+        self.limits={}
+        self.xmin=_LimitProxy(self.limits, 0)
+        self.xmax=_LimitProxy(self.limits, 1)
         self.dlg_data={}
         self.plotColIndex={}
         self.plotColors={}
@@ -316,6 +543,14 @@ class XModFit(QWidget):
         self._switching_dataset=False  # re-entrancy guard for the select->tables->plot path
         self.jointFit=None             # persistent compiled JointFit (retains joint results
                                        # across individual-dataset views); see run_joint_fit
+        self._joint_overlay_names=[]   # datasets currently overlaid in the joint plot (drives
+                                       # multi-dataset EDP co-plotting in plot_extra_param)
+        self._mcmc_is_joint=False      # True while the dedicated joint-fit MCMC window is open
+                                       # (routes Start->run_joint_emcee, enables joint-only viz)
+        self.seed_temperature=1.0      # XLayersPDB MCMC walker-seeding temperature (GUI spinbox);
+                                       # 1=posterior-weighted, higher=more mode spread
+        self.seed_mode='joint'         # both-shared joint seed source: 'joint' landscape (default)
+                                       # vs 'individual' per-dataset landscapes
         # Deterministic, well-separated plot palette: a dataset's data (markers) and its
         # fit (line) share one color; distinct curves get distinct colors (see
         # _curve_color_for). Tableau-10.
@@ -331,6 +566,7 @@ class XModFit(QWidget):
         self.format='%.6e'
         self.backend=None
         self.gen_param_items=[]
+        self._image_autoselected=False
         self.doubleValidator=QDoubleValidator()
         self.intValidator=QIntValidator()
         self.tApp_Clients={}
@@ -710,11 +946,11 @@ class XModFit(QWidget):
         
         
         self.dataLayoutWidget.nextRow()
-        self.dataListWidget=QListWidget()
+        self.dataListWidget=DataListWidget(self)
         self.dataListWidget.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.dataListWidget.setItemDelegate(NameDelegate(self.dataListWidget))  # show basenames
         self.dataListWidget.itemSelectionChanged.connect(self.dataFileSelectionChanged)
-        self.dataListWidget.itemDoubleClicked.connect(self.openDataDialog)
+        # (double-click -> openDataDialog is handled in DataListWidget.mouseDoubleClickEvent)
         self.dataLayoutWidget.addWidget(self.dataListWidget,colspan=2)
         
         self.dataDock.addWidget(self.dataLayoutWidget)
@@ -727,6 +963,16 @@ class XModFit(QWidget):
         self.xminmaxLineEdit = QLineEdit('0:1')
         self.xminmaxLineEdit.returnPressed.connect(self.xminmaxChanged)
         self.fitLayoutWidget.addWidget(self.xminmaxLineEdit, col=1)
+        # The x window stays a one-line affordance -- it is what ordinary 1-D data
+        # needs and every existing read/write site depends on it. Limits on OTHER
+        # data columns (e.g. q_xy and q_z of a 2D map, whose x is a row index) live
+        # behind this button, which stays out of the way until used.
+        self.limitsButton = QToolButton()
+        self.limitsButton.setText('Limits')
+        self.limitsButton.setToolTip('Fit limits on any other data column '
+                                     '(blank = unbounded)')
+        self.limitsButton.clicked.connect(self.openColumnLimitsDialog)
+        self.fitLayoutWidget.addWidget(self.limitsButton, col=2)
 
         self.fitLayoutWidget.nextRow()
         fitMethodLabel = QLabel('Fit Method')
@@ -767,7 +1013,7 @@ class XModFit(QWidget):
         self.fitLayoutWidget.nextRow()
         self.showConfIntervalButton = QPushButton('Show Param Error')
         self.showConfIntervalButton.setDisabled(True)
-        self.showConfIntervalButton.clicked.connect(self.confInterval_emcee)
+        self.showConfIntervalButton.clicked.connect(lambda: self._show_param_error())
         self.calcConfInterButton = QPushButton('Calculate Param Error')
         self.calcConfInterButton.clicked.connect(self.calcConfInterval)
         self.calcConfInterButton.setDisabled(True)
@@ -778,6 +1024,10 @@ class XModFit(QWidget):
 
 
     def dataFileSelectionChanged(self):
+        # A normal selection change repaints for the new detail, so clear any stale
+        # "unfit dataset" indicator (it only applies to a detail switch WITHIN a
+        # preserved multi-selection; see _set_detail_dataset).
+        self._clear_nofit_indicator()
         self.sfnames=[]
         self.pfnames=[]
         for item in self.dataListWidget.selectedItems():
@@ -786,12 +1036,27 @@ class XModFit(QWidget):
             fnum=txt.split('<>')[0]
             self.pfnames=self.pfnames+[fnum+':'+key for key in self.data[txt].keys()]
             self.meta[txt]['File Number'] = int(fnum)
+        # Multi-select where the just-added/selected (last) dataset has NO fit: keep the
+        # param tables on a REAL fit by making the detail the last FITTED selected
+        # dataset (reorder so it is sfnames[-1], which drives the detail everywhere), and
+        # flag the unfit one for the no-fit banner (shown after activation). Its EDP is
+        # skipped in plot_extra_param. Single-select still shows the (possibly unfit)
+        # dataset so the user can visualise initial values while setting up a fit.
+        self._pending_nofit = None
+        if len(self.sfnames) > 1 and not self._dataset_is_fitted(self.sfnames[-1]):
+            _fitted = [n for n in self.sfnames if self._dataset_is_fitted(n)]
+            if _fitted:
+                self._pending_nofit = self.sfnames[-1]
+                self.sfnames = [n for n in self.sfnames if n != _fitted[-1]] + [_fitted[-1]]
         if len(self.sfnames)>0:
             self.metaDataInfoUpdated(self.sfnames[-1])
             self.curDir = os.path.dirname(self.sfnames[-1].split('<>')[1])
             xmin=np.min([self.xmin[key] for key in self.sfnames])
             xmax=np.max([self.xmax[key] for key in self.sfnames])
             self.xminmaxLineEdit.setText('%0.6f:%0.6f'%(xmin,xmax))
+            self._refresh_limits_badge()
+            if getattr(self, 'columnLimitsDialog', None) is not None                     and self.columnLimitsDialog.isVisible():
+                self.columnLimitsDialog.refresh()
             # self.xminmaxChanged()
             # if len(self.data[self.sfnames[-1]].keys())>1:
             #     text='{'
@@ -830,6 +1095,11 @@ class XModFit(QWidget):
                     self._activate_dataset_fit(fit)
                 finally:
                     self._switching_dataset=False
+        # Banner on FIRST addition of an unfit dataset in a multi-selection: the tables
+        # were kept on the fitted detail (reorder above), so signal that the just-added
+        # dataset has no fit and its params/EDP aren't shown.
+        if self._pending_nofit is not None:
+            self._show_nofit_indicator(self._pending_nofit, self.sfnames[-1])
         # try:
         self.update_plot()
         # except:
@@ -841,16 +1111,21 @@ class XModFit(QWidget):
         # CI ("Calculate Param Error") reflects THIS dataset's fit status and persists
         # across switches (the dataset's Fit keeps its result/_is_fitted).
         self._update_ci_button_state()
-        # mutual exclusion: an active individual (Data-list) selection releases any
-        # joint-fit selection, so alternating between the two views always re-triggers.
+        # Item B2 selection model: a PLAIN click is mutually exclusive with the joint
+        # list (classic one-view behaviour -- selecting here releases the joint
+        # selection). Hold Ctrl to KEEP the joint selection and overlay the individual
+        # (dashed) + joint (solid) fitted curves.
         if len(self.sfnames) > 0 and not getattr(self, '_syncing_selection', False):
-            jp = getattr(self, 'jointFitPanel', None)
-            if jp is not None and jp.datasetList.selectedItems():
-                self._syncing_selection = True
-                jp.datasetList.blockSignals(True)
-                jp.datasetList.clearSelection()
-                jp.datasetList.blockSignals(False)
-                self._syncing_selection = False
+            if self._overlay_modifier_active():
+                self._maybe_combined_overlay()
+            else:
+                jp = getattr(self, 'jointFitPanel', None)
+                if jp is not None and jp.datasetList.selectedItems():
+                    self._syncing_selection = True
+                    jp.datasetList.blockSignals(True)
+                    jp.datasetList.clearSelection()
+                    jp.datasetList.blockSignals(False)
+                    self._syncing_selection = False
         self._refresh_data_labels()
 
     def clear_individual_selection(self):
@@ -865,6 +1140,432 @@ class XModFit(QWidget):
             self.dataListWidget.blockSignals(False)
         finally:
             self._syncing_selection = False
+        # Switching to a pure joint view releases the individual selection, so the
+        # individual no-fit banner/tint no longer applies -- clear it. (blockSignals
+        # above suppresses dataFileSelectionChanged, which would otherwise clear it.)
+        self._clear_nofit_indicator()
+
+    def _overlay_modifier_active(self):
+        """True when the overlay modifier (Ctrl) is held during a selection change.
+
+        Plain clicks keep the two dataset lists mutually exclusive (one view at a
+        time); Ctrl+click KEEPS the other list's selection so the individual + joint
+        curves overlay (item B2). Isolated in one method so it can be overridden in
+        headless tests (QApplication.keyboardModifiers() reads the live keyboard)."""
+        try:
+            return bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+        except Exception:
+            return False
+
+    def clear_joint_view(self):
+        """Blank-click / deselect-all in the joint-fit list drops the joint overlay.
+        Falls back to the individual view if the Data list still has a selection, else
+        clears the plot -- mirroring a blank-click in the general Data list."""
+        self._joint_overlay_names = []
+        if [it for it in self.dataListWidget.selectedItems()]:
+            # repaint the individual view (points self.fit at an individual Fit)
+            self.dataFileSelectionChanged()
+        else:
+            try:
+                self.plotWidget.Plot([])
+            except Exception:
+                pass
+
+    def _show_nofit_indicator(self, name, showing=None):
+        """Signal that the param tables were NOT updated because ``name`` has no fit.
+        Shows an amber banner AND tints the parameter tables (both, per user choice)."""
+        try:
+            base = os.path.basename(name.split('<>')[-1])
+            msg = "⚠ '%s' has no fit yet — parameters not updated" % base
+            if showing:
+                msg += " (still showing '%s')" % os.path.basename(showing.split('<>')[-1])
+            if getattr(self, 'noFitBanner', None) is not None:
+                self.noFitBanner.setText(msg)
+                self.noFitBanner.setVisible(True)
+            tint = 'QTableWidget{background:#fff8e1;}'
+            for t in (getattr(self, 'fixedParamTableWidget', None),
+                      getattr(self, 'sfitParamTableWidget', None)):
+                if t is not None:
+                    t.setStyleSheet(tint)
+            for mkey, t in getattr(self, 'mfitParamTableWidget', {}).items():
+                try:
+                    t.setStyleSheet(tint)
+                except Exception:
+                    pass
+        except Exception:
+            import traceback; traceback.print_exc()
+
+    def _clear_nofit_indicator(self):
+        """Hide the no-fit banner and remove the parameter-table tint."""
+        if getattr(self, 'noFitBanner', None) is not None:
+            self.noFitBanner.setVisible(False)
+        for t in (getattr(self, 'fixedParamTableWidget', None),
+                  getattr(self, 'sfitParamTableWidget', None)):
+            if t is not None:
+                t.setStyleSheet('')
+        for mkey, t in getattr(self, 'mfitParamTableWidget', {}).items():
+            try:
+                t.setStyleSheet('')
+            except Exception:
+                pass
+
+    def _dataset_is_fitted(self, name):
+        """True if dataset ``name`` has a stored INDIVIDUAL fit result."""
+        f = self.dataset_fits.get(name)
+        return (f is not None and not hasattr(f, 'objectives')
+                and (getattr(f, '_is_fitted', False) or getattr(f, 'result', None) is not None))
+
+    def _curve_meta(self, name):
+        """Parse a plotted-curve key -> (dataset_index or None, type_rank, dataset_key).
+        type_rank: data=0, individual fit=1, joint fit=2, other=3. Recognizes the naming
+        conventions used across the plot paths: ``N:col`` (data), ``.. [indiv:N]``,
+        ``.. [joint:N]``, ``model [indiv:N]`` and a bottom-panel ``.. [N]`` suffix."""
+        import re
+        idx, rank = None, 3
+        m = re.search(r'\[indiv:(\d+)\]', name)
+        if m: idx, rank = int(m.group(1)), 1
+        else:
+            m = re.search(r'\[joint:(\d+)\]', name)
+            if m: idx, rank = int(m.group(1)), 2
+            else:
+                m = re.match(r'(\d+):', name)                 # data "N:col"
+                if m: idx, rank = int(m.group(1)), 0
+                else:
+                    m = re.search(r'\[(\d+)\]\s*$', name)      # bottom-panel "param [N]"
+                    if m: idx, rank = int(m.group(1)), 0
+        dkey = self._dataset_key_for_index(idx) if idx is not None else None
+        return idx, rank, dkey
+
+    def _dataset_key_for_index(self, idx):
+        """The full data key ('<fnum><>path') whose file-number == idx, or None."""
+        try:
+            for k in self.data.keys():
+                if int(k.split('<>')[0]) == idx:
+                    return k
+        except Exception:
+            pass
+        return None
+
+    def _legend_label(self, name):
+        """Friendly main-plot legend label: the dataset's short name (``num: basename``,
+        the same text shown in the Data boxes), tagged by curve type. Data -> just the
+        name; individual fit -> 'name (fit)'; joint fit -> 'name (joint)'. Unrecognized
+        keys keep their raw text. (Uses the existing _short_name defined below.)"""
+        idx, rank, dkey = self._curve_meta(name)
+        if dkey is None:
+            return name
+        short = self._short_name(dkey)              # 'num: basename'
+        if len(short) > 24:
+            short = short[:23] + '…'
+        if rank == 1:
+            return '%s (fit)' % short
+        if rank == 2:
+            return '%s (joint)' % short
+        return short
+
+    def _indiv_fit_name(self, fnum=None, funcname=None):
+        """Key for an INDIVIDUAL-view fit curve, carrying the dataset index so it sorts
+        and labels correctly (``<model> [indiv:<fnum>]``). Falls back to the bare model
+        name when no dataset index is available (e.g. a pure simulation)."""
+        if funcname is None:
+            it = self.funcListWidget.currentItem()
+            funcname = it.text() if it is not None else 'fit'
+        if fnum is None and getattr(self, 'sfnames', None):
+            try:
+                fnum = self.sfnames[-1].split('<>')[0]
+            except Exception:
+                fnum = None
+        return '%s [indiv:%s]' % (funcname, fnum) if fnum is not None else funcname
+
+    # ------------------------------------------------- per-column fit limits --
+    # The extra columns are ALREADY retained: Data_Dialog.readData stores the whole
+    # DataFrame at self.dlg_data[data_key]['data'] and the plotted column indices at
+    # self.plotColIndex[data_key][sub_key]. So limits on any column need no new data
+    # plumbing -- only a way to name the columns and build a mask from them.
+    #
+    # ALIGNMENT INVARIANT: externalData[key]['x'] is a straight copy of a DataFrame
+    # column, so every column is row-aligned 1:1 with every sub_key's x. The mask is
+    # therefore per-DATASET, not per-sub_key, which is why limits are keyed
+    # (data_key, column).
+    def available_columns(self, data_key):
+        """[(col_name, label)] for the limits table. Row 0 is always 'x'."""
+        try:
+            cols = list(self.dlg_data[data_key]['data'].columns)
+        except Exception:
+            return [('x', 'x')]
+        xname = None
+        try:
+            sub = list(self.plotColIndex[data_key].keys())[0]
+            xname = cols[self.plotColIndex[data_key][sub][0]]
+        except Exception:
+            pass
+        out = [('x', 'x  [%s]' % xname if xname else 'x')]
+        out += [(c, str(c)) for c in cols if c != xname]
+        return out
+
+    def _column_values(self, data_key, col):
+        """1-D float array for a named column, or None."""
+        if col == 'x':
+            try:
+                sub = list(self.data[data_key].keys())[0]
+                return np.asarray(self.data[data_key][sub]['x'], float)
+            except Exception:
+                return None
+        try:
+            return np.asarray(self.dlg_data[data_key]['data'][col].values, float)
+        except Exception:
+            return None
+
+    def _column_mask(self, data_key, limits=None, slice_=None):
+        """Boolean eligibility mask for a dataset, or None if nothing is limited.
+
+        Only NON-'x' columns contribute: the 'x' window is already applied as the
+        contiguous imin:imax slice, and doubling it here would just be slower.
+        ``slice_=(i0, i1)`` returns the mask pre-sliced to match arrays that the
+        caller has already sliced (the update_plot path does that).
+        """
+        lim = self.limits.get(data_key, {}) if limits is None else (limits or {})
+        cols = [(c, v) for (c, v) in lim.items()
+                if c != 'x' and v is not None and (v[0] is not None or v[1] is not None)]
+        if not cols:
+            return None
+        ref = self._column_values(data_key, 'x')
+        n = None if ref is None else len(ref)
+        m = None
+        for c, (lo, hi) in cols:
+            v = self._column_values(data_key, c)
+            if v is None:
+                continue
+            if n is not None and len(v) != n:
+                # Violated alignment invariant: refuse rather than mask the wrong
+                # rows. Loudly, because a silent misalignment is unrecoverable.
+                print('XModFit: column %r of %s has %d rows but x has %d -- '
+                      'column limits ignored for this dataset' % (c, data_key, len(v), n))
+                return None
+            k = np.ones(len(v), bool)
+            if lo is not None:
+                k &= v >= lo
+            if hi is not None:
+                k &= v <= hi
+            m = k if m is None else (m & k)
+        if m is None:
+            return None
+        if slice_ is not None:
+            i0, i1 = slice_
+            m = m[i0:i1]
+        return m
+
+    # ---- persistence of column limits: "qxy:0.9:1.7;qz::0.8" ----------------
+    # A separate optional line rather than an extension of '#Fit Range=', so an
+    # older XModFit reading a newer file just ignores it (the loader is an
+    # if/elif chain of substring tests) and a newer XModFit reading an older file
+    # simply finds no extra limits. Backward compatible in both directions.
+    def _format_column_limits(self, data_key=None):
+        key = data_key or (self.sfnames[-1] if self.sfnames else None)
+        lim = (self.limits.get(key, {}) or {}) if key else {}
+        recs = []
+        for c in sorted(k for k in lim if k != 'x'):
+            lo, hi = lim[c]
+            recs.append('%s:%s:%s' % (c, '' if lo is None else repr(float(lo)),
+                                      '' if hi is None else repr(float(hi))))
+        return ';'.join(recs)
+
+    @staticmethod
+    def _parse_column_limits(text):
+        out = {}
+        for rec in str(text).strip().split(';'):
+            if not rec.strip():
+                continue
+            parts = rec.split(':')
+            if len(parts) < 3:
+                continue
+            name = parts[0].strip()
+            def _f(t):
+                t = t.strip()
+                if t == '':
+                    return None
+                try:
+                    return float(t)
+                except ValueError:
+                    return None
+            lo, hi = _f(parts[1]), _f(parts[2])
+            if name and name != 'x' and not (lo is None and hi is None):
+                out[name] = (lo, hi)
+        return out
+
+    def _apply_column_limits(self, text, data_key=None):
+        d = self._parse_column_limits(text)
+        keys = [data_key] if data_key else list(self.sfnames or [])
+        for k in keys:
+            if k is None:
+                continue
+            cur = self.limits.setdefault(k, {})
+            for c in [c for c in cur if c != 'x']:
+                cur.pop(c)
+            cur.update(d)
+        self._refresh_limits_badge()
+        return d
+
+    def set_column_limit(self, col, which, value):
+        """Write one bound of one column for every SELECTED dataset.
+
+        ``which`` is 0 for the low bound, 1 for the high bound. The 'x' column
+        routes through xmin/xmax so the line edit stays authoritative for it.
+        """
+        for key in (self.sfnames or []):
+            if col == 'x':
+                (self.xmin if which == 0 else self.xmax)[key] = value
+            else:
+                d = self.limits.setdefault(key, {})
+                pair = list(d.get(col, (None, None)))
+                pair[which] = value
+                if pair[0] is None and pair[1] is None:
+                    d.pop(col, None)
+                else:
+                    d[col] = tuple(pair)
+        if col == 'x':
+            try:
+                lo = np.min([self.xmin[k] for k in self.sfnames])
+                hi = np.max([self.xmax[k] for k in self.sfnames])
+                self.xminmaxLineEdit.setText('%0.6f:%0.6f' % (lo, hi))
+            except Exception:
+                pass
+        self._refresh_limits_badge()
+        self.update_plot()
+
+    def _refresh_limits_badge(self):
+        """Show the number of extra column limits on the button, red when a limit
+        has emptied the dataset -- so '0 active' is visible BEFORE hitting Fit."""
+        if not hasattr(self, 'limitsButton'):
+            return
+        n, empty = 0, False
+        for key in (self.sfnames or []):
+            lim = self.limits.get(key, {}) or {}
+            n = max(n, len([c for c in lim if c != 'x']))
+            m = self._column_mask(key)
+            if m is not None and not np.any(m):
+                empty = True
+        self.limitsButton.setText('Limits' if n == 0 else 'Limits (%d)' % n)
+        self.limitsButton.setStyleSheet('color: red' if empty else '')
+        self.limitsButton.setToolTip(
+            'Fit limits on any other data column (blank = unbounded)'
+            + ('\nWARNING: current limits leave 0 points to fit' if empty else ''))
+
+    def openColumnLimitsDialog(self):
+        if not (self.sfnames or []):
+            QMessageBox.warning(self, 'No data',
+                                'Select a dataset first: column limits are '
+                                'per-dataset.', QMessageBox.Ok)
+            return
+        if getattr(self, 'columnLimitsDialog', None) is None:
+            self.columnLimitsDialog = ColumnLimitsDialog(self, [])
+        self.columnLimitsDialog.refresh()
+        self.columnLimitsDialog.show()
+        self.columnLimitsDialog.raise_()
+
+    def _joint_masks(self, spec):
+        """{dataset_name: bool mask or None} for spec.compile().
+
+        The spec cannot build these itself -- it only receives data[name][sub] and
+        has no access to dlg_data -- so they are built here, where the DataFrames
+        live. Per-dataset limits set in the joint panel win over the main-window
+        ones for that dataset.
+        """
+        out = {}
+        try:
+            for e in spec.datasets:
+                lim = e.limits if getattr(e, 'limits', None) else self.limits.get(e.name)
+                out[e.name] = self._column_mask(e.name, limits=lim)
+        except Exception:
+            return {}
+        return out
+
+    def _autoselect_image_params(self):
+        """Select the 2D-map entries when nothing else is selected.
+
+        The 2D Map tab is driven by the genParamListWidget SELECTION, so without
+        this a model that emits image output shows no tab at all until the user
+        thinks to hunt for 'map2d_data' in the generated-parameter list -- which
+        nothing on screen tells them to do. A map is the natural default view for
+        a model that produces one, so select them once; the user can deselect.
+        Never overrides an existing selection.
+        """
+        try:
+            if getattr(self, '_image_autoselected', False):
+                return          # already offered once; a deselect must stick
+            if self.genParamListWidget.selectedItems():
+                return
+            op = self.fit.params.get('output_params', {}) or {}
+            rows = []
+            for i in range(self.genParamListWidget.count()):
+                it = self.genParamListWidget.item(i)
+                key = it.text().split(':')[0].strip()
+                if self._op_is_image(op.get(key)):
+                    rows.append(it)
+            if not rows:
+                return
+            for it in rows:
+                it.setSelected(True)
+            self.gen_param_items = [it.text() for it in rows]
+            self._image_autoselected = True
+        except Exception:
+            pass
+
+    @staticmethod
+    def _op_is_image(entry):
+        """True for a 2-D map entry of output_params.
+
+        Discriminate on plotType, NEVER on the displayed list text: an image entry
+        renders as "['x', 'y', 'z']", textually identical to the legacy meshgrid
+        form that saveGenParameters branches on.
+        """
+        return isinstance(entry, dict) and entry.get('plotType') == 'image'
+
+    @staticmethod
+    def _op_var_list(entry):
+        """Plottable variable names of an output_params entry (metadata removed)."""
+        try:
+            return [k for k in entry.keys() if k not in OP_META_KEYS]
+        except Exception:
+            return []
+
+    def _legend_order(self, names):
+        """Order plotted-curve names for a tidy legend: by dataset INDEX (the number
+        shown in the Data boxes), and within a dataset  data < individual fit < joint
+        fit. Names that don't match the conventions keep a stable order at the end."""
+        def key(name):
+            idx, rank, _ = self._curve_meta(name)
+            return (idx if idx is not None else 10**9, rank, name)
+        return sorted(names, key=key)
+
+    def _set_detail_dataset(self, name):
+        """Switch the DETAIL dataset (whose fit fills the parameter tables) WITHIN a
+        multi-selection, without collapsing the selection (so all curves/EDPs stay
+        co-plotted). If ``name`` has no individual fit, leave the tables unchanged and
+        show the no-fit indicator instead (request: don't update params for unfit data).
+        Called from DataListWidget on a plain click inside a multi-selection."""
+        fit = self.dataset_fits.get(name)
+        fitted = (fit is not None and not hasattr(fit, 'objectives')
+                  and (getattr(fit, '_is_fitted', False) or getattr(fit, 'result', None) is not None))
+        if not fitted:
+            showing = self.sfnames[-1] if getattr(self, 'sfnames', None) else None
+            self._show_nofit_indicator(name, showing)
+            return
+        self._clear_nofit_indicator()
+        try:
+            sel = [it.text() for it in self.dataListWidget.selectedItems()]
+        except Exception:
+            sel = [name]
+        # make the clicked dataset the detail (sfnames[-1] drives the detail elsewhere)
+        self.sfnames = [n for n in sel if n != name] + [name]
+        self._switching_dataset = True
+        try:
+            self._sync_funclist_to_fit(fit)
+            self._activate_dataset_fit(fit)          # self.fit + param tables -> this dataset
+        finally:
+            self._switching_dataset = False
+        self._update_ci_button_state()
+        self._refresh_data_labels()
 
     def _curve_color_for(self, data_key, curve_key):
         """Deterministic, well-separated color for a (dataset, curve). A dataset's data
@@ -1023,6 +1724,17 @@ class XModFit(QWidget):
         self.fchanged=False
         self.tchisqr=1e30
         # self.xminmaxChanged()
+        # The dedicated joint MCMC window drives the joint objective explicitly and must
+        # bypass the individual-fit guards below (there is no main-window dataset/function
+        # selection while it is open). Route it first; run_joint_emcee has its own guards.
+        _method = fit_method if fit_method is not None else self.fitMethods[self.fitMethodComboBox.currentText()]
+        if _method == 'emcee' and getattr(self, '_mcmc_is_joint', False):
+            self.fit_method = 'emcee'
+            self.fit_scale = self.fitScaleComboBox.currentText()
+            self.run_joint_emcee(emcee_walkers=emcee_walkers, emcee_steps=emcee_steps,
+                                 emcee_cores=emcee_cores, reuse_sampler=reuse_sampler,
+                                 emcee_burn=emcee_burn, emcee_thin=emcee_thin, backend=backend)
+            return
         if self.sfnames is None or self.sfnames==[]:
             QMessageBox.warning(self,'Data Error','Please select a dataset first before fitting',QMessageBox.Ok)
             return
@@ -1063,8 +1775,17 @@ class XModFit(QWidget):
         joint_active = (getattr(self, 'jointFitEnabled', False) and _jp is not None
                         and len(_jp.datasetList.selectedItems()) > 0
                         and len(_jp.spec.datasets) >= 2)
+        # (The dedicated joint MCMC window is already routed at the top of doFit,
+        # before the individual-fit guards.)
         if joint_active:
-            self.run_joint_fit()
+            if self.fit_method == 'emcee':
+                # MCMC confidence intervals on the joint objective: reuse the already
+                # fitted JointFit (do NOT recompile/re-fit), sample the global params.
+                self.run_joint_emcee(emcee_walkers=emcee_walkers, emcee_steps=emcee_steps,
+                                     emcee_cores=emcee_cores, reuse_sampler=reuse_sampler,
+                                     emcee_burn=emcee_burn, emcee_thin=emcee_thin, backend=backend)
+            else:
+                self.run_joint_fit()
             return
         self.disconnect_fit_function()
 
@@ -1141,7 +1862,9 @@ class XModFit(QWidget):
             #     self.fit.x=self.data[fname]['x'][posval].T[0]
             #     self.fit.yerr=self.data[fname]['yerr'][posval].T[0]
 
-            self.fit.set_x(x,y=y,yerr=yerr)
+            # full-length column mask: perform_fit slices it to the x window and
+            # freezes it, so len(residual) is constant across iterations
+            self.fit.set_x(x,y=y,yerr=yerr,mask=self._column_mask(fname))
             #self.update_plot()
             self.oldParams=copy.copy(self.fit.params)
             self.fit_stopped=False
@@ -1236,6 +1959,9 @@ class XModFit(QWidget):
                             header += 'Function: %s\n' % self.funcListWidget.currentItem().text()
                             header += 'Xrange=%s\n' % self.xLineEdit.text()
                             header += 'Fit Range=%s\n' % self.xminmaxLineEdit.text()
+                            _cl = self._format_column_limits()
+                            if _cl:
+                                header += 'Column Limits=%s\n' % _cl
                             header += 'Fit Method=%s\n' % self.fitMethodComboBox.currentText()
                             header += 'Fit Scale=%s\n' % self.fitScaleComboBox.currentText()
                             header += 'Fit Iterations=%s\n' % self.fitIterationLineEdit.text()
@@ -1406,6 +2132,23 @@ class XModFit(QWidget):
             mkey=self.mfitParamTabWidget.tabText(i)
             self.mfitParamTableWidget[mkey].cellChanged.connect(self.mfitParamChanged_new)
         self.disconnect_fit_function()
+        # Restore the original multi-selection. Sequential fitting deselects each dataset
+        # as it advances (so each fits/plots on its own), which otherwise leaves only the
+        # LAST dataset selected. The user expects the multi-selection to persist after
+        # fitting so all the freshly-fitted curves/EDPs stay co-plotted. Re-select them
+        # all with signals suppressed, then refresh once.
+        if len(selItems) > 1:
+            try:
+                self.dataListWidget.itemSelectionChanged.disconnect()
+            except Exception:
+                pass
+            for it in selItems:
+                it.setSelected(True)
+            self.dataListWidget.itemSelectionChanged.connect(self.dataFileSelectionChanged)
+            self.dataFileSelectionChanged()
+        # Green "fitted" marker(s) should appear as soon as the fit finishes, not only
+        # after the user reselects the dataset.
+        self._refresh_data_labels()
 
 
     def disconnect_fit_function(self):
@@ -1415,13 +2158,15 @@ class XModFit(QWidget):
             pass
 
     def _update_ci_button_state(self):
-        """Enable 'Calculate Param Error' iff the CURRENT individual dataset is fitted.
-        A JointFit active view keeps it disabled (joint-fit CIs are a separate step)."""
+        """Enable 'Calculate Param Error' when a fit is available. For an individual fit
+        that means the CURRENT dataset is fitted; for a JointFit (joint fitting enabled)
+        it means the joint fit has run -- joint-fit MCMC/CIs are now supported and do NOT
+        require an individual dataset to be selected in the Data list."""
         fit = getattr(self, 'fit', None)
-        ok = (fit is not None and not hasattr(fit, 'objectives')
-              and (getattr(fit, '_is_fitted', False) or getattr(fit, 'result', None) is not None))
+        fitted = (fit is not None and (getattr(fit, '_is_fitted', False)
+                                       or getattr(fit, 'result', None) is not None))
         try:
-            self.calcConfInterButton.setEnabled(bool(ok))
+            self.calcConfInterButton.setEnabled(bool(fitted))
         except Exception:
             pass
 
@@ -1450,7 +2195,7 @@ class XModFit(QWidget):
                 yerr = {k: d[k]['yerr'] for k in d}
             else:
                 k0 = list(d.keys())[0]; x = d[k0]['x']; y = d[k0]['y']; yerr = d[k0]['yerr']
-            self.fit.set_x(x, y=y, yerr=yerr)
+            self.fit.set_x(x, y=y, yerr=yerr, mask=self._column_mask(key))
             self.fit_scale = self.fitScaleComboBox.currentText()
             self.fit.perform_fit(self.xmin[key], self.xmax[key], fit_scale=self.fit_scale,
                                  fit_method='leastsq', maxiter=1000)
@@ -1465,7 +2210,21 @@ class XModFit(QWidget):
         return True, ''
 
     def calcConfInterval(self):
-        if len(self.sfnames)>1:
+        # This is the INDIVIDUAL-fit error button. Joint fits have their own dedicated
+        # MCMC button in the Joint Fit panel, so when joint fit is enabled this button
+        # refuses and points the user to the right control (keeps the two flows separate).
+        if getattr(self, 'jointFitEnabled', False):
+            QMessageBox.information(
+                self, 'Joint fit enabled',
+                'Joint fit is currently enabled, so this individual-fit error button '
+                'is disabled.\n\n'
+                '• To calculate errors for a single dataset, uncheck '
+                '"Enable joint fit" in the Joint Fit panel first.\n\n'
+                '• For joint-fit data, run "Run joint fit", then use the '
+                '"Joint MCMC / Param Error…" button in the Joint Fit panel.',
+                QMessageBox.Ok)
+            return
+        if len(self.sfnames) > 1:
             QMessageBox.warning(self,'MultiFit Warning','Confidence interval can be calculated for one data set only.'
                                                ' Please select and fit one data set before caclulating confidence interval.',
                                 QMessageBox.Ok)
@@ -1841,9 +2600,119 @@ class XModFit(QWidget):
 
 
         
-    def confInterval_emcee(self):
+    def _lockMainSelectionForMCMC(self, lock):
         """
+        While the MCMC window is open, lock the main-window controls that would
+        swap out self.fit / self.sfnames (the object the sampler is bound to), so
+        the user can't lose track of which dataset/function is being analyzed.
+        The prior enabled-state of each control is snapshotted on lock and restored
+        on unlock (so controls that were legitimately disabled stay disabled).
         """
+        # Only the controls that would rebind self.fit / self.sfnames. The CI buttons
+        # are deliberately left out (doFit toggles showConfIntervalButton itself, and a
+        # re-open is handled by the guard at the top of confInterval_emcee).
+        widgets = [self.dataListWidget, self.funcListWidget, self.categoryListWidget,
+                   self.addDataButton, self.removeDataButton, self.fitButton]
+        if lock:
+            self._mcmcLockedStates = {id(w): w.isEnabled() for w in widgets}
+            for w in widgets:
+                w.setEnabled(False)
+        else:
+            states = getattr(self, '_mcmcLockedStates', None)
+            for w in widgets:
+                w.setEnabled(states.get(id(w), True) if states is not None else True)
+            self._mcmcLockedStates = None
+
+    def eventFilter(self, obj, event):
+        # Release the main-window selection lock when the MCMC window is closed.
+        if obj is getattr(self, 'emceeConfIntervalWidget', None) and event.type() == QEvent.Close:
+            self._lockMainSelectionForMCMC(False)
+            # clear the joint flag so a later individual emcee never misroutes via doFit
+            self._mcmc_is_joint = False
+        return super(XModFit, self).eventFilter(obj, event)
+
+    _PDB_MCMC_FUNCS = ('XLayersPDB', 'XLayersPDB_box', 'XLayersPDB_dev_smooth')
+
+    def _mcmc_funcname(self):
+        """Function name driving the MCMC backend type + angle handling.
+
+        Joint-aware and None-safe: while a joint fit is active the main
+        ``funcListWidget`` has no current item, so the old
+        ``funcListWidget.currentItem().text()`` calls crashed (leaving
+        ``self.backend`` unset -> "create a new MCMC file"). For a joint fit use
+        the shared model's class name (all datasets use one constrained model)."""
+        if getattr(self, '_mcmc_is_joint', False):
+            jf = getattr(self, 'fit', None)
+            objs = getattr(jf, 'objectives', None)
+            if objs:
+                try:
+                    return type(objs[0]['func']).__name__
+                except Exception:
+                    pass
+        item = self.funcListWidget.currentItem()
+        return item.text() if item is not None else ''
+
+    def _mcmc_is_pdb(self):
+        """True if the active MCMC function is an XLayersPDB* model (uses the
+        angle-aware CustomHDFBackend + angleindex autocorr)."""
+        return self._mcmc_funcname() in self._PDB_MCMC_FUNCS
+
+    def _show_param_error(self):
+        """'Show Param Error' router: open the joint MCMC window when the active fit
+        is a joint fit (so joint results get their own visualizations), otherwise the
+        individual window. A no-arg wrapper so QPushButton's `checked` bool never
+        lands in confInterval_emcee's `joint` argument."""
+        fit = getattr(self, 'fit', None)
+        if hasattr(fit, 'objectives'):        # a JointFit
+            self.confInterval_joint_emcee()
+        else:
+            self.confInterval_emcee()
+
+    def confInterval_joint_emcee(self):
+        """Open the dedicated joint-fit MCMC window (its own button in the joint
+        panel). Requires a completed joint least-squares fit; makes that JointFit
+        the active fit and opens the joint variant of the MCMC window."""
+        jf = getattr(self, 'jointFit', None)
+        if jf is None or not getattr(jf, '_is_fitted', False) or getattr(jf, 'result', None) is None:
+            QMessageBox.warning(self, 'Joint MCMC',
+                                'No completed joint fit yet.\n\n'
+                                'Add at least 2 datasets in the Joint Fit panel and click '
+                                '"Run joint fit" (or fit them with the main Fit button while '
+                                'a joint dataset is selected). Then open this window to run '
+                                'MCMC / parameter errors on the joint objective.', QMessageBox.Ok)
+            return
+        self.fit = jf                    # MCMC samples the joint objective
+        # a joint MCMC is a fresh sampler unless this JointFit already carries a chain.
+        # NB: lmfit MinimizerResult defines `flatchain` as a property that returns None
+        # for a least-squares result, so `hasattr` is always True -- test the VALUE.
+        self.errorAvailable = getattr(jf.result, 'flatchain', None) is not None
+        self.confInterval_emcee(joint=True)
+
+    def confInterval_emcee(self, joint=False):
+        """Open the MCMC confidence-interval window.
+
+        ``joint`` selects the dedicated joint-fit window: same base UI (so the
+        shared sampling/post-processing plumbing is unchanged) plus extra
+        joint-only visualization tabs appended by ``_augment_joint_mcmc_tabs``.
+        The individual window (``joint=False``) is unchanged and gets no extra
+        tabs, so joint visualizations never clutter individual analysis."""
+        # If an MCMC window of the SAME kind is already open, just bring it to the
+        # front. If a window of the OTHER kind is open (e.g. the individual window is
+        # up and the user clicks the joint button), close it and build the requested
+        # one instead of silently re-raising the wrong window.
+        _existing = getattr(self, 'emceeConfIntervalWidget', None)
+        if _existing is not None and _existing.isVisible():
+            if bool(joint) == getattr(self, '_mcmc_is_joint', False):
+                _existing.raise_()
+                _existing.activateWindow()
+                return
+            try:
+                _existing.close()          # different kind requested -> replace it
+            except Exception:
+                pass
+        # _mcmc_is_joint is the authoritative signal for Start-routing (doFit) and the
+        # joint-only visualization branches; set it now that we will build the window.
+        self._mcmc_is_joint = bool(joint)
         self.fit_method = self.fitMethods[self.fitMethodComboBox.currentText()]
         if not self.errorAvailable:
              self.emcee_walkers=(self.fit.result.nvarys+1)*2
@@ -1856,7 +2725,31 @@ class XModFit(QWidget):
         self.emceeConfIntervalWidget = QWidget()
         # self.emceeConfIntervalWidget.setWindowModality(Qt.ApplicationModal)
         uic.loadUi('./UI_Forms/EMCEE_ConfInterval_Widget.ui', self.emceeConfIntervalWidget)
-        self.emceeConfIntervalWidget.setWindowTitle('MCMC Confidence Interval Caclulator')
+        # pop-out / zoom button on the corner tab (item 5, both windows)
+        self._add_corner_popout_button()
+        # Title carries the dataset + function being analyzed, so it stays unambiguous
+        # even though the main window remains visible during sampling.
+        try:
+            _fn = self.funcListWidget.currentItem().text()
+        except Exception:
+            _fn = ''
+        if self._mcmc_is_joint:
+            try:
+                _nd = len(self.jointFitPanel.spec.datasets)
+            except Exception:
+                _nd = len(getattr(getattr(self, 'fit', None), 'objectives', []) or [])
+            self.emceeConfIntervalWidget.setWindowTitle(
+                'Joint MCMC Confidence Interval — %d datasets [%s]' % (_nd, _fn))
+            # append the joint-only visualization tabs (subset / summary); the
+            # individual window never calls this, so its tabs stay uncluttered.
+            self._augment_joint_mcmc_tabs()
+        else:
+            try:
+                _ds = os.path.basename(self.sfnames[-1].split('<>')[1])
+            except Exception:
+                _ds = 'current dataset'
+            self.emceeConfIntervalWidget.setWindowTitle(
+                'MCMC Confidence Interval Calculator — %s [%s]' % (_ds, _fn))
         self.MCMCBackendFile='./mcmc_chain.h5'
         self.emceeConfIntervalWidget.MCMCFileLineEdit.setText(self.MCMCBackendFile)
         self.emceeConfIntervalWidget.loadMCMCFilePushButton.clicked.connect(self.openMCMCBackendFile)
@@ -1886,6 +2779,10 @@ class XModFit(QWidget):
             self.autoCorrTime = np.array([[0, 1]])
 
         self.emceeConfIntervalWidget.startSamplingPushButton.clicked.connect(self.start_emcee_sampling)
+        # Connect Stop once per widget (like Start), not per sampling run. Connecting it
+        # inside showFitInfoDlg stacked a new connection on every Start, so a later Stop
+        # fired stopFit N times and the redundant disconnect() raised.
+        self.emceeConfIntervalWidget.stopSamplingPushButton.clicked.connect(self.stopFit)
         self.emceeConfIntervalWidget.MCMCWalkerLineEdit.returnPressed.connect(self.MCMCWalker_changed)
         self.emceeConfIntervalWidget.saveConfIntervalPushButton.clicked.connect(self.saveParameterError)
         self.emceeConfIntervalWidget.addUserDefinedParamPushButton.clicked.connect(lambda x:
@@ -1894,8 +2791,75 @@ class XModFit(QWidget):
         self.emceeConfIntervalWidget.saveUserDefinedParamPushButton.clicked.connect(self.saveMCMCUserDefinedParam)
         self.emceeConfIntervalWidget.loadUserDefinedParamPushButton.clicked.connect(self.loadMCMCUserDefinedParam)
         self.emceeConfIntervalWidget.userDefinedParamTreeWidget.itemDoubleClicked.connect(self.openMCMCUserDefinedParam)
+        # Deferred autocorrelation: compute the ACF-vs-lag plot only when the user opens
+        # the Autocorrelation tab (connected once per window here).
+        self.emceeConfIntervalWidget.tabWidget.currentChanged.connect(self._on_mcmc_tab_changed)
+        # XLayersPDB orientation-seeding controls, added programmatically into the free
+        # grid rows just below MCMC Walkers(row2)/Steps(row3) so they sit with the other
+        # MCMC settings. Only the orientation-seeding path reads them, so they are
+        # disabled for non-PDB fits (and the seed-source combo only for a both-shared
+        # joint fit).
+        try:
+            _grid = self.emceeConfIntervalWidget.gridLayout
+            _is_pdb = self._mcmc_is_pdb()
+            _joint = bool(getattr(self, '_mcmc_is_joint', False))
+            _both_shared = False
+            if _joint and _is_pdb:
+                try:
+                    _lay = self.fit.orientation_layout()
+                    _both_shared = bool(_lay and _lay['both_shared'])
+                except Exception:
+                    _both_shared = False
+
+            # --- Seed temperature (row 4, right under Walkers/Steps) ---
+            _tlbl = QLabel('Seed temperature (T)')
+            self.emceeConfIntervalWidget.seedTempSpinBox = QDoubleSpinBox()
+            _sb = self.emceeConfIntervalWidget.seedTempSpinBox
+            _sb.setDecimals(2); _sb.setMinimum(0.1); _sb.setMaximum(20.0)
+            _sb.setSingleStep(0.5); _sb.setValue(float(getattr(self, 'seed_temperature', 1.0)))
+            _ttip = ("Walker-seeding 'temperature' for XLayersPDB orientation seeding. It only "
+                     "sets WHERE walkers START -- it does not change the final posterior.\n"
+                     "  T = 1      default: seed near the best-fitting orientations (posterior-weighted).\n"
+                     "  T = 2 to 5 spread walkers more widely across competing orientation modes\n"
+                     "             (use if a run collapses into one mode or you suspect missed modes).\n"
+                     "  T < 1      concentrate on the single best mode.\n"
+                     "Every detected basin gets guaranteed walkers at any T, so secondary modes are\n"
+                     "always seeded; T mainly controls how much of the walker cloud explores them.")
+            if not _is_pdb:
+                _ttip += "\n(Only applies to XLayersPDB fits -- disabled for this function.)"
+            _sb.setEnabled(_is_pdb); _tlbl.setEnabled(_is_pdb)
+            _tlbl.setToolTip(_ttip); _sb.setToolTip(_ttip)
+            _grid.addWidget(_tlbl, 4, 0); _grid.addWidget(_sb, 4, 1)
+
+            # --- Seed from: joint vs individual landscape (row 5; both-shared joint only) ---
+            _slbl = QLabel('Seed from')
+            self.emceeConfIntervalWidget.seedModeCombo = QComboBox()
+            _cb = self.emceeConfIntervalWidget.seedModeCombo
+            _cb.addItems(['Joint landscape', 'Individual landscapes'])
+            _stip = ("How to build the shared-orientation seed map for a joint fit with theta & phi "
+                     "shared:\n"
+                     "  Joint landscape:      scan the shared (theta,phi) against ALL datasets at once,\n"
+                     "                        re-profiling the shared parameters (e.g. insertion) jointly\n"
+                     "                        at each orientation -- only orientations that survive the\n"
+                     "                        shared constraint are seeded. Most faithful to the joint fit.\n"
+                     "  Individual landscapes: scan each dataset's own model separately (shared params\n"
+                     "                        pinned at the joint best fit) and sum the maps -- shows each\n"
+                     "                        dataset's preferred orientations; pins (doesn't re-profile)\n"
+                     "                        the shared params.")
+            if not _both_shared:
+                _stip += ("\n(Only applies to a joint fit with BOTH theta & phi shared; disabled here. "
+                          "Per-dataset orientations are always seeded individually.)")
+            _cb.setEnabled(_both_shared); _slbl.setEnabled(_both_shared)
+            _cb.setToolTip(_stip); _slbl.setToolTip(_stip)
+            _grid.addWidget(_slbl, 5, 0); _grid.addWidget(_cb, 5, 1)
+        except Exception:
+            import traceback; traceback.print_exc()
         self.emceeConfIntervalWidget.progressBar.setValue(0)
         self.EnableUserDefinedParameterButtons(enable=False)
+        # Lock main-window dataset/function selection while this window is open, and
+        # release the lock when it closes (via eventFilter -> Close).
+        self.emceeConfIntervalWidget.installEventFilter(self)
+        self._lockMainSelectionForMCMC(True)
         self.emceeConfIntervalWidget.showMaximized()
         if self.errorAvailable:
             self.update_emcee_parameters()
@@ -1903,22 +2867,172 @@ class XModFit(QWidget):
             #self.cornerPlot()
             #self.emceeConfIntervalWidget.tabWidget.setCurrentIndex(4)
 
+    # ---- MCMC backend fingerprint (dataset/model identity) + tau history ---- #
+    def _mcmc_fingerprint(self):
+        """Identity of the current MCMC context, used to tag/verify a backend .h5:
+        function, fit type, varying-parameter names, dataset name(s) and a hash of
+        the data actually being fit (so a same-shape but different dataset is caught)."""
+        fp = {'funcname': self._mcmc_funcname(),
+              'joint': bool(getattr(self, '_mcmc_is_joint', False))}
+        try:
+            fp['varnames'] = list(self.fit.result.var_names)
+        except Exception:
+            fp['varnames'] = []
+        data = np.array([])
+        try:
+            # Hash the ACTIVE points, not the whole [imin,imax] window. A column
+            # limit changes which points are fitted without changing imin/imax, so
+            # hashing the window would let a backend .h5 from an unmasked run be
+            # silently accepted and continued for a masked one -- the one failure
+            # mode here that corrupts results rather than merely confusing a user.
+            if fp['joint'] and hasattr(self.fit, 'objectives'):
+                fp['dataset'] = sorted(str(o['name']) for o in self.fit.objectives)
+                ys = []
+                for o in self.fit.objectives:
+                    seg = np.asarray(o['y'])[o['imin']:o['imax'] + 1]
+                    im = o.get('imask')
+                    ys.append(seg if im is None else seg[im[:len(seg)]])
+                data = np.concatenate(ys) if ys else np.array([])
+            else:
+                fp['dataset'] = [os.path.basename(self.sfnames[-1])] if self.sfnames else []
+                try:
+                    data = np.asarray(self.fit.y)[self.fit.active_index()]
+                except Exception:
+                    data = np.asarray(self.fit.y)[self.fit.imin:self.fit.imax + 1]
+        except Exception:
+            fp['dataset'] = []
+        try:
+            fp['ndata'] = int(len(data))
+            fp['datahash'] = (hashlib.sha1(np.ascontiguousarray(data, dtype='float64').tobytes())
+                              .hexdigest()[:16]) if len(data) else ''
+        except Exception:
+            fp['ndata'] = 0
+            fp['datahash'] = ''
+        return fp
+
+    def _write_mcmc_fingerprint(self):
+        """Tag the backend .h5 with the current fingerprint AND the autocorrelation-
+        time trajectory, so a later load can verify a match and continue the tau
+        history. Best-effort; never breaks sampling."""
+        if getattr(self, 'backend', None) is None or not os.path.exists(self.MCMCBackendFile):
+            return
+        try:
+            fp = self._mcmc_fingerprint()
+            with self.backend.open('a') as f:
+                g = f[self.backend.name]
+                g.attrs['xmf_fingerprint'] = json.dumps(fp)
+                act = np.asarray(getattr(self, 'autoCorrTime', np.array([[0, 1]])), dtype=float)
+                if 'xmf_autocorr_time' in g:
+                    del g['xmf_autocorr_time']
+                g.create_dataset('xmf_autocorr_time', data=act)
+        except Exception:
+            import traceback; traceback.print_exc()
+
+    def _read_mcmc_fingerprint(self):
+        """Return (fingerprint_dict_or_None, autocorr_time_array_or_None) from the
+        currently-set backend .h5."""
+        try:
+            with self.backend.open('r') as f:
+                g = f[self.backend.name]
+                fp = json.loads(g.attrs['xmf_fingerprint']) if 'xmf_fingerprint' in g.attrs else None
+                act = np.asarray(g['xmf_autocorr_time']) if 'xmf_autocorr_time' in g else None
+            return fp, act
+        except Exception:
+            return None, None
+
+    def _mcmc_fingerprint_mismatch(self, saved):
+        """Human-readable description of how a saved fingerprint differs from the
+        current context, or '' if they match."""
+        cur = self._mcmc_fingerprint()
+        msgs = []
+        if saved.get('funcname') != cur['funcname']:
+            msgs.append('function: file=%s vs current=%s' % (saved.get('funcname'), cur['funcname']))
+        if bool(saved.get('joint')) != bool(cur['joint']):
+            msgs.append('fit type: file=%s vs current=%s'
+                        % ('joint' if saved.get('joint') else 'individual',
+                           'joint' if cur['joint'] else 'individual'))
+        if list(saved.get('varnames') or []) != list(cur['varnames']):
+            msgs.append('varying parameters differ')
+        if sorted(saved.get('dataset') or []) != sorted(cur['dataset']):
+            msgs.append('dataset: file=%s vs current=%s'
+                        % (saved.get('dataset'), cur['dataset']))
+        elif saved.get('datahash') and cur['datahash'] and saved['datahash'] != cur['datahash']:
+            msgs.append('same dataset name, but the data / fit-range differ')
+        return '\n'.join('  - ' + m for m in msgs)
+
+    def _autocorr_trajectory(self, chain, angleindex=None, npts=40):
+        """Reconstruct the whole tau-vs-step curve from a loaded chain by computing
+        the integrated autocorrelation time over increasing prefixes chain[:n].
+
+        Works for ANY backend (old files with no saved trajectory too). Angle-aware
+        (customautocorr) for XLayersPDB*, standard emcee autocorr otherwise. Returns
+        an (npts, 2) array [[n_steps, mean_tau], ...] or None if the chain is too short."""
+        chain = np.asarray(chain)
+        nsteps = chain.shape[0]
+        if nsteps < 10:
+            return None
+        if angleindex is not None:
+            from lmfit.customautocorr import integrated_time as _it
+            tau_of = lambda c: _it(c, angleindex, tol=0, quiet=True)
+        else:
+            from emcee.autocorr import integrated_time as _it
+            tau_of = lambda c: _it(c, tol=0, quiet=True)
+        lo = max(10, nsteps // 50)
+        ns = np.unique(np.linspace(lo, nsteps, npts).astype(int))
+        traj = []
+        for n in ns:
+            try:
+                tau = float(np.mean(tau_of(chain[:int(n)])))
+                if np.isfinite(tau):
+                    traj.append([int(n), tau])
+            except Exception:
+                pass
+        return np.array(traj, dtype=float) if traj else None
+
     def openMCMCBackendFile(self):
         """
         Open an existing backend file
         :return:
         """
-        file=QFileDialog.getOpenFileName(self, 'Select a MCMC file', directory=self.curDir,filter='MCMC Files (*.h5)')[0]
+        file=QFileDialog.getOpenFileName(self.emceeConfIntervalWidget, 'Select a MCMC file', directory=self.curDir,filter='MCMC Files (*.h5)')[0]
+        # Keep the MCMC window in front; a dialog parented to the main window would
+        # otherwise reactivate the main window when it closes.
+        self.emceeConfIntervalWidget.raise_()
+        self.emceeConfIntervalWidget.activateWindow()
         # self.iterations = 0
         if file != '':
             self.MCMCBackendFile=file
             self.emceeConfIntervalWidget.MCMCFileLineEdit.setText(self.MCMCBackendFile)
-            if self.funcListWidget.currentItem().text() == 'XLayersPDB' or self.funcListWidget.currentItem().text() == 'XLayersPDB_box':
+            if self._mcmc_is_pdb():
                 self.backend = CustomHDFBackend(self.MCMCBackendFile)
             else:
                 self.backend = backends.HDFBackend(self.MCMCBackendFile)
+            # Verify this .h5 belongs to the dataset/model currently selected for
+            # analysis before allowing a continue-sampling that would mix runs.
+            saved_fp, saved_act = self._read_mcmc_fingerprint()
+            if saved_fp is not None:
+                mism = self._mcmc_fingerprint_mismatch(saved_fp)
+                if mism:
+                    ans = QMessageBox.warning(
+                        self.emceeConfIntervalWidget, 'MCMC file mismatch',
+                        'This MCMC file does not match the current dataset/model:\n\n%s\n\n'
+                        'Continuing sampling into it would mix incompatible runs.\n'
+                        'Load it anyway?' % mism,
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                    self.emceeConfIntervalWidget.raise_()
+                    self.emceeConfIntervalWidget.activateWindow()
+                    if ans != QMessageBox.Yes:
+                        self.backend = None
+                        return
+            else:
+                QMessageBox.information(
+                    self.emceeConfIntervalWidget, 'MCMC file',
+                    'This MCMC file has no dataset fingerprint (older file); its match '
+                    'to the current dataset cannot be verified. Proceeding.', QMessageBox.Ok)
+                self.emceeConfIntervalWidget.raise_()
+                self.emceeConfIntervalWidget.activateWindow()
             self.fit.result.chain=self.backend.get_chain()[..., :, :]
-            if self.funcListWidget.currentItem().text() == 'XLayersPDB' or self.funcListWidget.currentItem().text() == 'XLayersPDB_box':
+            if self._mcmc_is_pdb():
                 angleindex = np.zeros(len(self.fit.result.var_names))
                 ind = 0
                 for var_name in self.fit.result.var_names:
@@ -1929,18 +3043,34 @@ class XModFit(QWidget):
                     else:
                         angleindex[ind] = 0
                     ind += 1
-                self.autoCorrTime = np.array([[self.fit.result.chain.shape[0], np.mean(
-                    self.backend.get_autocorr_time(angleindex=angleindex, tol=0))]])
             else:
-                self.autoCorrTime=np.array([[self.fit.result.chain.shape[0],np.mean(self.backend.get_autocorr_time(tol=0))]])
+                angleindex = None
 
+            # tau-vs-step curve: PREFER the trajectory persisted in the .h5 (written at
+            # the end of each sampling session) so load does NOT recompute it. Only fall
+            # back to reconstructing from the chain for OLD files that predate the saved
+            # curve, then to a single recomputed point. (This is the load-time speedup:
+            # a saved curve is an O(1) read instead of ~40 integrated_time evaluations.)
+            if saved_act is not None and np.ndim(saved_act) == 2 and saved_act.shape[1] == 2 and len(saved_act):
+                self.autoCorrTime = saved_act.astype(float)
+            else:
+                traj = self._autocorr_trajectory(self.fit.result.chain, angleindex=angleindex)
+                if traj is not None and len(traj):
+                    self.autoCorrTime = traj
+                else:
+                    if angleindex is not None:
+                        _last_tau = np.mean(self.backend.get_autocorr_time(angleindex=angleindex, tol=0))
+                    else:
+                        _last_tau = np.mean(self.backend.get_autocorr_time(tol=0))
+                    self.autoCorrTime = np.array([[self.fit.result.chain.shape[0], _last_tau]])
             self.MCMC_starting_step=self.autoCorrTime[-1,0]
             self.emceeConfIntervalWidget.autoCorrTimeTextEdit.clear()
             self.emceeConfIntervalWidget.autoCorrTimeTextEdit.append('#MCMC_steps\tCorr_Time')
-            self.emceeConfIntervalWidget.autoCorrTimeTextEdit.append('%d\t%.3f'%(self.autoCorrTime[-1,0],self.autoCorrTime[-1,1]))
+            for _r in self.autoCorrTime:
+                self.emceeConfIntervalWidget.autoCorrTimeTextEdit.append('%d\t%.3f' % (_r[0], _r[1]))
             self.emceeConfIntervalWidget.autoCorrTimeMPLWidget.clear()
             self.autoCorrPlot_ax1 = self.emceeConfIntervalWidget.autoCorrTimeMPLWidget.fig.add_subplot(1, 1, 1)
-            self.autoCorrPlot_sp, =self.autoCorrPlot_ax1.plot(self.autoCorrTime[:,0],self.autoCorrTime[:,1],'.')
+            self.autoCorrPlot_sp, =self.autoCorrPlot_ax1.plot(self.autoCorrTime[:,0],self.autoCorrTime[:,1],'.-')
             self.autoCorrPlot_ax1.set_xlabel('Iterations')
             self.autoCorrPlot_ax1.set_ylabel('correlation_time')
             self.emceeConfIntervalWidget.autoCorrTimeMPLWidget.fig.canvas.draw()
@@ -1967,14 +3097,18 @@ class XModFit(QWidget):
         Create a new backend file to save the MCMC
         :return:
         """
-        file=QFileDialog.getSaveFileName(self, 'Start MCMC file as',directory=self.curDir,filter='MCMC Files (*.h5)')[0]
+        file=QFileDialog.getSaveFileName(self.emceeConfIntervalWidget, 'Start MCMC file as',directory=self.curDir,filter='MCMC Files (*.h5)')[0]
+        # Keep the MCMC window in front; a dialog parented to the main window would
+        # otherwise reactivate the main window when it closes.
+        self.emceeConfIntervalWidget.raise_()
+        self.emceeConfIntervalWidget.activateWindow()
         # self.iterations=0
         if file != '':
             if os.path.exists(file):
                 os.remove(file)
             self.MCMCBackendFile=file
             self.emceeConfIntervalWidget.MCMCFileLineEdit.setText(self.MCMCBackendFile)
-            if self.funcListWidget.currentItem().text() == 'XLayersPDB' or self.funcListWidget.currentItem().text() == 'XLayersPDB_box':
+            if self._mcmc_is_pdb():
                 self.backend = CustomHDFBackend(self.MCMCBackendFile)
             else:
                 self.backend = backends.HDFBackend(self.MCMCBackendFile)
@@ -2112,7 +3246,7 @@ class XModFit(QWidget):
         fh=open(fname,'w')
         txt ='#Parameter Expressions saved on %s\n'%(time.asctime())
         txt += '#Category:%s\n' % self.curr_category
-        txt += '#Function:%s\n' % self.funcListWidget.currentItem().text()
+        txt += '#Function:%s\n' % self._mcmc_funcname()   # joint-aware / None-safe
         root = self.emceeConfIntervalWidget.userDefinedParamTreeWidget.invisibleRootItem()
         child_count=root.childCount()
         for i in range(child_count):
@@ -2177,8 +3311,25 @@ class XModFit(QWidget):
         else:
             self.reuse_sampler=False
         self.emcee_cores = int(self.emceeConfIntervalWidget.ParallelCoresLineEdit.text())
+        try:
+            self.seed_temperature = float(self.emceeConfIntervalWidget.seedTempSpinBox.value())
+        except Exception:
+            self.seed_temperature = getattr(self, 'seed_temperature', 1.0)
+        try:
+            self.seed_mode = ('individual'
+                              if self.emceeConfIntervalWidget.seedModeCombo.currentIndex() == 1
+                              else 'joint')
+        except Exception:
+            self.seed_mode = getattr(self, 'seed_mode', 'joint')
 
     def start_emcee_sampling(self):
+        # Require an MCMC backend file before sampling; without it there is nothing to
+        # write to and the autocorrelation callback (self.backend.*) would crash.
+        if getattr(self, 'backend', None) is None:
+            QMessageBox.warning(self.emceeConfIntervalWidget, 'No MCMC File',
+                                'Please create a new MCMC file ("Start MCMC file") or load an '
+                                'existing one before sampling.', QMessageBox.Ok)
+            return
         try:
             self.emceeConfIntervalWidget.parameterTreeWidget.itemSelectionChanged.disconnect()
         except:
@@ -2189,11 +3340,44 @@ class XModFit(QWidget):
         self.emceeConfIntervalWidget.cornerPlotMPLWidget.clear()
         self.emceeConfIntervalWidget.confIntervalTextEdit.clear()
         self.update_emcee_parameters()
+        # Step count at the start of THIS sampling session (0 for a fresh run, the
+        # loaded chain length on a resume) -- used for a correct ETA in fitErrorCallback.
+        self._mcmc_session_start_step = float(getattr(self, 'MCMC_starting_step', 0) or 0)
+        # Last step at which the full-chain tau was recomputed (throttle anchor). Seed
+        # from the loaded length so the first live tau point continues the reconstructed
+        # curve after the chain has grown by one (length-scaled) interval.
+        self._last_autocorr_step = int(self._mcmc_session_start_step)
         if not self.errorAvailable:
             self.emcee_frac=self.emcee_burn/self.emcee_steps
-        self.doFit(fit_method='emcee', emcee_walkers=self.emcee_walkers, emcee_steps=self.emcee_steps,
-                       emcee_cores=self.emcee_cores, reuse_sampler=self.reuse_sampler, emcee_burn=self.emcee_burn,
-                   emcee_thin=self.emcee_thin, backend=self.backend)
+        # Immediate feedback: the sampler setup (especially XLayersPDB: ray init, PDB
+        # parsing and the first form-factor evaluations) can take many seconds before
+        # the first progress callback fires, during which the window looked idle.
+        self.emceeConfIntervalWidget.startSamplingPushButton.setEnabled(False)
+        self.emceeConfIntervalWidget.fitIterLabel.setText('Initializing sampler, please wait...')
+        self.emceeConfIntervalWidget.progressBar.setMaximum(0)  # busy/indeterminate until first step
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+        # Warm the numba JIT (first PDB model eval compiles the njit kernels, ~1s) while
+        # the "Initializing..." label is up, so that cost isn't paid silently mid-run.
+        try:
+            _wf = getattr(self.fit, 'func', None)
+            if _wf is not None and hasattr(_wf, 'y'):
+                _wf.y()
+        except Exception:
+            pass
+        try:
+            self.doFit(fit_method='emcee', emcee_walkers=self.emcee_walkers, emcee_steps=self.emcee_steps,
+                           emcee_cores=self.emcee_cores, reuse_sampler=self.reuse_sampler, emcee_burn=self.emcee_burn,
+                       emcee_thin=self.emcee_thin, backend=self.backend)
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.emceeConfIntervalWidget.startSamplingPushButton.setEnabled(True)
+            # If sampling never started (early return in doFit), showFitInfoDlg didn't
+            # set a real range, so clear the busy/indeterminate bar back to determinate.
+            if self.emceeConfIntervalWidget.progressBar.maximum() == 0:
+                self.emceeConfIntervalWidget.progressBar.setMaximum(100)
+                self.emceeConfIntervalWidget.progressBar.setValue(0)
+                self.emceeConfIntervalWidget.fitIterLabel.setText('')
 
 
     def conf_interv_status(self,params,iterations,residual,fit_scale):
@@ -2207,7 +3391,7 @@ class XModFit(QWidget):
             if os.path.exists(self.MCMCBackendFile):
                 self.fit.result.chain = self.backend.get_chain()[..., :, :]
 
-                if self.funcListWidget.currentItem().text() == 'XLayersPDB' or self.funcListWidget.currentItem().text() == 'XLayersPDB_box':
+                if self._mcmc_is_pdb():
                     angleindex = np.zeros(len(self.fit.result.var_names))
                     ind = 0
                     for var_name in self.fit.result.var_names:
@@ -2237,7 +3421,8 @@ class XModFit(QWidget):
                                                               maxiter=int(self.fitIterationLineEdit.text()),
                                                               emcee_walkers=emcee_walkers, emcee_steps=emcee_steps,
                                                               emcee_cores=emcee_cores, reuse_sampler=reuse_sampler, emcee_burn=emcee_burn,
-                                                              emcee_thin=emcee_thin, backend=backend)
+                                                              emcee_thin=emcee_thin, backend=backend,
+                                                              seed_temperature=getattr(self, 'seed_temperature', 1.0))
         
     
     def showFitInfoDlg(self, emcee_walkers=100, emcee_steps=100, emcee_burn=30):
@@ -2260,14 +3445,16 @@ class XModFit(QWidget):
             self.emceeConfIntervalWidget.progressBar.setMaximum(int(emcee_steps+self.MCMC_starting_step))
             self.emceeConfIntervalWidget.progressBar.setMinimum(0)
             self.emceeConfIntervalWidget.progressBar.setValue(int(self.MCMC_starting_step))
-            self.emceeConfIntervalWidget.stopSamplingPushButton.clicked.connect(self.stopFit)
+            # Stop is connected once in confInterval_emcee, not here (avoids stacked connections).
 
     def stopFit(self):
         self.fit.fit_abort=True
         self.fit_stopped=True
         if self.fit_method=='emcee':
+            # Idempotent: setting fit_abort above is enough, so extra Stop clicks are
+            # harmless. (Previously this disconnected the button, which threw when the
+            # slot had been connected/fired more than once.)
             self.reuse_sampler = True
-            self.emceeConfIntervalWidget.stopSamplingPushButton.clicked.disconnect()
 
     def closeFitInfoDlg(self):
         # Only the non-emcee branch of showFitInfoDlg creates fitInfoDlg; for
@@ -2311,7 +3498,7 @@ class XModFit(QWidget):
     def fitErrorCallback(self, params, iterations, residual, fit_scale):
         if hasattr(self.fit.fitter, 'sampler'):
 
-            if self.funcListWidget.currentItem().text() == 'XLayersPDB' or self.funcListWidget.currentItem().text() == 'XLayersPDB_box':
+            if self._mcmc_is_pdb():
                 angleindex = np.zeros(len(self.fit.result.var_names))
                 ind = 0
                 for var_name in self.fit.result.var_names:
@@ -2326,24 +3513,42 @@ class XModFit(QWidget):
             if self.fit.fitter.sampler.iteration>self.MCMC_starting_step:
                 self.MCMC_starting_step=copy.copy(self.fit.fitter.sampler.iteration)
                 time_taken=time.time()-self.start_time
-            #frac=iterations/(self.emcee_walkers*self.emcee_steps+self.emcee_walkers)
-                #time_left=time_taken*(self.emcee_walkers*self.emcee_steps+self.emcee_walkers-iterations)/iterations
-                time_left=time_taken*(self.emcee_steps-self.MCMC_starting_step)
+                # ETA from THIS session's rate over the steps remaining to the target
+                # (progress-bar max = session_start + requested steps). On a RESUME the
+                # loaded chain length can exceed the requested step count, so the old
+                # `emcee_steps - MCMC_starting_step` went NEGATIVE and time.gmtime()
+                # raised OSError [Errno 22], stalling the run. Guard finite/non-negative
+                # and cap to a value time.gmtime accepts.
+                step_now = float(self.MCMC_starting_step)
+                target = float(self.emceeConfIntervalWidget.progressBar.maximum())
+                session_start = float(getattr(self, '_mcmc_session_start_step', 0) or 0)
+                session_done = max(step_now - session_start, 1.0)
+                remaining = max(target - step_now, 0.0)
+                time_left = time_taken / session_done * remaining
+                if (not np.isfinite(time_left)) or time_left < 0:
+                    time_left = 0.0
+                time_left = min(time_left, 359999.0)   # gmtime-safe: <= 99:59:59
 
                 self.emceeConfIntervalWidget.fitIterLabel.setText('MCMC Step=%d, Time left (hh:mm:ss): %s'
                                                             %(self.MCMC_starting_step, time.strftime('%H:%M:%S',time.gmtime(time_left))))
                 self.emceeConfIntervalWidget.progressBar.setValue(self.MCMC_starting_step)
                 #print(iterations, self.fit.fitter.sampler.iteration)
                 # if (iterations-self.iterations)>self.emcee_walkers and (self.MCMC_starting_step+int(iterations/self.emcee_walkers))%100==0:
-                if self.MCMC_starting_step % 100 == 0:
-                    if self.funcListWidget.currentItem().text() == 'XLayersPDB' or self.funcListWidget.currentItem().text() == 'XLayersPDB_box':
-                        data = np.array(
-                            [[self.MCMC_starting_step, np.mean(self.backend.get_autocorr_time(angleindex=angleindex, tol=0))]])
+                # Recompute the FULL-chain integrated autocorrelation time (discard=0,
+                # the same quantity the load-time reconstruction uses -> the live points
+                # continue that curve with no discontinuity). To avoid the old lurch
+                # (an O(N log N) recompute every 100 steps as N grows), throttle the
+                # cadence to grow with the chain: frequent early (N small, cheap), sparser
+                # later, so each recompute stays a small ~constant slice of wall-time.
+                step_now = int(self.MCMC_starting_step)
+                _interval = max(100, step_now // 50)
+                if step_now - int(getattr(self, '_last_autocorr_step', 0)) >= _interval:
+                    self._last_autocorr_step = step_now
+                    if self._mcmc_is_pdb():
+                        _tau = self.backend.get_autocorr_time(angleindex=angleindex, tol=0)
                     else:
-                        data = np.array(
-                            [[self.MCMC_starting_step, np.mean(self.backend.get_autocorr_time(tol=0))]])
-                    """data = np.array(
-                        [[self.MCMC_starting_step, np.mean(self.fit.fitter.sampler.get_autocorr_time(tol=0))]])"""
+                        _tau = self.backend.get_autocorr_time(tol=0)
+                    data = np.array([[step_now, np.mean(_tau)]])
                     self.autoCorrTime=np.vstack([self.autoCorrTime, data])
                     self.emceeConfIntervalWidget.autoCorrTimeTextEdit.append(
                         '%d\t%.3f' % (self.autoCorrTime[-1, 0], self.autoCorrTime[-1, 1]))
@@ -2353,13 +3558,79 @@ class XModFit(QWidget):
                     self.autoCorrPlot_ax1.set_ylim(0.98 * min(self.autoCorrTime[:, 1]), 1.02 * max(self.autoCorrTime[:, 1]))
                     self.emceeConfIntervalWidget.autoCorrTimeMPLWidget.fig.canvas.draw()
                     self.emceeConfIntervalWidget.autoCorrTimeMPLWidget.fig.canvas.flush_events()
-                    self.emceeConfIntervalWidget.tabWidget.setCurrentIndex(3)
+                    # Show the autocorrelation tab once, but don't yank focus back to it
+                    # on every update (annoying if the user is watching another tab).
+                    if self.autoCorrTime.shape[0] <= 2:
+                        self.emceeConfIntervalWidget.tabWidget.setCurrentIndex(3)
                     print(iterations, self.MCMC_starting_step, self.autoCorrTime[-1,1])
                     """if self.autoCorrTime[-1,1]*50<(self.MCMC_starting_step+int(iterations/self.emcee_walkers)):
                         self.stopFit()"""
                 self.start_time=time.time()
         # self.iterations = copy.copy(iterations)
         QApplication.processEvents()
+
+    def _on_mcmc_tab_changed(self, index):
+        """Lazily compute the per-parameter ACF the first time the Autocorrelation tab
+        (index 2) is opened after a (re)sampling/load -- it's the costliest plot, so it
+        is deferred out of perform_post_sampling_tasks to keep load/finish fast."""
+        if index == 2 and getattr(self, '_acf_dirty', False):
+            self._acf_dirty = False
+            try:
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                QApplication.processEvents()
+                self._compute_parameter_acf()
+            finally:
+                QApplication.restoreOverrideCursor()
+
+    def _compute_parameter_acf(self):
+        """Per-parameter autocorrelation-vs-lag over the whole chain (Autocorrelation
+        tab) + the correlation-time table. Deferred: run on first view of that tab."""
+        if getattr(self, 'param_chain', None) is None:
+            return
+        keys = getattr(self, '_sampled_keys', None) or list(self.param_chain.keys())
+        angleindex = None
+        if self._mcmc_is_pdb():
+            angleindex = np.zeros(len(self.fit.result.var_names))
+            for ind, var_name in enumerate(self.fit.result.var_names):
+                angleindex[ind] = 1 if var_name == 'theta' else (2 if var_name == 'phi' else 0)
+        acor = OrderedDict()
+        self.emceeConfIntervalWidget.correlationMPLWidget.clear()
+        ax1 = self.emceeConfIntervalWidget.correlationMPLWidget.fig.add_subplot(1, 1, 1)
+        corr_time = []
+        try:
+            acor_mcmc = self.fit.fitter.sampler.get_autocorr_time(quiet=True)
+        except Exception:
+            if angleindex is not None:
+                acor_mcmc = self.backend.get_autocorr_time(angleindex=angleindex, quiet=True)
+            else:
+                acor_mcmc = self.backend.get_autocorr_time(quiet=True)
+        # Full-range ACF, incremental per-walker mean (O(N) memory) + thinned plot.
+        _plot_pts = 3000
+        for i, key in enumerate(keys):
+            if key not in self.param_chain:
+                continue
+            acc = None; nw = 0
+            for ikey in self.param_chain[key].keys():
+                tdata = self.param_chain[key][ikey]
+                res = sm.tsa.acf(tdata, nlags=len(tdata) - 1, fft=True)
+                acc = res if acc is None else acc + res
+                nw += 1
+            acor[key] = acc / max(nw, 1)
+            lags = np.arange(len(acor[key]))
+            stride = max(1, len(acor[key]) // _plot_pts)
+            ax1.plot(lags[::stride], acor[key][::stride], '-', label='para=%s' % key)
+            if i < len(acor_mcmc):
+                corr_time.append([key, acor_mcmc[i]])
+        ax1.set_xlabel('Steps')
+        ax1.set_ylabel('Autocorrelation')
+        l = ax1.legend(loc='best')
+        l.set_draggable(True)
+        self.emceeConfIntervalWidget.correlationMPLWidget.draw()
+        self.emceeConfIntervalWidget.corrTimeTextEdit.clear()
+        self.emceeConfIntervalWidget.corrTimeTextEdit.setFont(QFont("Courier", 10))
+        corr_text = tabulate(corr_time, headers=['Parameter', 'Correlation-time (Steps)'],
+                             stralign='left', numalign='left', tablefmt='simple')
+        self.emceeConfIntervalWidget.corrTimeTextEdit.append(corr_text)
 
     def perform_post_sampling_tasks(self):
         #self.emceeConfIntervalWidget.progressBar.setValue(self.emcee_steps)
@@ -2369,7 +3640,7 @@ class XModFit(QWidget):
         # it is never set, so seed it from the current fit result here.
         if getattr(self, 'final_fit_params', None) is None:
             self.final_fit_params = copy.copy(self.fit.result.params)
-        if self.funcListWidget.currentItem().text() == 'XLayersPDB' or self.funcListWidget.currentItem().text() == 'XLayersPDB_box':
+        if self._mcmc_is_pdb():
             angleindex = np.zeros(len(self.fit.result.var_names))
             ind = 0
             for var_name in self.fit.result.var_names:
@@ -2402,40 +3673,22 @@ class XModFit(QWidget):
                 l1.addChild(l1_child)
             self.emceeConfIntervalWidget.parameterTreeWidget.addTopLevelItem(l1)
         self.emceeConfIntervalWidget.parameterTreeWidget.itemSelectionChanged.connect(self.parameterTreeSelectionChanged)
+        # sampled parameter keys (excludes user-defined params added below) -- used by
+        # the deferred ACF computation so it never indexes acor_mcmc out of range.
+        self._sampled_keys = list(self.fit.result.flatchain.keys())
 
-        #Calculating autocorrelation
-        acor=OrderedDict()
-        Nrows=len(self.param_chain.keys())
+        # DEFER the per-parameter ACF-vs-lag (Autocorrelation tab): it is an FFT per
+        # walker per parameter over the whole chain -- the costliest post-sampling plot.
+        # Mark it dirty and compute lazily the first time the user opens that tab
+        # (_on_mcmc_tab_changed -> _compute_parameter_acf), so load/finish stays fast.
+        self._acf_dirty = True
         self.emceeConfIntervalWidget.correlationMPLWidget.clear()
-        ax1 = self.emceeConfIntervalWidget.correlationMPLWidget.fig.add_subplot(1, 1, 1)
-        corr_time=[]
-        try:
-            acor_mcmc=self.fit.fitter.sampler.get_autocorr_time(quiet=True) #Calculates from newly generated samples
-        except:
-            if self.funcListWidget.currentItem().text() == 'XLayersPDB' or self.funcListWidget.currentItem().text() == 'XLayersPDB_box':
-                acor_mcmc = self.backend.get_autocorr_time(angleindex=angleindex, quiet=True)  # Calculates from the existing backend file
-            else:
-                acor_mcmc = self.backend.get_autocorr_time(quiet=True) #Calculates from the existing backend file
-        for i,key in enumerate(self.param_chain.keys()):
-            tcor=[]
-            for ikey in self.param_chain[key].keys():
-                tdata=self.param_chain[key][ikey]
-                res=sm.tsa.acf(tdata,nlags=len(tdata),fft=True)
-                tcor.append(res)
-            tcor=np.array(tcor)
-            acor[key]=np.mean(tcor,axis=0)
-            ax1.plot(acor[key],'-',label='para=%s'%key)
-            corr_time.append([key,acor_mcmc[i]])#np.sum(np.where(acor[key]>0,acor[key],0))])
-        ax1.set_xlabel('Steps')
-        ax1.set_ylabel('Autocorrelation')
-        l=ax1.legend(loc='best')
-        l.set_draggable(True)
+        _axacf = self.emceeConfIntervalWidget.correlationMPLWidget.fig.add_subplot(1, 1, 1)
+        _axacf.text(0.5, 0.5, 'Open this tab to compute the autocorrelation…',
+                    ha='center', va='center', transform=_axacf.transAxes, fontsize=9, color='#888')
+        _axacf.set_xticks([]); _axacf.set_yticks([])
         self.emceeConfIntervalWidget.correlationMPLWidget.draw()
         self.emceeConfIntervalWidget.corrTimeTextEdit.clear()
-        self.emceeConfIntervalWidget.corrTimeTextEdit.setFont(QFont("Courier", 10))
-        corr_text = tabulate(corr_time, headers=['Parameter', 'Correlation-time (Steps)'], stralign='left',
-                             numalign='left', tablefmt='simple')
-        self.emceeConfIntervalWidget.corrTimeTextEdit.append(corr_text)
 
         #Plotting Acceptance Ratio
         self.emceeConfIntervalWidget.acceptFracMPLWidget.clear()
@@ -2448,8 +3701,23 @@ class XModFit(QWidget):
         ax2.set_ylabel('Acceptance Ratio')
         self.emceeConfIntervalWidget.acceptFracMPLWidget.draw()
 
-        self.emceeConfIntervalWidget.calcConfIntervPushButton.clicked.connect(self.cornerPlot)
-        self.emceeConfIntervalWidget.tabWidget.setCurrentIndex(2)
+        # Reconnect fresh each run: perform_post_sampling_tasks can fire multiple
+        # times, and QPushButton.clicked passes a `checked` bool that would land in
+        # cornerPlot's new `subset` arg -- wrap in a no-arg lambda. Joint plots the
+        # checked subset (many per-dataset params); individual plots all params.
+        try:
+            self.emceeConfIntervalWidget.calcConfIntervPushButton.clicked.disconnect()
+        except Exception:
+            pass
+        if getattr(self, '_mcmc_is_joint', False):
+            self.emceeConfIntervalWidget.calcConfIntervPushButton.clicked.connect(
+                lambda: self._plot_joint_subset())
+        else:
+            self.emceeConfIntervalWidget.calcConfIntervPushButton.clicked.connect(
+                lambda: self.cornerPlot())
+        # Land on the (now cheap) autocorrelation-TIME tab, NOT the correlation tab
+        # (index 2): switching to index 2 would immediately trigger the deferred ACF.
+        self.emceeConfIntervalWidget.tabWidget.setCurrentIndex(3)
 
         #Calculating User-Defined parameters
         self.EnableUserDefinedParameterButtons(enable=True)
@@ -2470,77 +3738,326 @@ class XModFit(QWidget):
                         ttxt2 = ttxt2.replace(name, "self.param_chain['%s'][%d]" % (name, j))
                     self.param_chain[parname][j] = eval(ttxt2)
 
+        # joint window: fill the parameter-subset checklist (now that user-defined
+        # params, if any, are also in param_chain)
+        if getattr(self, '_mcmc_is_joint', False):
+            self._populate_joint_subset_list()
+
+        # tag the backend .h5 with the dataset/model fingerprint + tau trajectory so a
+        # later load can verify the match and continue the autocorrelation history.
+        self._write_mcmc_fingerprint()
+
         self.reuse_sampler = True
 
-    def cornerPlot(self):
-        percentile = self.emceeConfIntervalWidget.percentileDoubleSpinBox.value()
-        first = int(self.emceeConfIntervalWidget.MCMCBurnLineEdit.text())
-        bins = self.emceeConfIntervalWidget.MCMCHistogramBinSpinBox.value()
-        self.emceeConfIntervalWidget.cornerPlotMPLWidget.clear()
-        #self.pardata will have all the first points removed from the chains
-        self.pardata=np.empty(((self.chain_shape[0]-first)*self.chain_shape[1],len(self.param_chain.keys())))
+    def _corner_names(self, subset=None):
+        """(names, col_indices) to plot: every sampled param except __lnsigma,
+        optionally restricted to ``subset`` (an iterable of names). ``col_indices``
+        index into ``self.pardata`` (whose columns follow param_chain key order)."""
+        subset = None if subset is None else set(subset)
+        names, cols = [], []
+        for i, key in enumerate(self.param_chain.keys()):
+            if key == '__lnsigma':
+                continue
+            if subset is not None and key not in subset:
+                continue
+            names.append(key)
+            cols.append(i)
+        return names, cols
+
+    def _rebuild_pardata(self, first):
+        """Flatten the (steps-first, walkers) chains into ``self.pardata``
+        (rows = samples, cols = param_chain keys). Shared by corner/summary."""
+        nkeep = self.chain_shape[0] - first
+        self.pardata = np.empty((nkeep * self.chain_shape[1], len(self.param_chain.keys())))
         for i, key in enumerate(self.param_chain.keys()):
             for j in self.param_chain[key].keys():
-                self.pardata[j*(self.chain_shape[0]-first):(j+1)*(self.chain_shape[0]-first),i]=self.param_chain[key][j][first:]
-        #self.pardata = np.ndarray.flatten(self.pardata)
-        names = [name for name in self.param_chain.keys() if name != '__lnsigma']#self.fit.result.var_names
-        values=[self.final_fit_params[name].value for name in names]
-        ndim = len(names)
-        quantiles=[(100-percentile)/100,0.5,percentile/100]
-        corner.corner(self.pardata, labels=names, bins=bins, levels=(percentile/100,),
-                      truths=values, quantiles=quantiles, show_titles=True, title_fmt='.3e',
-                      use_math_text=True, title_kwargs={'fontsize': 3 * 12 / ndim},
-                      label_kwargs={'fontsize': 3 * 12 / ndim}, fig=self.emceeConfIntervalWidget.cornerPlotMPLWidget.fig)
-        for ax3 in self.emceeConfIntervalWidget.cornerPlotMPLWidget.fig.get_axes():
+                self.pardata[j * nkeep:(j + 1) * nkeep, i] = self.param_chain[key][j][first:]
+
+    def _corner_truths(self, names, cols):
+        """Best-fit 'truth' per plotted param; median fallback for params (e.g.
+        user-defined) that are absent from final_fit_params."""
+        vals = []
+        for name, col in zip(names, cols):
+            if name in self.final_fit_params.keys():
+                vals.append(self.final_fit_params[name].value)
+            else:
+                vals.append(float(np.median(self.pardata[:, col])))
+        return vals
+
+    # cap the number of samples corner renders: the N x N panel histograms are the
+    # dominant cost, and beyond ~20k samples they are visually identical. Quantiles /
+    # error bars (calcMCMCerrorbars) still use the FULL self.pardata, so only the
+    # plotted density is thinned, not the reported statistics.
+    _CORNER_MAX_SAMPLES = 20000
+
+    def _corner_render_data(self, cols):
+        """self.pardata[:, cols], thinned by a uniform stride to at most
+        _CORNER_MAX_SAMPLES rows (rendering only)."""
+        data = self.pardata[:, cols]
+        n = data.shape[0]
+        if n > self._CORNER_MAX_SAMPLES:
+            step = int(np.ceil(n / self._CORNER_MAX_SAMPLES))
+            data = data[::step]
+        return data
+
+    def _draw_corner(self, fig, names, cols, values, bins, percentile):
+        """Render a corner plot of ``self.pardata[:, cols]`` into ``fig``.
+        Reused by the embedded widget, the subset re-plot, and the pop-out."""
+        ndim = max(len(names), 1)
+        quantiles = [(100 - percentile) / 100, 0.5, percentile / 100]
+        corner.corner(self._corner_render_data(cols), labels=names, bins=bins,
+                      levels=(percentile / 100,), truths=values, quantiles=quantiles,
+                      show_titles=True, title_fmt='.3e', use_math_text=True,
+                      title_kwargs={'fontsize': 3 * 12 / ndim},
+                      label_kwargs={'fontsize': 3 * 12 / ndim}, fig=fig)
+        for ax3 in fig.get_axes():
             ax3.set_xlabel('')
             ax3.set_ylabel('')
             ax3.tick_params(axis='y', labelsize=3 * 12 / ndim, rotation=0)
             ax3.tick_params(axis='x', labelsize=3 * 12 / ndim, rotation=90)
-        self.emceeConfIntervalWidget.tabWidget.setCurrentIndex(5)
-        self.emceeConfIntervalWidget.cornerPlotMPLWidget.fig.subplots_adjust(left=0.05, bottom=0.05, right=0.95, top=0.95,
-                                                                             wspace=0, hspace=0)
-        self.emceeConfIntervalWidget.cornerPlotMPLWidget.draw()
-        self.calcMCMCerrorbars(burn=first,percentile=percentile)
-        # err_quantiles={}
-        # mesg = [['Parameters', 'Value(50%)', 'Left-error(%.3f)'%(100-percentile), 'Right-error(%.3f)'%percentile]]
-        # for name in names:
-        #     err_quantiles[name] = corner.quantile(self.fit.result.flatchain[name], quantiles)
-        #     l,p,r=err_quantiles[name]
-        #     mesg.append([name, p, l - p, r - p])
-        #
-        # self.emceeConfIntervalWidget.confIntervalTextEdit.clear()
-        # self.emceeConfIntervalWidget.confIntervalTextEdit.setFont(QFont("Courier", 10))
-        # txt = tabulate(mesg, headers='firstrow', stralign='left', numalign='left', tablefmt='simple')
-        # self.emceeConfIntervalWidget.confIntervalTextEdit.append(txt)
+        fig.subplots_adjust(left=0.05, bottom=0.05, right=0.95, top=0.95, wspace=0, hspace=0)
+        return len(names)
+
+    def cornerPlot(self, subset=None):
+        """Draw the corner plot for the sampled parameters (or a ``subset`` of
+        names). Caches the plotted names/cols so calcMCMCerrorbars and the pop-out
+        stay consistent with what was actually drawn."""
+        percentile = self.emceeConfIntervalWidget.percentileDoubleSpinBox.value()
+        first = int(self.emceeConfIntervalWidget.MCMCBurnLineEdit.text())
+        bins = self.emceeConfIntervalWidget.MCMCHistogramBinSpinBox.value()
+        self._rebuild_pardata(first)
+        names, cols = self._corner_names(subset)
+        if not names:
+            QMessageBox.warning(self.emceeConfIntervalWidget, 'Corner plot',
+                                'No parameters selected to plot.', QMessageBox.Ok)
+            return
+        values = self._corner_truths(names, cols)
+        # remember for calcMCMCerrorbars / pop-out
+        self._corner_names_cache = names
+        self._corner_cols_cache = cols
+        self._corner_bins_cache = bins
+        self._corner_percentile_cache = percentile
+        w = self.emceeConfIntervalWidget.cornerPlotMPLWidget
+        w.clear()
+        self._draw_corner(w.fig, names, cols, values, bins, percentile)
+        self.emceeConfIntervalWidget.tabWidget.setCurrentWidget(
+            self.emceeConfIntervalWidget.cornerPlotTab)
+        w.draw()
+        self.calcMCMCerrorbars(burn=first, percentile=percentile)
 
 
     def calcMCMCerrorbars(self,burn=0,percentile=85):
+        # use the names/cols actually plotted (subset-aware); fall back to all params
+        names = getattr(self, '_corner_names_cache', None)
+        cols = getattr(self, '_corner_cols_cache', None)
+        if names is None or cols is None:
+            names, cols = self._corner_names()
+        ndim = len(names)
         mesg = [['Parameters', 'Fit-Value', 'Value(50%)', 'Left-error(%.3f%s)' % (100 - percentile,'%'), 'Right-error(%.3f%s)' % (percentile,'%')]]
-        ndim=len(self.param_chain.keys())
-        axes = np.array(self.emceeConfIntervalWidget.cornerPlotMPLWidget.fig.axes).reshape((ndim, ndim))
-        for i, key in enumerate(self.param_chain.keys()):
-            #if key!='__lnsigma':
-            # for chain in self.param_chain[key].keys():
-            #     try:
-            #         pardata=np.vstack((pardata,self.param_chain[key][chain][burn:]))
-            #     except:
-            #         pardata=[self.param_chain[key][chain][burn:]]
-            # pardata=np.ndarray.flatten(pardata)
-            errors=corner.quantile(self.pardata[:,i],[(100-percentile)/100, 50/100, percentile/100])
-            if key in self.final_fit_params.keys():
-                mesg.append([key, self.final_fit_params[key].value, errors[1], errors[1]-errors[0], errors[2]-errors[1]])
+        ci_rows = []
+        fig = self.emceeConfIntervalWidget.cornerPlotMPLWidget.fig
+        try:
+            axes = np.array(fig.axes).reshape((ndim, ndim)) if ndim > 0 else None
+        except ValueError:
+            axes = None                              # axis count != ndim^2 (e.g. colorbar); skip titles
+        for i, (key, col) in enumerate(zip(names, cols)):
+            errors=corner.quantile(self.pardata[:,col],[(100-percentile)/100, 50/100, percentile/100])
+            fitval = self.final_fit_params[key].value if key in self.final_fit_params.keys() else errors[1]
+            mesg.append([key, fitval, errors[1], errors[1]-errors[0], errors[2]-errors[1]])
+            ci_rows.append((key, fitval, errors[1], errors[1]-errors[0], errors[2]-errors[1]))
             val='%.3e'%errors[1]
             neger='%.3e'%(errors[1]-errors[0])
             poser='%.3e'%(errors[2]-errors[1])
-            if i<ndim:
+            if axes is not None and i < ndim:
                 ax = axes[i, i]
                 ax.set_title(r'%s' '\n' r'$%s_{%s}^{%s}$'%(key.center(24),val,neger,poser),
-                             fontsize=3 * 12 / ndim)
+                             fontsize=3 * 12 / max(ndim, 1))
         self.emceeConfIntervalWidget.cornerPlotMPLWidget.draw()
         self.emceeConfIntervalWidget.confIntervalTextEdit.clear()
         self.emceeConfIntervalWidget.confIntervalTextEdit.setFont(QFont("Courier", 10))
         txt = tabulate(mesg, headers='firstrow', stralign='left', numalign='left', tablefmt='simple')
         self.emceeConfIntervalWidget.confIntervalTextEdit.append(txt)
+        # joint window: also feed the Summary tab (CI table + correlation heatmap)
+        if getattr(self, '_mcmc_is_joint', False):
+            self._update_joint_summary(names, cols, ci_rows, percentile)
+
+    # ---- corner-plot zoom / pop-out (item 5, both windows) --------------- #
+    def _add_corner_popout_button(self):
+        """Add a 'Pop out' button to the corner-plot tab (both windows). The
+        embedded N x N grid is too dense for the inline toolbar; a large resizable
+        window makes matplotlib's box-zoom actually usable."""
+        w = self.emceeConfIntervalWidget
+        lay = w.cornerPlotTab.layout()
+        if lay is None:
+            return
+        col = QWidget()
+        vb = QVBoxLayout(col)
+        vb.setContentsMargins(0, 0, 0, 0)
+        btn = QPushButton('Pop out ⤢')
+        btn.setToolTip('Open the current corner plot in a large, zoomable window.')
+        btn.setMaximumWidth(110)
+        btn.clicked.connect(self.popOutCornerPlot)
+        vb.addWidget(btn)
+        vb.addStretch(1)
+        lay.insertWidget(0, col)
+
+    def popOutCornerPlot(self):
+        """Render the LAST-drawn corner plot (same subset) into a standalone,
+        freely-resizable window with matplotlib's navigation toolbar."""
+        names = getattr(self, '_corner_names_cache', None)
+        cols = getattr(self, '_corner_cols_cache', None)
+        if not names or getattr(self, 'pardata', None) is None:
+            QMessageBox.warning(self.emceeConfIntervalWidget, 'Corner plot',
+                                'Generate a corner plot first '
+                                '(Calculate Confidence Interval / Plot subset).', QMessageBox.Ok)
+            return
+        bins = getattr(self, '_corner_bins_cache', 30)
+        percentile = getattr(self, '_corner_percentile_cache', 85)
+        values = self._corner_truths(names, cols)
+        dlg = QDialog(self.emceeConfIntervalWidget)
+        dlg.setWindowTitle('Corner plot (zoomable) — %d parameters' % len(names))
+        lay = QVBoxLayout(dlg)
+        mw = MplWidget()
+        lay.addWidget(mw)
+        self._draw_corner(mw.fig, names, cols, values, bins, percentile)
+        mw.draw()
+        dlg.resize(1000, 900)
+        dlg.setModal(False)
+        dlg.show()
+        # keep a reference so the dialog isn't garbage-collected while open
+        self._cornerPopoutDlgs = getattr(self, '_cornerPopoutDlgs', [])
+        self._cornerPopoutDlgs.append(dlg)
+
+    # ---- joint-only MCMC visualization tabs (items 1 & 2) --------------- #
+    _STRUCTURAL_PARAMS = ('theta', 'phi', 'protins', 'cov')
+
+    def _is_structural_param(self, key):
+        """Default-check heuristic for the joint subset list: a param is
+        'structural/shared' if it is a bare (un-namespaced -> shared-across-all)
+        master key, or its (de-namespaced) base name is a known structural param."""
+        import re
+        base = key
+        m = re.match(r'^_{0,2}d\d+_(.*)$', key)         # strip d<idx>_ / __d<idx>_
+        if m:
+            base = m.group(1)
+        if any(s in base for s in self._STRUCTURAL_PARAMS):
+            return True
+        return re.match(r'^_{0,2}d\d+_', key) is None   # not per-dataset -> shared
+
+    def _augment_joint_mcmc_tabs(self):
+        """Append the joint-only tabs (Param Subset + Summary) to the MCMC window.
+        Called only for the joint window, so the individual window stays clean."""
+        w = self.emceeConfIntervalWidget
+        tabs = w.tabWidget
+
+        # --- Param Subset tab (item 1) ---
+        subTab = QWidget()
+        sv = QVBoxLayout(subTab)
+        sv.addWidget(QLabel(
+            'Choose parameters for the corner plot / summary. Joint fits have many\n'
+            'per-dataset params; plotting a subset keeps the corner plot legible.'))
+        w.jointSubsetList = QListWidget()
+        w.jointSubsetList.setSelectionMode(QAbstractItemView.NoSelection)
+        sv.addWidget(w.jointSubsetList)
+        row = QHBoxLayout()
+        allBtn = QPushButton('Select all')
+        allBtn.clicked.connect(lambda: self._set_joint_subset_checks('all'))
+        structBtn = QPushButton('Structural / shared only')
+        structBtn.clicked.connect(lambda: self._set_joint_subset_checks('structural'))
+        noneBtn = QPushButton('Clear')
+        noneBtn.clicked.connect(lambda: self._set_joint_subset_checks('none'))
+        plotBtn = QPushButton('Plot subset ▸')
+        plotBtn.clicked.connect(self._plot_joint_subset)
+        for b in (allBtn, structBtn, noneBtn):
+            row.addWidget(b)
+        row.addStretch(1)
+        row.addWidget(plotBtn)
+        sv.addLayout(row)
+        tabs.addTab(subTab, 'Param Subset')
+
+        # --- Summary tab (item 2): correlation heatmap + median +/- CI table ---
+        sumTab = QWidget()
+        sm2 = QVBoxLayout(sumTab)
+        sm2.addWidget(QLabel('Parameter correlation matrix (from the sampled subset):'))
+        w.jointCorrMPLWidget = MplWidget()
+        sm2.addWidget(w.jointCorrMPLWidget, 2)
+        sm2.addWidget(QLabel('Median ± credible interval:'))
+        w.jointCITable = QTableWidget(0, 5)
+        w.jointCITable.setHorizontalHeaderLabels(
+            ['Parameter', 'Fit-value', 'Median', '-err', '+err'])
+        w.jointCITable.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        w.jointCITable.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        sm2.addWidget(w.jointCITable, 1)
+        tabs.addTab(sumTab, 'Summary')
+
+    def _populate_joint_subset_list(self):
+        """Fill the joint subset list from param_chain (default-check structural/
+        shared params so the first corner plot is legible)."""
+        w = self.emceeConfIntervalWidget
+        if not hasattr(w, 'jointSubsetList'):
+            return
+        w.jointSubsetList.clear()
+        for key in self.param_chain.keys():
+            if key == '__lnsigma':
+                continue
+            it = QListWidgetItem(key)
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked if self._is_structural_param(key) else Qt.Unchecked)
+            w.jointSubsetList.addItem(it)
+        # never leave an empty default (would plot nothing): fall back to all
+        n = w.jointSubsetList.count()
+        if n and not any(w.jointSubsetList.item(i).checkState() == Qt.Checked for i in range(n)):
+            self._set_joint_subset_checks('all')
+
+    def _set_joint_subset_checks(self, mode):
+        w = self.emceeConfIntervalWidget
+        for i in range(w.jointSubsetList.count()):
+            it = w.jointSubsetList.item(i)
+            if mode == 'all':
+                it.setCheckState(Qt.Checked)
+            elif mode == 'none':
+                it.setCheckState(Qt.Unchecked)
+            elif mode == 'structural':
+                it.setCheckState(Qt.Checked if self._is_structural_param(it.text()) else Qt.Unchecked)
+
+    def _plot_joint_subset(self):
+        w = self.emceeConfIntervalWidget
+        subset = [w.jointSubsetList.item(i).text() for i in range(w.jointSubsetList.count())
+                  if w.jointSubsetList.item(i).checkState() == Qt.Checked]
+        if not subset:
+            QMessageBox.warning(w, 'Corner plot', 'Check at least one parameter to plot.',
+                                QMessageBox.Ok)
+            return
+        self.cornerPlot(subset=subset)
+
+    def _update_joint_summary(self, names, cols, ci_rows, percentile):
+        """Fill the joint Summary tab: median +/- CI table and the correlation
+        heatmap over the currently plotted subset."""
+        w = self.emceeConfIntervalWidget
+        if hasattr(w, 'jointCITable'):
+            t = w.jointCITable
+            t.setRowCount(0)
+            for (key, fitval, med, neg, pos) in ci_rows:
+                r = t.rowCount()
+                t.insertRow(r)
+                t.setItem(r, 0, QTableWidgetItem(str(key)))
+                t.setItem(r, 1, QTableWidgetItem('%.4g' % fitval))
+                t.setItem(r, 2, QTableWidgetItem('%.4g' % med))
+                t.setItem(r, 3, QTableWidgetItem('%.3g' % neg))
+                t.setItem(r, 4, QTableWidgetItem('%.3g' % pos))
+        if hasattr(w, 'jointCorrMPLWidget') and len(cols) >= 2:
+            C = np.corrcoef(self.pardata[:, cols], rowvar=False)
+            mw = w.jointCorrMPLWidget
+            mw.clear()
+            ax = mw.fig.add_subplot(1, 1, 1)
+            im = ax.imshow(C, vmin=-1, vmax=1, cmap='coolwarm')
+            ax.set_xticks(range(len(names)))
+            ax.set_yticks(range(len(names)))
+            ax.set_xticklabels(names, rotation=90, fontsize=6)
+            ax.set_yticklabels(names, fontsize=6)
+            mw.fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            mw.fig.subplots_adjust(left=0.22, bottom=0.22, right=0.98, top=0.98)
+            mw.draw()
 
 
     def parameterTreeSelectionChanged(self):
@@ -2768,6 +4285,7 @@ class XModFit(QWidget):
                 self.jointFitPanel.sync_available_datasets(list(self.data.keys()))
             del self.xmin[txt]
             del self.xmax[txt]
+            self.limits.pop(txt, None)     # and any non-x column limits
             del self.expressions[txt]
             del self.plotColIndex[txt]
             del self.plotColors[txt]
@@ -2788,9 +4306,19 @@ class XModFit(QWidget):
         
     def create_paramDock(self):
         self.parSplitter=QSplitter(Qt.Vertical)
-                
+
         self.fixedparamLayoutWidget=pg.LayoutWidget(self)
-        
+
+        # No-fit indicator banner (hidden until an unfit dataset is inspected within a
+        # multi-selection -- see _set_detail_dataset). Sits above the parameter tables.
+        self.noFitBanner=QLabel('')
+        self.noFitBanner.setWordWrap(True)
+        self.noFitBanner.setStyleSheet('color:#8a6d00;background:#fff3cd;'
+                                       'border:1px solid #ffe08a;padding:3px;border-radius:3px;')
+        self.noFitBanner.setVisible(False)
+        self.fixedparamLayoutWidget.addWidget(self.noFitBanner,colspan=3)
+        self.fixedparamLayoutWidget.nextRow()
+
         xlabel=QLabel('x')
         self.fixedparamLayoutWidget.addWidget(xlabel)
         self.xLineEdit=QLineEdit('np.linspace(0.001,1,100)')
@@ -3368,6 +4896,16 @@ class XModFit(QWidget):
                 header+='x\ty\tyerr\n'
                 res=np.vstack((self.fit.params['output_params'][parname]['x'], self.fit.params['output_params'][parname]['y'],self.fit.params['output_params'][parname]['yerr'])).T
                 np.savetxt(fname,res,header=header,comments='#')
+            elif self._op_is_image(self.fit.params['output_params'][parname]):
+                # A 2-D map entry: x and y are the two 1-D AXES and z is (nx, ny).
+                # The legacy branch below assumes x is itself 2-D (it does
+                # x.shape[1]), so without this an image entry raises IndexError out
+                # of this slot, which has no try/except around it.
+                e=self.fit.params['output_params'][parname]
+                X,Y=np.meshgrid(np.asarray(e['x']),np.asarray(e['y']),indexing='ij')
+                header+='x\ty\tz\n'
+                np.savetxt(fname,np.c_[X.ravel(),Y.ravel(),np.asarray(e['z']).ravel()],
+                           header=header,comments='#')
             elif var=="['x', 'y', 'z', 'meta']" or var=="['x', 'y', 'z']":
                 res=[]
                 header+='x\ty\tz\n'
@@ -3397,6 +4935,9 @@ class XModFit(QWidget):
             fh.write('#Function: %s\n'%self.funcListWidget.currentItem().text())
             fh.write('#Xrange=%s\n'%self.xLineEdit.text())
             fh.write('#Fit Range=%s\n'%self.xminmaxLineEdit.text())
+            _cl=self._format_column_limits()
+            if _cl:                    # only when a non-x limit exists, so
+                fh.write('#Column Limits=%s\n'%_cl)   # old files stay identical
             fh.write('#Fit Method=%s\n'%self.fitMethodComboBox.currentText())
             fh.write('#Fit Scale=%s\n'%self.fitScaleComboBox.currentText())
             fh.write('#Fit Iterations=%s\n'%self.fitIterationLineEdit.text())
@@ -3492,6 +5033,10 @@ class XModFit(QWidget):
                             self.xLineEdit.setText(line.strip().split('=')[1])
                         elif '#Fit Range=' in line:
                             self.xminmaxLineEdit.setText(line.strip().split('=')[1])
+                            fline=lnum+1
+                        elif '#Column Limits=' in line:
+                            # split('=',1): the value can contain '=' in future
+                            self._apply_column_limits(line.strip().split('=',1)[1])
                             fline=lnum+1
                         elif '#Fit Method=' in line:
                             self.fitMethodComboBox.setCurrentText(line.strip().split('=')[1])
@@ -3631,6 +5176,9 @@ class XModFit(QWidget):
                         self.dataset_fits[_sel[-1]]=self.fit
                     else:
                         self._template_fit=self.fit
+                    # Mark the just-loaded dataset as fitted (green) immediately, rather
+                    # than only after the user reselects it.
+                    self._refresh_data_labels()
                 else:
                     QMessageBox.warning(self, 'File error',
                                         'This parameter file does not belong to function: %s' % func, QMessageBox.Ok)
@@ -3645,10 +5193,26 @@ class XModFit(QWidget):
     def create_plotDock(self):
         self.plotSplitter=QSplitter(Qt.Vertical)
         #self.plotLayoutWidget=pg.LayoutWidget(self)
+        # The top pane is a tab stack so the plot area can adapt to the data format:
+        # tab 0 is the ordinary 1-D data+fit plot, tab 1 is a 2-D map panel that only
+        # appears when the selected model emits 'image' output_params. For the ~40
+        # existing 1-D functions the dock therefore looks exactly as it did before.
+        self.plotTabWidget=QTabWidget()
         self.plotWidget=PlotWidget()
         self.plotWidget.setXLabel('x',fontsize=5)
         self.plotWidget.setYLabel('y',fontsize=5)
-        self.plotSplitter.addWidget(self.plotWidget)
+        # Main-plot legend shows dataset names (not raw "N:Col_1" keys), tagged by curve
+        # type. Bottom (generated-param) plot keeps its raw labels -- they encode the
+        # param + dataset and read correctly already.
+        self.plotWidget.legend_formatter=self._legend_label
+        self.plotTabWidget.addTab(self.plotWidget,'1D')
+        self.imageWidget=Image2DWidget()
+        self._plotTab2D_index=self.plotTabWidget.addTab(self.imageWidget,'2D Map')
+        self._plotTab_user_choice=False      # True once the user picks a tab by hand
+        self._programmatic_tab_change=False
+        self._set_2D_tab_visible(False)
+        self.plotTabWidget.currentChanged.connect(self._on_plotTab_changed)
+        self.plotSplitter.addWidget(self.plotTabWidget)
 
         self.extra_param_1DplotWidget=PlotWidget()
         self.extra_param_1DplotWidget.setXLabel('x',fontsize=5)
@@ -3656,6 +5220,45 @@ class XModFit(QWidget):
         self.plotSplitter.addWidget(self.extra_param_1DplotWidget)
 
         self.plotDock.addWidget(self.plotSplitter)
+
+    def _set_2D_tab_visible(self, on):
+        """Show/hide the 2D Map tab without disturbing the user's current tab."""
+        tw = self.plotTabWidget
+        i = self._plotTab2D_index
+        self._programmatic_tab_change = True
+        try:
+            if hasattr(tw, 'setTabVisible'):            # Qt >= 5.15
+                tw.setTabVisible(i, bool(on))
+            elif on and tw.indexOf(self.imageWidget) < 0:
+                tw.insertTab(i, self.imageWidget, '2D Map')
+            elif not on and tw.indexOf(self.imageWidget) >= 0:
+                tw.removeTab(tw.indexOf(self.imageWidget))
+            if not on and tw.currentIndex() == i:
+                tw.setCurrentIndex(0)
+        except Exception:
+            pass
+        finally:
+            self._programmatic_tab_change = False
+
+    def _show_2D_tab(self, on, activate=False):
+        """Make the 2D tab available, and optionally raise it.
+
+        Raise it only when the selection produced no 1-D curve at all AND the user
+        has not yet picked a tab by hand -- so selecting a map entry alone lands you
+        on the map, adding a rod curve leaves you where you were, and once you click
+        a tab yourself XModFit stops second-guessing you.
+        """
+        self._set_2D_tab_visible(on)
+        if on and activate and not self._plotTab_user_choice:
+            self._programmatic_tab_change = True
+            try:
+                self.plotTabWidget.setCurrentIndex(self._plotTab2D_index)
+            finally:
+                self._programmatic_tab_change = False
+
+    def _on_plotTab_changed(self, index):
+        if not self._programmatic_tab_change:
+            self._plotTab_user_choice = True
 
     def create_fitResultDock(self):
         self.fitResultsLayoutWidget = pg.LayoutWidget()
@@ -3843,6 +5446,7 @@ class XModFit(QWidget):
             self.sfitSlider.setValue(500)
             self.mfitSlider.setValue(500)
             self.gen_param_items=[]
+            self._image_autoselected=False
             self.curr_module=self.funcListWidget.currentItem().text()
             module='Functions.%s.%s'%(self.curr_category,self.curr_module)
             self.mfitParamCoupledCheckBox.setEnabled(False)
@@ -3973,31 +5577,68 @@ class XModFit(QWidget):
                     self.filebutton[ftxt]=QPushButton('[Click] '+os.path.basename(fname))
                     self.filebutton[ftxt].setToolTip(fname)   # full path on hover
                     self.fixedParamTableWidget.setCellWidget(row,1,self.filebutton[ftxt])
-                    self.filebutton[ftxt].clicked.connect(lambda x, k=ftxt: self.openFileDlg(fname=self.filebutton_paths.get(k)))
+                    self.filebutton[ftxt].clicked.connect(lambda x, k=ftxt: self.openFileDlg(fname=self.filebutton_paths.get(k), key=k))
                 else:
                     self.filebutton[ftxt] = QPushButton('[Click] ')
                     self.fixedParamTableWidget.setCellWidget(row, 1, self.filebutton[ftxt])
-                    self.filebutton[ftxt].clicked.connect(lambda x, k=ftxt: self.openFileDlg(fname=None))
-                    self.openFileDlg(fname=None)
+                    self.filebutton[ftxt].clicked.connect(lambda x, k=ftxt: self.openFileDlg(fname=self.filebutton_paths.get(k), key=k))
+                    # NOTE: there used to be a bare self.openFileDlg(fname=None)
+                    # here. It could never open a dialog (the fname guard inside
+                    # skipped it), so all it did was re-write fit.params[ftxt]
+                    # with the value it already held and then call update_plot()
+                    # from the MIDDLE of this table rebuild -- at which point the
+                    # comboboxes for later 'choices' rows do not exist yet, so
+                    # update_plot's cellWidget(row,1).currentText() hit None.
+                    # functionChanged already calls update_plot() right after
+                    # this method returns, so the call was pure re-entrancy.
         self.fixedParamTableWidget.resizeRowsToContents()
         self.fixedParamTableWidget.resizeColumnsToContents()
         self.fixedParamTableWidget.cellChanged.connect(self.fixedParamChanged)
 
-    def openFileDlg(self, fname=None):
-        buttonClicked=self.sender()
-        row=self.fixedParamTableWidget.indexAt(buttonClicked.pos()).row()
-        key=self.fixedParamTableWidget.item(row, 0).text()
-        if fname is not None and os.path.exists(fname):
-            tfname=QFileDialog.getOpenFileName(self,'Provide file path for %s variable in the Fixed Parameters table'%key,
-                                               directory=os.path.dirname(fname),
-                                               filter='Files (*%s)'%os.path.splitext(fname)[1])[0]
-            if tfname!='':
-                self.filebutton_paths[key]=tfname          # store FULL path
-                self.filebutton[key].setText('[Click] '+os.path.basename(tfname))
+    def openFileDlg(self, fname=None, key=None, prompt=True):
+        """Pick a file for a 'filepaths' parameter in the Fixed Parameters table.
+
+        'key' must be supplied whenever this is called directly rather than from
+        a button click: self.sender() is then not the cell button, so
+        indexAt(pos()).row() returns -1 and item(-1, 0) is None -- which used to
+        raise AttributeError and abort loading the whole function. Any model
+        whose filepath default does not exist on disk hit that path.
+
+        prompt=False syncs the table cell without opening a dialog, which is
+        what update_fixed_parameters needs when there is no usable default.
+        """
+        row = -1
+        if key is None:
+            buttonClicked = self.sender()
+            if buttonClicked is not None and hasattr(buttonClicked, 'pos'):
+                row = self.fixedParamTableWidget.indexAt(buttonClicked.pos()).row()
+            item = self.fixedParamTableWidget.item(row, 0) if row >= 0 else None
+            if item is None:
+                return
+            key = item.text()
+        else:
+            for r in range(self.fixedParamTableWidget.rowCount()):
+                it = self.fixedParamTableWidget.item(r, 0)
+                if it is not None and it.text() == key:
+                    row = r
+                    break
+            if row < 0:
+                return
+        if prompt:
+            # A missing/blank default must still open a dialog, otherwise the
+            # button is permanently dead and the parameter can never be set.
+            has = fname is not None and os.path.exists(fname)
+            tfname = QFileDialog.getOpenFileName(
+                self, 'Provide file path for %s variable in the Fixed Parameters table' % key,
+                directory=os.path.dirname(fname) if has else os.path.abspath(os.curdir),
+                filter=('Files (*%s)' % os.path.splitext(fname)[1]) if has else 'All files (*)')[0]
+            if tfname != '':
+                self.filebutton_paths[key] = tfname        # store FULL path
+                self.filebutton[key].setText('[Click] ' + os.path.basename(tfname))
                 self.filebutton[key].setToolTip(tfname)
-            else:
-                self.filebutton_paths[key]=fname
-                self.filebutton[key].setText('[Click] '+os.path.basename(fname))
+            elif has:
+                self.filebutton_paths[key] = fname
+                self.filebutton[key].setText('[Click] ' + os.path.basename(fname))
                 self.filebutton[key].setToolTip(fname)
         self.fixedParamChanged(row, 1)
 
@@ -4463,16 +6104,20 @@ class XModFit(QWidget):
                             for k in self.fit.params['output_params'][key].keys():
                                 self.genParamListWidget.addItem(k + ' : ' + str(self.fit.params['output_params'][key][k]))
                         else:
-                            var=[]
-                            for k in self.fit.params['output_params'][key].keys():
-                                if k!='names' and k!='plotType':
-                                    var.append(k)
+                            var=self._op_var_list(self.fit.params['output_params'][key])
                             self.genParamListWidget.addItem(str(key) + ' : ' + str(var))
-                    if not self.fchanged:
+                    # Restore the prior generated-param selection so adding/switching a
+                    # dataset keeps the EDP (etc.) plotted. Gated on gen_param_items being
+                    # non-empty (functionChanged clears it), NOT on fchanged -- fchanged
+                    # stays True until a fit runs, which wrongly wiped the selection when a
+                    # dataset was added before fitting. Text-match ensures only keys that
+                    # still exist (same model) are restored.
+                    if self.gen_param_items:
                         for i in range(self.genParamListWidget.count()):
                             item = self.genParamListWidget.item(i)
                             if item.text() in self.gen_param_items:
                                 item.setSelected(True)
+                    self._autoselect_image_params()
                     self.plot_extra_param()
                     self.genParamListWidget.itemSelectionChanged.connect(self.plot_extra_param)
                 try:
@@ -4487,12 +6132,13 @@ class XModFit(QWidget):
                     pfnames = pfnames + [self.funcListWidget.currentItem().text() + ':' + key for key in
                                              self.fit.x.keys()]
                 else:
+                    _fitname=self._indiv_fit_name()
                     self.plotWidget.add_data(x=self.fit.x[self.fit.imin:self.fit.imax + 1], y=self.fit.yfit,
-                                             name=self.funcListWidget.currentItem().text(), fit=True,
+                                             name=_fitname, fit=True,
                                              color=self._single_fit_color())
-                    pfnames = pfnames + [self.funcListWidget.currentItem().text()]
+                    pfnames = pfnames + [_fitname]
 
-                self.plotWidget.Plot(pfnames)
+                self.plotWidget.Plot(self._legend_order(pfnames))
                 # QApplication.processEvents()
                 QApplication.processEvents()
         except:
@@ -4510,9 +6156,15 @@ class XModFit(QWidget):
             self._update_plot_joint()
             return
         for row in range(self.fixedParamTableWidget.rowCount()):
-            txt=self.fixedParamTableWidget.item(row,0).text()
+            _it0 = self.fixedParamTableWidget.item(row, 0)
+            if _it0 is None:            # table mid-rebuild; nothing to sync yet
+                continue
+            txt=_it0.text()
             if txt in self.fit.params['choices'].keys():
-                val = self.fixedParamTableWidget.cellWidget(row, 1).currentText()
+                _cw = self.fixedParamTableWidget.cellWidget(row, 1)
+                if _cw is None:         # combobox not installed for this row yet
+                    continue
+                val = _cw.currentText()
             elif txt in self.fit.params['filepaths'].keys():
                 val = getattr(self, 'filebutton_paths', {}).get(txt) or self.fit.params.get(txt) or ''
             else:
@@ -4553,6 +6205,7 @@ class XModFit(QWidget):
             pfnames=[]
         self.chisqr='None'
         self.red_chisqr='None'
+        _pi0, _pi1 = 0, None       # slice actually applied below, for the mask
         if len(self.dataListWidget.selectedItems()) > 0:
             if len(self.data[self.sfnames[-1]].keys()) > 1:
                 x = {}
@@ -4565,7 +6218,9 @@ class XModFit(QWidget):
                     y[key] = y[key][np.argwhere(x[key] >= xmin)[0][0]:np.argwhere(x[key] <= xmax)[-1][0]+1]
                     yerr[key] = self.data[self.sfnames[-1]][key]['yerr']
                     yerr[key] = yerr[key][np.argwhere(x[key] >= xmin)[0][0]:np.argwhere(x[key] <= xmax)[-1][0]+1]
-                    x[key] = x[key][np.argwhere(x[key]>=xmin)[0][0]:np.argwhere(x[key]<=xmax)[-1][0]+1]
+                    _pi0 = np.argwhere(x[key] >= xmin)[0][0]
+                    _pi1 = np.argwhere(x[key] <= xmax)[-1][0]+1
+                    x[key] = x[key][_pi0:_pi1]
             else:
                 key = list(self.data[self.sfnames[-1]].keys())[0]
                 xmin, xmax = self.xmin[self.sfnames[-1]], self.xmax[self.sfnames[-1]]
@@ -4574,7 +6229,9 @@ class XModFit(QWidget):
                 y = y[np.argwhere(x >= xmin)[0][0]:np.argwhere(x <= xmax)[-1][0]+1]
                 yerr = self.data[self.sfnames[-1]][key]['yerr']
                 yerr = yerr[np.argwhere(x >= xmin)[0][0]:np.argwhere(x <= xmax)[-1][0]+1]
-                x = x[np.argwhere(x>=xmin)[0][0]:np.argwhere(x<=xmax)[-1][0]+1]
+                _pi0 = np.argwhere(x >= xmin)[0][0]
+                _pi1 = np.argwhere(x <= xmax)[-1][0]+1
+                x = x[_pi0:_pi1]
 
         if len(self.funcListWidget.selectedItems())>0:
             try:
@@ -4591,7 +6248,11 @@ class XModFit(QWidget):
                 self.fit.yfit = self.fit.func.x
                 exectime=np.nan
             if len(self.dataListWidget.selectedItems()) > 0:
-                self.fit.set_x(x, y=y, yerr=yerr)
+                # x/y/yerr were pre-sliced to [xmin,xmax] above, so the mask has
+                # to be sliced identically (see Fit.imask_for on the two paths)
+                self.fit.set_x(x, y=y, yerr=yerr,
+                               mask=self._column_mask(self.sfnames[-1],
+                                                      slice_=(_pi0, _pi1)))
                 try:
                     residual = self.fit.residual(self.fit.fit_params, self.fitScaleComboBox.currentText())
 
@@ -4632,8 +6293,9 @@ class XModFit(QWidget):
                 pfnames = pfnames + [self.funcListWidget.currentItem().text() + ':' + key for key in
                                          self.fit.x.keys()]
             else:
+                _fitname=self._indiv_fit_name()
                 self.plotWidget.add_data(x=self.fit.x[self.fit.imin:self.fit.imax + 1], y=self.fit.yfit,
-                                         name=self.funcListWidget.currentItem().text(), fit=True,
+                                         name=_fitname, fit=True,
                                          color=self._single_fit_color())
                 if len(self.dataListWidget.selectedItems()) > 0:
                     self.fit.params['output_params']['Residuals'] = {'x': self.fit.x[self.fit.imin:self.fit.imax + 1],
@@ -4643,7 +6305,7 @@ class XModFit(QWidget):
                 # else:
                 #     self.fit.params['output_params']['Residuals'] = {'x': self.fit.x[self.fit.imin:self.fit.imax + 1],
                 #                                                      'y':np.zeros_like(self.fit.x[self.fit.imin:self.fit.imax + 1])}
-                pfnames=pfnames+[self.funcListWidget.currentItem().text()]
+                pfnames=pfnames+[_fitname]
             if len(self.fit.params['output_params'])>0:
                 row=0
                 for key in self.fit.params['output_params'].keys():
@@ -4654,25 +6316,209 @@ class XModFit(QWidget):
                             it.setFlags(it.flags() & ~Qt.ItemIsSelectable)
                             row+=1
                     else:
-                        var = []
-                        for k in self.fit.params['output_params'][key].keys():
-                            if k != 'names' and k != 'plotType':
-                                var.append(k)
+                        var = self._op_var_list(self.fit.params['output_params'][key])
                         self.genParamListWidget.addItem(
                             str(key) + ' : ' + str(var))
                         row+=1
-                if not self.fchanged:
+                if self.gen_param_items:   # restore prior selection (see update_plot note)
                     for i in range(self.genParamListWidget.count()):
                         item = self.genParamListWidget.item(i)
                         if item.text() in self.gen_param_items:
                             item.setSelected(True)
+            self._autoselect_image_params()
             self.plot_extra_param()
             self.genParamListWidget.itemSelectionChanged.connect(self.plot_extra_param)
 
             self.consoleWidget.push_vars({'fit': self.fit})
-        self.plotWidget.Plot(pfnames)
+
+        # Multi-select individual view: the block above only evaluates/plots the ACTIVE
+        # dataset (sfnames[-1]). Overlay each OTHER selected dataset's OWN fitted curve so
+        # all selected datasets show their individual fits together. Each is named/colored
+        # per dataset so the curves don't collide (previously they shared one name and only
+        # the last showed). Best-effort: a hiccup on one dataset must not break the plot.
+        try:
+            _sel = [it.text() for it in self.dataListWidget.selectedItems()]
+        except Exception:
+            _sel = []
+        if len(_sel) > 1:
+            for _dname in _sel:
+                if _dname == self.sfnames[-1]:
+                    continue  # already drawn as the active fit above
+                _dfit = self.dataset_fits.get(_dname)
+                if _dfit is None or hasattr(_dfit, 'objectives'):
+                    continue
+                if not (getattr(_dfit, '_is_fitted', False) or getattr(_dfit, 'result', None) is not None):
+                    continue
+                try:
+                    _fnum = _dname.split('<>')[0]
+                    _fname = getattr(_dfit, '_xmod_funcname', None) or self.funcListWidget.currentItem().text()
+                    _keys = list(self.data[_dname].keys())
+                    _xmn, _xmx = self.xmin[_dname], self.xmax[_dname]
+                    for _k in _keys:
+                        _xa = self.data[_dname][_k]['x']
+                        _i0 = np.argwhere(_xa >= _xmn)[0][0]
+                        _i1 = np.argwhere(_xa <= _xmx)[-1][0] + 1
+                        _xs = _xa[_i0:_i1]
+                        _ys = self.data[_dname][_k]['y'][_i0:_i1]
+                        _es = self.data[_dname][_k]['yerr'][_i0:_i1]
+                        # evaluate this dataset's stored fit on its own range
+                        if len(_keys) > 1:
+                            continue  # multi-column datasets: skip overlay (handled per active view)
+                        _dm = self._column_mask(_dname, slice_=(_i0, _i1))
+                        _dfit.set_x(_xs, y=_ys, yerr=_es, mask=_dm)
+                        _dfit.func.__fit__ = False
+                        _yf = _dfit.evaluate()
+                        _cname = '%s [indiv:%s]' % (_fname, _fnum)   # index-bearing -> sorts + labels
+                        self.plotWidget.add_data(x=_xs, y=_yf, name=_cname, fit=True,
+                                                 color=self._curve_color_for(_dname, _k))
+                        pfnames.append(_cname)
+                except Exception:
+                    pass
+            # Now that every selected dataset's model has been evaluated (output_params
+            # populated), re-render the bottom panel so its ED profiles co-plot across
+            # ALL selected datasets (the earlier plot_extra_param ran before this loop).
+            try:
+                self.plot_extra_param()
+            except Exception:
+                pass
+        self.plotWidget.Plot(self._legend_order(pfnames))
         # QApplication.processEvents()
         QApplication.processEvents()
+
+    def _eval_individual_curve(self, name):
+        """(x, y, color) for dataset ``name``'s stored INDIVIDUAL fit curve, or None.
+
+        Evaluated in ISOLATION -- it never touches ``self.fit`` or the param tables --
+        over the dataset's current fit range, so the individual best-fit curve can be
+        overlaid alongside the dataset's JOINT curve for comparison. Returns None when
+        the dataset has no stored individual fit result."""
+        f = self.dataset_fits.get(name)
+        if f is None or hasattr(f, 'objectives'):
+            return None
+        func = getattr(f, 'func', None)
+        if func is None or name not in self.data:
+            return None
+        if not (getattr(f, '_is_fitted', False) or getattr(f, 'result', None) is not None):
+            return None
+        first_key = list(self.data[name].keys())[0]
+        x = np.asarray(self.data[name][first_key]['x'])
+        try:
+            xmin, xmax = self.xmin[name], self.xmax[name]
+            m = (x >= xmin) & (x <= xmax)
+            xin = x[m] if np.any(m) else x
+        except Exception:
+            xin = x
+        try:
+            func.x = xin
+            func.__fit__ = False
+            y = np.asarray(func.y()).ravel()
+        except Exception:
+            return None
+        if y.shape != xin.shape:
+            return None
+        return xin, y, self._curve_color_for(name, first_key)
+
+    def _plot_combined_overlay(self, main_sel, joint_sel):
+        """Overlay, in the main plot, each dataset's data + its JOINT fit (solid) + its
+        INDIVIDUAL fit (dashed), for the datasets highlighted in BOTH the joint-fit list
+        (``joint_sel``) and the Data list (``main_sel``). Purely additive: it does not
+        change ``self.fit`` or the param tables, so whichever view last populated them
+        stays. Returns True if it drew a combined plot."""
+        jf = getattr(self, 'jointFit', None)
+        if jf is None or not getattr(jf, 'objectives', None):
+            return False
+        onames = list(getattr(jf, 'objective_names', []))
+        pfnames = []
+        shown = set()
+
+        def _add_data_curves(name):
+            fnum = name.split('<>')[0]
+            first_key = None
+            for key in self.data.get(name, {}):
+                if first_key is None:
+                    first_key = key
+                if (name, key) in shown:
+                    continue
+                d = self.data[name][key]
+                col = d.get('color') or self._curve_color_for(name, key)
+                self.plotWidget.add_data(d['x'], d['y'], yerr=d['yerr'],
+                                         name='%s:%s' % (fnum, key), color=col)
+                pfnames.append('%s:%s' % (fnum, key))
+                shown.add((name, key))
+            return fnum, first_key
+
+        # JOINT curves (solid) for datasets selected in the joint list
+        for name in joint_sel:
+            if name not in onames or name not in self.data:
+                continue
+            k = onames.index(name)
+            obj = jf.objectives[k]
+            xall = np.asarray(obj['x'])
+            imin = obj.get('imin', 0) or 0
+            imax = obj.get('imax', None)
+            if imax is None or imax >= len(xall):
+                imax = len(xall) - 1
+            xin = xall[imin:imax + 1]
+            func = obj['func']
+            func.x = xin
+            func.__fit__ = False
+            try:
+                yfit = np.asarray(func.y()).ravel()
+            except Exception:
+                continue
+            fnum, first_key = _add_data_curves(name)
+            jname = '%s [joint:%s]' % (type(func).__name__, fnum)
+            self.plotWidget.add_data(x=xin, y=yfit, name=jname, fit=True,
+                                     color=self._curve_color_for(name, first_key))
+            pfnames.append(jname)
+
+        # INDIVIDUAL curves (dashed) for datasets selected in the Data list
+        for name in main_sel:
+            if name not in self.data:
+                continue
+            fnum, _ = _add_data_curves(name)
+            ind = self._eval_individual_curve(name)
+            if ind is None:
+                continue
+            xin, yin, col = ind
+            iname = '%s [indiv:%s]' % (type(self.dataset_fits[name].func).__name__, fnum)
+            self.plotWidget.add_data(x=xin, y=yin, name=iname, fit=True,
+                                     color=col, linestyle=Qt.DashLine)
+            pfnames.append(iname)
+
+        if not pfnames:
+            return False
+        # NB: do NOT overwrite self.pfnames (kept as data-only, like _update_plot_joint)
+        # so remove_data(self.pfnames) flows never strip the overlaid fit curves.
+        self.plotWidget.Plot(self._legend_order(pfnames))
+        # Bottom panel: now that BOTH each dataset's joint and individual models have
+        # been evaluated (above), refresh the generated-param plot so ED profiles etc.
+        # co-plot the individual (dashed) + joint (solid) sources to match this overlay.
+        try:
+            self.plot_extra_param()
+        except Exception:
+            pass
+        QApplication.processEvents()
+        return True
+
+    def _maybe_combined_overlay(self):
+        """If a dataset is highlighted in BOTH the Data list and the joint-fit list, draw
+        the individual+joint overlay (item B2). Called at the end of both selection
+        handlers; a no-op unless both lists have a selection and a JointFit exists."""
+        if getattr(self, '_syncing_selection', False):
+            return False
+        jp = getattr(self, 'jointFitPanel', None)
+        jf = getattr(self, 'jointFit', None)
+        if jp is None or jf is None:
+            return False
+        try:
+            joint_sel = [it.text() for it in jp.datasetList.selectedItems()]
+            main_sel = [it.text() for it in self.dataListWidget.selectedItems()]
+        except Exception:
+            return False
+        if joint_sel and main_sel:
+            return self._plot_combined_overlay(main_sel, joint_sel)
+        return False
 
     def _update_plot_joint(self, overlay_names=None):
         """Draw joint-fit objective(s) in the main plot: each selected dataset's data
@@ -4694,6 +6540,9 @@ class XModFit(QWidget):
         if not idxs:
             idxs = [cur]
         detail_i = cur if cur in idxs else idxs[-1]
+        # remember which datasets are overlaid so the generated-param (EDP) plot can
+        # co-plot the SAME profile from every shown dataset (see plot_extra_param).
+        self._joint_overlay_names = [onames[k] for k in idxs]
 
         def _eval(k):
             obj = objectives[k]
@@ -4741,7 +6590,7 @@ class XModFit(QWidget):
                 detail = (func, xin, yin, yerrin, yfit)
 
         if detail is None:
-            self.plotWidget.Plot(pfnames)
+            self.plotWidget.Plot(self._legend_order(pfnames))
             QApplication.processEvents()
             return
         func, xin, yin, yerrin, yfit = detail
@@ -4778,21 +6627,22 @@ class XModFit(QWidget):
                     it.setFlags(it.flags() & ~Qt.ItemIsSelectable)
                     row += 1
             else:
-                var = [k for k in op[key].keys() if k not in ('names', 'plotType')]
+                var = self._op_var_list(op[key])
                 self.genParamListWidget.addItem(str(key) + ' : ' + str(var))
                 row += 1
-        if not self.fchanged:
+        if self.gen_param_items:   # restore prior selection (see update_plot note)
             for j in range(self.genParamListWidget.count()):
                 item = self.genParamListWidget.item(j)
                 if item.text() in self.gen_param_items:
                     item.setSelected(True)
+        self._autoselect_image_params()
         self.plot_extra_param()
         self.genParamListWidget.itemSelectionChanged.connect(self.plot_extra_param)
         try:
             self.consoleWidget.push_vars({'fit': self.fit})
         except Exception:
             pass
-        self.plotWidget.Plot(pfnames)
+        self.plotWidget.Plot(self._legend_order(pfnames))
         QApplication.processEvents()
 
     def extra_param_doubleClicked(self,item):
@@ -4835,34 +6685,180 @@ class XModFit(QWidget):
                 data_dlg.exec_()
 
 
+    def _model_output_params(self, name, which='joint'):
+        """The ``output_params`` dict for dataset ``name``'s JOINT or INDIVIDUAL model,
+        or None. Read-only (the models were freshly evaluated by the plot that populated
+        the generated-param list), so profiles like the EDP are already current."""
+        if which == 'individual':
+            f = self.dataset_fits.get(name)
+            if f is None or hasattr(f, 'objectives'):
+                return None
+            if not (getattr(f, '_is_fitted', False) or getattr(f, 'result', None) is not None):
+                return None
+            func = getattr(f, 'func', None)
+        else:
+            jf = getattr(self, 'jointFit', None)
+            if jf is None:
+                return None
+            onames = list(getattr(jf, 'objective_names', []))
+            if name not in onames:
+                return None
+            func = jf.objectives[onames.index(name)]['func']
+        if func is None:
+            return None
+        return func.__dict__.get('output_params', {})
+
     def plot_extra_param(self):
-        """
-        """
+        """Plot the selected generated parameters (e.g. EDP/ADP profiles) in the bottom
+        panel, mirroring the main data/fit plot's overlay model:
+
+          * combined view (a dataset Ctrl-selected in BOTH lists) -> co-plot the profile
+            from that dataset's INDIVIDUAL model (dashed) AND its JOINT model (solid),
+            in the dataset's color -- the bottom-panel analogue of item B2;
+          * joint view with >1 dataset overlaid -> the profile from each dataset's joint
+            model (solid), per-dataset color (item B3);
+          * otherwise a single curve from ``self.fit``.
+        Each source contributes every SELECTED profile, so ED profiles AND any other
+        generated plots co-plot together."""
         fdata=[]
+        jfit=getattr(self,'jointFit',None)
+        main_sel=[it.text() for it in self.dataListWidget.selectedItems()]
+        try:
+            joint_sel=[it.text() for it in self.jointFitPanel.datasetList.selectedItems()] \
+                if jfit is not None else []
+        except Exception:
+            joint_sel=[]
+        combined=bool(jfit is not None and main_sel and joint_sel)
+
+        # Build the co-plot sources: (output_params, color, linestyle, name_suffix).
+        sources=[]
+        def _color(name):
+            fk=list(self.data[name].keys())[0] if name in self.data else None
+            return self._curve_color_for(name,fk) if fk else None
+        if combined:
+            for name in joint_sel:                       # joint profiles: solid
+                op=self._model_output_params(name,'joint')
+                if op is not None:
+                    sources.append((op,_color(name),None,' [joint:%s]'%name.split('<>')[0]))
+            for name in main_sel:                        # individual profiles: dashed
+                op=self._model_output_params(name,'individual')
+                if op is not None:
+                    sources.append((op,_color(name),Qt.DashLine,' [indiv:%s]'%name.split('<>')[0]))
+        else:
+            jf=getattr(self,'fit',None)
+            joint_active=hasattr(jf,'objectives')
+            overlay=list(getattr(self,'_joint_overlay_names',[])) if joint_active else []
+            if joint_active and len(overlay)>1:
+                for name in overlay:                     # joint multi-dataset (B3)
+                    op=self._model_output_params(name,'joint')
+                    if op is not None:
+                        sources.append((op,_color(name),None,' [%s]'%name.split('<>')[0]))
+            elif (not joint_active) and len(main_sel)>1:
+                # INDIVIDUAL multi-select: co-plot each FITTED selected dataset's EDP
+                # (solid, per-dataset color). Unfit datasets are SKIPPED -- their model
+                # holds a clone of another dataset's params (no fit of their own), so
+                # plotting their EDP would show the wrong profile in the wrong color.
+                # (Single-select still plots via the else branch, for fit setup.)
+                for name in main_sel:
+                    if not self._dataset_is_fitted(name):
+                        continue
+                    op=self._model_output_params(name,'individual')
+                    if op:
+                        sources.append((op,_color(name),None,' [%s]'%name.split('<>')[0]))
+            else:
+                sources.append((self.fit.params['output_params'],None,None,''))
+
+        def _plot_one(txt,axes,op,cname,color=None,linestyle=None):
+            if txt not in op:
+                return None
+            try:
+                x=np.asarray(op[txt][axes[0]]); y=np.asarray(op[txt][axes[1]])
+            except Exception:
+                return None
+            # Shape guards. Without these a 2-D entry reaches PlotWidget.add_data and
+            # pops a "dimensions of x, y or yerr are not matching" dialog, and axes[2]
+            # of a legacy ['x','y','z'] mesh entry is silently plotted AS THE ERRORBAR.
+            # The ndim test is not redundant with the length test: add_data only checks
+            # len(), so a wrong-shaped yerr whose first dimension happens to match is
+            # accepted without complaint.
+            if x.ndim != 1 or y.ndim != 1 or x.shape[0] != y.shape[0]:
+                return None
+            try:
+                yerr=np.asarray(op[txt][axes[2]],dtype=float)
+                if yerr.ndim != 1 or yerr.shape[0] != y.shape[0]:
+                    yerr=None
+            except Exception:
+                yerr=None
+            self.extra_param_1DplotWidget.add_data(x=x,y=y,yerr=yerr,name=cname,fit=True,
+                                                   color=color,linestyle=linestyle)
+            if op[txt].get('plotType')=='step':
+                try:
+                    self.extra_param_1DplotWidget.data[cname].opts['stepMode']='left'
+                except Exception:
+                    pass
+            fdata.append(cname)
+            return op[txt]
+
+        images=[]                       # [(display_name, entry)] for the 2D Map tab
         for item in self.genParamListWidget.selectedItems():
             txt,axes=item.text().split(':')
             txt=txt.strip()
-            axes=eval(axes)
-            if type(axes)==list:
-                if len(axes)>=2:
-                    x=self.fit.params['output_params'][txt][axes[0]]
-                    y=self.fit.params['output_params'][txt][axes[1]]
-                    try:
-                        yerr=self.fit.params['output_params'][txt][axes[2]]
-                    except:
-                        yerr=None
-                    self.extra_param_1DplotWidget.add_data(x=x,y=y,yerr=yerr,name=txt,fit=True)
-                    if 'names' in self.fit.params['output_params'][txt]:
-                        self.extra_param_1DplotWidget.setXLabel(self.fit.params['output_params'][txt]['names'][0],fontsize=5)
-                        self.extra_param_1DplotWidget.setYLabel(self.fit.params['output_params'][txt]['names'][1],fontsize=5)
-                    else:
-                        self.extra_param_1DplotWidget.setXLabel('x',fontsize=5)
-                        self.extra_param_1DplotWidget.setYLabel('y',fontsize=5)
-                    if 'plotType' in self.fit.params['output_params'][txt]:
-                        if self.fit.params['output_params'][txt]['plotType']=='step':
-                            self.extra_param_1DplotWidget.data[txt].opts['stepMode']='left'
-                    fdata.append(txt)
-        self.extra_param_1DplotWidget.Plot(fdata)
+            try:
+                axes=eval(axes)
+            except Exception:
+                continue
+            if type(axes)==list and len(axes)>=2:
+                # 2-D map entries go to the image panel and NEVER to a 1-D PlotWidget.
+                # Reaching _plot_one with one would plot axes[2] as the errorbar.
+                hit=False
+                for (op,color,ls,suffix) in sources:
+                    e=op.get(txt) if hasattr(op,'get') else None
+                    if self._op_is_image(e):
+                        hit=True
+                        cname=txt if suffix=='' else (txt+suffix)
+                        e=dict(e)
+                        # one ROW per source, so a joint fit over N datasets gives
+                        # N rows of (data|model|residual) rather than 3N panels
+                        e['panel']='%s|%s'%(e.get('panel','map'),suffix)
+                        images.append((cname,e))
+                if hit:
+                    continue
+                src=None
+                for (op,color,ls,suffix) in sources:
+                    cname=txt if suffix=='' else (txt+suffix)
+                    r=_plot_one(txt,axes,op,cname,color=color,linestyle=ls)
+                    if r is not None:
+                        src=r
+                if src is not None and 'names' in src:
+                    self.extra_param_1DplotWidget.setXLabel(src['names'][0],fontsize=5)
+                    self.extra_param_1DplotWidget.setYLabel(src['names'][1],fontsize=5)
+                else:
+                    self.extra_param_1DplotWidget.setXLabel('x',fontsize=5)
+                    self.extra_param_1DplotWidget.setYLabel('y',fontsize=5)
+        self.extra_param_1DplotWidget.Plot(self._legend_order(fdata))
+        try:
+            if images:
+                self.imageWidget.set_maps(images)
+                # Surface the producer's own ERROR_/WARNING_ scalers ON the panel.
+                # A blank map is nearly always a configuration mistake that the
+                # model can name precisely (wrong file loaded, x not a row index),
+                # and leaving that buried in the alphabetical generated-parameter
+                # list is how "the 2D view is broken" happens.
+                msgs=[]
+                for (op,_c,_l,_s) in sources:
+                    sp=(op.get('scaler_parameters') or {}) if hasattr(op,'get') else {}
+                    for k in sorted(sp):
+                        if k.startswith('ERROR_') or k.startswith('WARNING_'):
+                            v=str(sp[k]).strip()
+                            if v and v not in msgs:
+                                msgs.append(v)
+                self.imageWidget.set_warning('  |  '.join(msgs))
+                self._show_2D_tab(True, activate=(len(fdata)==0))
+            else:
+                self.imageWidget.clear_maps()
+                self._show_2D_tab(False)
+        except Exception:
+            pass
         self.gen_param_items=[item.text() for item in self.genParamListWidget.selectedItems()]
         QApplication.processEvents()
 
@@ -4956,6 +6952,9 @@ class XModFit(QWidget):
             jf.set_current(names[-1])           # detail = last selected
             self.refresh_param_tables()
             self._update_plot_joint(overlay_names=list(names))
+            # Item B2: if any of these datasets is ALSO highlighted in the Data list,
+            # overlay their individual fits (dashed) on top of the joint curves.
+            self._maybe_combined_overlay()
         except (ValueError, IndexError):
             pass
 
@@ -5092,7 +7091,7 @@ class XModFit(QWidget):
         separate, deferred step."""
         import numpy as _np
         spec = self.jointFitPanel.spec
-        self.fit = spec.compile(self.data)  # fresh JointFit
+        self.fit = spec.compile(self.data, masks=self._joint_masks(spec))  # fresh JointFit
         self.jointFit = self.fit            # persist so switching to an individual
                                             # dataset view and back retains joint results
         # enforce shared fixed params (incl. the PDB) across all datasets
@@ -5106,6 +7105,8 @@ class XModFit(QWidget):
             xmin, xmax = float(_xmin), float(_xmax)
         except Exception:
             xmin, xmax = -_np.inf, _np.inf
+        # per-dataset fit windows from the panel (blank rows -> scalar fallback)
+        ranges = {e.name: (e.fit_xmin, e.fit_xmax) for e in spec.datasets}
         # live progress screen (iteration / chi-sqr / Stop) -- same dialog as individual
         # fits; fitCallback is JointFit-aware (skips the single-Fit curve redraw).
         self.fitData = []
@@ -5120,7 +7121,8 @@ class XModFit(QWidget):
             pass
         try:
             self.fit_report, self.fit_message = self.fit.perform_fit(
-                xmin, xmax, fit_scale=self.fit_scale, fit_method=self.fit_method)
+                xmin, xmax, fit_scale=self.fit_scale, fit_method=self.fit_method,
+                ranges=ranges)
         finally:
             try:
                 self.closeFitInfoDlg()
@@ -5139,7 +7141,68 @@ class XModFit(QWidget):
         except Exception:
             import traceback; traceback.print_exc()
         self._refresh_data_labels()
+        # A completed joint fit enables 'Calculate Param Error' (joint MCMC/CIs), even
+        # with no individual dataset selected in the Data list.
+        self._update_ci_button_state()
         FitResultDialog(self.fit_report, self.fit_message, parent=self).show()
+
+    def run_joint_emcee(self, emcee_walkers=100, emcee_steps=100, emcee_cores=1,
+                        reuse_sampler=False, emcee_burn=0, emcee_thin=1, backend=None):
+        """Run MCMC confidence intervals on the joint objective. Reuses the already
+        fitted JointFit at self.fit (from a prior joint least-squares fit) -- samples
+        the global master_params via the whitened/concatenated joint residual. The
+        no-covariance branch samples in PARALLEL across emcee_cores (a picklable
+        JointLogProb + spawn pool, with theta/phi wrapped in the main process); the
+        covariance/GLS branch stays serial for now."""
+        import numpy as _np
+        if not hasattr(self.fit, 'objectives') or getattr(self.fit, 'result', None) is None:
+            QMessageBox.warning(self.emceeConfIntervalWidget, 'Joint MCMC',
+                                'Run a joint least-squares fit first, then calculate the '
+                                'MCMC confidence interval.', QMessageBox.Ok)
+            return
+        if isinstance(emcee_cores, int) and emcee_cores > 1 and getattr(self.fit, '_use_cov', False):
+            # Covariance/GLS joint MCMC stays serial until the whitened residual is
+            # validated against a covariance dataset; the no-cov branch runs parallel.
+            print('Covariance joint MCMC runs serially for now; ignoring cores=%d.' % emcee_cores)
+        self.fit_method = 'emcee'
+        self.fit_scale = self.fitScaleComboBox.currentText()
+        # scalar q-range from the Xrange box (joint fits don't use the per-file dicts)
+        try:
+            _xmin, _xmax = self.xminmaxLineEdit.text().split(':')
+            xmin, xmax = float(_xmin), float(_xmax)
+        except Exception:
+            xmin, xmax = -_np.inf, _np.inf
+        # per-dataset fit windows must match the joint least-squares fit exactly
+        try:
+            ranges = {e.name: (e.fit_xmin, e.fit_xmax)
+                      for e in self.jointFitPanel.spec.datasets}
+        except Exception:
+            ranges = None
+        self.MCMC_starting_step = 0
+        self.autoCorrTime = _np.array([[0, 1]])
+        self.start_time = time.time()
+        self.fit_stopped = False
+        self.fit.fit_abort = False
+        try:
+            self.fit.functionCalled.connect(self.fitErrorCallback)
+        except Exception:
+            pass
+        self.showFitInfoDlg(emcee_walkers=emcee_walkers, emcee_steps=emcee_steps, emcee_burn=emcee_burn)
+        try:
+            self.fit_report, self.fit_message = self.fit.perform_fit(
+                xmin, xmax, fit_scale=self.fit_scale, fit_method='emcee',
+                maxiter=int(self.fitIterationLineEdit.text()), emcee_walkers=emcee_walkers,
+                emcee_steps=emcee_steps, emcee_cores=emcee_cores, reuse_sampler=reuse_sampler,
+                emcee_burn=emcee_burn, emcee_thin=emcee_thin, backend=backend, ranges=ranges,
+                seed_temperature=getattr(self, 'seed_temperature', 1.0),
+                seed_mode=getattr(self, 'seed_mode', 'joint'))
+        finally:
+            self.disconnect_fit_function()
+        self.errorAvailable = True
+        self.emceeConfIntervalWidget.reuseSamplerCheckBox.setEnabled(True)
+        self.emceeConfIntervalWidget.reuseSamplerCheckBox.setCheckState(Qt.Checked)
+        self.perform_post_sampling_tasks()
+        self.showConfIntervalButton.setEnabled(True)
 
     # ---- joint-fit save / load (.jpar) + .par-into-joint ------------------- #
     def _category_of_func(self, funcname):
@@ -5153,6 +7216,25 @@ class XModFit(QWidget):
         except Exception:
             pass
         return None
+
+    @staticmethod
+    def _parse_fitrange(text):
+        """Parse a per-dataset '#FitRange=<xmin>:<xmax>' value into (xmin, xmax).
+
+        Either side may be blank (-> None -> global-Xrange fallback). Returns
+        (None, None) for a missing/blank/malformed value."""
+        if not text or ':' not in text:
+            return None, None
+        lo, _, hi = text.partition(':')
+        def _f(s):
+            s = s.strip()
+            if s == '':
+                return None
+            try:
+                return float(s)
+            except ValueError:
+                return None
+        return _f(lo), _f(hi)
 
     def _build_joint_model(self, block):
         """Build a fresh model INSTANCE from a parsed .jpar dataset block and apply
@@ -5224,6 +7306,7 @@ class XModFit(QWidget):
         if os.path.splitext(fname)[1] == '':
             fname += '.jpar'
         settings = {'fit_range': self.xminmaxLineEdit.text(),
+                    'column_limits': self._format_column_limits(),
                     'fit_method': self.fitMethodComboBox.currentText(),
                     'fit_scale': self.fitScaleComboBox.currentText(),
                     'fit_iterations': self.fitIterationLineEdit.text()}
@@ -5237,8 +7320,19 @@ class XModFit(QWidget):
             src = self.dataset_fits.get(e.name)
             xexpr = getattr(src, '_xmod_xexpr', None) or self.xLineEdit.text()
             fixed, sfit, mfit = jio.dump_model(e.model)
+            fitrange = ''
+            if e.fit_xmin is not None or e.fit_xmax is not None:
+                fitrange = '%s:%s' % ('' if e.fit_xmin is None else ('%g' % e.fit_xmin),
+                                      '' if e.fit_xmax is None else ('%g' % e.fit_xmax))
             blocks.append({'path': path, 'category': category, 'func': func,
-                           'xrange': xexpr, 'cov': e.cov_path, 'raw': e.raw_path,
+                           'xrange': xexpr, 'fitrange': fitrange,
+                           'collimits': self._format_column_limits(e.name)
+                                        if not getattr(e, 'limits', None)
+                                        else ';'.join(
+                               '%s:%s:%s' % (c, '' if v[0] is None else repr(float(v[0])),
+                                             '' if v[1] is None else repr(float(v[1])))
+                               for c, v in sorted(e.limits.items()) if c != 'x'),
+                           'cov': e.cov_path, 'raw': e.raw_path,
                            'fixed': fixed, 'sfit': sfit, 'mfit': mfit})
         shares = []
         for g in spec.groups:
@@ -5307,8 +7401,14 @@ class XModFit(QWidget):
             if model is None:
                 skipped.append(b['path'] + '  (model build failed)')
                 continue
+            fit_xmin, fit_xmax = self._parse_fitrange(b.get('fitrange'))
+            _cl = self._parse_column_limits(b.get('collimits') or '')
             spec.add_dataset(dkey, model=model,
-                             cov_path=b.get('cov') or None, raw_path=b.get('raw') or None)
+                             cov_path=b.get('cov') or None, raw_path=b.get('raw') or None,
+                             fit_xmin=fit_xmin, fit_xmax=fit_xmax,
+                             limits=(_cl or None))
+            if _cl:
+                self.limits.setdefault(dkey, {}).update(_cl)
             path_to_name[b['path']] = dkey
         for g in parsed['shares']:
             eps = [(path_to_name[p], lk) for (p, lk) in g['endpoints'] if p in path_to_name]
@@ -5317,6 +7417,8 @@ class XModFit(QWidget):
         s = parsed.get('settings', {})
         if s.get('fit_range'):
             self.xminmaxLineEdit.setText(s['fit_range'])
+        if s.get('column_limits'):
+            self._apply_column_limits(s['column_limits'])
         if s.get('fit_method'):
             self.fitMethodComboBox.setCurrentText(s['fit_method'])
         if s.get('fit_scale'):
@@ -5326,7 +7428,7 @@ class XModFit(QWidget):
         incomplete = bool(skipped or not_found)
         try:
             if len(spec.datasets) >= 2:
-                self.jointFit = spec.compile(self.data)
+                self.jointFit = spec.compile(self.data, masks=self._joint_masks(spec))
                 self.fit = self.jointFit
                 if getattr(self.fit, 'objectives', None):
                     self._sync_joint_fixed_params(self.fit.objectives[0]['func'])
@@ -5387,7 +7489,7 @@ class XModFit(QWidget):
                 traceback.print_exc()
         try:
             if len(spec.datasets) >= 2:
-                self.jointFit = spec.compile(self.data)
+                self.jointFit = spec.compile(self.data, masks=self._joint_masks(spec))
                 self.fit = self.jointFit
         except Exception:
             traceback.print_exc()
