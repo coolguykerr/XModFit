@@ -60,7 +60,14 @@ behaviour later deliberately flipped.
 *Fix:* delete the untracked ones; ignore `*.h5`, `*.xfit`, `__pycache__/`, `.idea/`,
 `*.npz`, `.perr`, `mesh.txt`.
 
-**A0.4 Rewrite `Data/d6test.h5` out of the local commits.** [irreversible once pushed]
+**A0.4 DONE 2026-09-03.** Rewrite `Data/d6test.h5` out of the local commits.
+Done with `filter-branch --index-filter` over `origin/develop..HEAD`: all 16 commits now
+carry upstream's 1,323,496-byte blob, the `a4fd04e` merge is preserved with both parents,
+and a full-tree diff against the pre-rewrite tip shows only that file. Every local commit
+hash changed. Backups `pre-h5-rewrite-bdb44ef` and `refs/original/refs/heads/develop`
+still hold the 26.8 MB blob, so the pack has not shrunk until they are dropped and
+`git gc --prune=now` runs. The file itself was then removed from the branch entirely
+(A2.1). Original text follows. [irreversible once pushed]
 Upstream has this file at 1.3 MB; our commit `d3e353e` replaced it with a 26.8 MB MCMC
 backend. Pushing adds 27 MB to every clone permanently. *Fix:* restore upstream's blob
 across the six local commits before any push.
@@ -139,6 +146,29 @@ Absent from `requirements_07022026.txt`, `requirements_working_Mar2026.txt` and
 XModFit that cannot save an MCMC run. *Fix:* add it; collapse the five superseded snapshots
 to one current file plus the two optional extras (viewer, xpr).
 
+**A1.13 `pdb_cache.pdbread` has no water or heteroatom filter.** [wrong-result]
+It iterates every atom `Bio.PDB` returns (`Functions/pdb_cache.py:76`), so a PDB
+straight from RCSB has its crystallographic waters counted as protein: electrons, vdW
+radii and mass all inflated, which propagates into `protvol`, the coverage normalisation
+and the electron-density profile. Found 2026-09-03 while preparing the 1UBQ default,
+which carries 58 HETATM waters against 602 protein atoms. Every structure in use so far
+was hand-stripped, which is why it never showed. *Fix:* skip `HETATM`/`W` residues by
+default, with an opt-in for genuine bound ions or ligands (the viewer already advertises
+showing those, so the filter must not be unconditional).
+
+**A1.14 `ED_profrot`'s centring is dead code and its docstring says otherwise.**
+[wrong-result, silent]
+`XLayersPDB.py:281` reads `"""Move protein to center of mass"""`, but the CoM
+subtraction immediately below is inside a string literal (`:286-288`) and the rotation
+uses raw `coord` (`:294`), with a note reading "Replace coord with coordCoM when done or
+make it an option". So the model rotates about the coordinate origin, not the protein,
+and **every template it is given must already be centred** -- an off-centre PDB swings
+through an arc as theta/phi vary, which changes the fit rather than raising. This is
+almost certainly why the working structures are named `*_center.pdb` / `*_com.pdb`.
+*Fix:* either enable the centring or make the requirement explicit and validated at
+load. Do not silently enable it without checking against existing fits: it would shift
+`protins` for every saved `.par`.
+
 **A1.12 `XPR.jl:262` still rejects `lo == hi`.** [hygiene]
 The phase-0 fix the stage-2 plan calls for was never applied, so every bake-off harness
 carries a `hi = lo + 1e-9` workaround. *Fix:* allow the degenerate bound; delete the hack.
@@ -158,7 +188,21 @@ because with multiplicative errors one pixel held 72% of the Linear weight — p
 leaked `_last_xsig`. As the only GID2D example in the repo it teaches the wrong workflow.
 *Fix:* re-save from a Log-scale fit after A1.8. (The `E` complaint is struck.)
 
-**A2.4 Adopt a neutral default PDB.** Every PDB model defaults to
+**A2.4 DONE 2026-09-03.** `Data/1ubq.pdb` (ubiquitin, waters stripped, mass-centred at
+the origin) is now the default for all six models, the `_dev_smooth` demo, the joint
+validator and the two `.par` fixtures. `Data/tim3_hmmm_ext_all_bestframe.pdb` and
+`Data/d6test.h5` were removed from the branch with `git rm --cached` (kept on disk,
+gitignored) in `c4300d0`. Two caveats now on the record: the parameter values in those
+`.par` fixtures were fitted against the tim3 structure and no longer match the shipped
+template, and the **i2_tim3 two-mode case that the multimodal seeding was validated
+against is no longer reproducible from a clean clone** -- if that validation needs to be
+repeatable, it needs a ubiquitin-based multimodal fixture built for the purpose.
+`julia/bakeoff/run.py` and `run_seed.py` still name the tim3 file deliberately.
+Removal from the branch is NOT un-publication: the structure has been in the public
+upstream `develop` since 2024-09-24 (`6cf39f8`) and is in every existing clone.
+Original text follows.
+
+Every PDB model defaulted to
 `./Data/tim3_hmmm_ext_all_bestframe.pdb` (`XLayersPDB.py:150`, `_XPR.py:107`,
 `_dev_smooth.py:455`). Recommended replacement: **ubiquitin (PDB 1UBQ)** — 76 residues,
 ~600 atoms, universally recognised, and small enough to speed up every validator and JIT
@@ -360,7 +404,8 @@ not be part of the repo" as: the campaign and its data leave, the generic covari
 mechanism stays. If the capability should also go, `_use_footprint` and the `v`/`var_fwhm`
 plumbing come out of `joint_covariance.py` and `Joint_Fit_Routines.py` too.
 
-**D3.** Ubiquitin as the default PDB (A2.4) — confirm, or name a preferred structure.
+**D3. RESOLVED 2026-09-03** — ubiquitin (1UBQ) adopted as the default template; the
+unpublished tim3 structure and `d6test.h5` removed from the branch.
 
 **D4.** Push as the six existing commits (history rewritten per A0.4), or squash into
 themed commits? The latter is cleaner for two-person review but loses the development
