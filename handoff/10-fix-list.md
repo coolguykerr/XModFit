@@ -1,0 +1,367 @@
+# Fix list — before consolidation vs. involved to-dos
+
+Assembled 2026-09-03 from the nine category documents in this directory. Nothing here has
+been executed or verified by running code — see `11-audit-plan.md`.
+
+Severity tags: **[wrong-result]** silently corrupts a number a scientist would report ·
+**[crash]** raises · **[unreachable]** feature exists but cannot be used ·
+**[hygiene]** no functional effect.
+
+## Corrections applied, so they are not carried forward as defects
+
+- `E` = 10.0 keV **is** the correct default and is set by the user per dataset
+  (`XLayersPDB.py:150`, `XLayersPDB_XPR.py:107`, `XLayersPDB_dev_smooth.py:455` all
+  default `E=10.0`). The 15.126 value belongs to one beam-footprint analysis campaign.
+  The "wrong E in the GID2D fixture" finding is **struck**.
+- The GLS/covariance core is **not** untested. `validate_joint_mask.py` is fully synthetic
+  (a `Line` model with hand-built `cov` sidecars) and does exercise the covariance +
+  footprint whitening path, including the one-dataset-without-`v` `zeros(nseg)` branch.
+  Only the *real-data* validator is unrunnable.
+- `Data/tim3_hmmm_ext_all_bestframe.pdb` (the default for every PDB model) is **already in
+  upstream** `origin/develop`. Replacing it is a cleanliness choice, not a disclosure fix.
+
+---
+
+# Tier A — fix before consolidation
+
+Small, local, low-risk: each is a single-file edit or a mechanical sweep. Doing these
+first makes both the consolidation and the audit tractable.
+
+## A0. Repo safety — before touching anything else
+
+**A0.1 Commit the untracked work.** [highest-consequence item on this list]
+Whole categories exist **only** in the working tree, in no commit: all of GID2D
+(`Functions/GISAXS/GID2D.py`, `Functions/gid2d_core.py`, `Image2DWidget.py`,
+`Tools/GrazingIncidence/*`), all of XPR/Julia (`Functions/xpr_backend.py`,
+`Functions/XRR/XLayersPDB_XPR.py`, `Functions/pdb_geometry.py`, `julia/**`), all of the
+orientation-seeding work (helpers, temperature, basins, inverse-CDF, parallel scans, every
+joint seeding path, `anglepairs`), and most of the core-app work (the entire per-column
+limits + mask engine, `DataListWidget`, the no-fit banner, all legend/overlay work, the
+`PlotWidget` data-line toggle and `legend_formatter`, `Fit._canonicalize_result`,
+`can_jac`/`residual_jac`). A single `git checkout .` destroys all of it.
+*Fix:* themed commits on a branch, before any other change.
+
+**A0.2 Recover the off-repo test harnesses.**
+Roughly 17 `verify_*.py` harnesses exist only in per-session temp scratchpads: the seeding
+set (`verify_seed_helpers`, `verify_seedmode`, `verify_seed_gui`, `verify_joint_orient`,
+`verify_joint_neither`, `verify_joint_mixed`, `verify_joint_seed_worker`,
+`verify_reuse_wrap`, `verify_fingerprint`, `verify_repro_full`, …) and the plotting set
+(`verify_legend`, `verify_banner_lifecycle`, `verify_detail_switch`,
+`verify_multifit_selection`, `verify_plotting_B`). These are the *only* coverage for the
+seeding work and for core-app sub-features (b) and (c) — everything else there rests on
+`validate_jointfit_gui.py` alone. *Fix:* move them into the repo (proposed `tests/`),
+dropping the obsolete `verify_joint_parallel_scan.py`, which asserts `pool is None` — the
+behaviour later deliberately flipped.
+
+**A0.3 Purge MCMC backends; add a `.gitignore`.**
+`Data/*.h5` is 872 MB across eight files (`p3e2test` 282, `A_Scan1MCMCnoprot` 239,
+`i2test` 137, `htim3_A3_trial5_test` 115, `p3i4test` 44, `n1test` 28, `d6test` 27,
+`inittest` 1.4). All are testing artefacts. There is no `.gitignore` at all.
+*Fix:* delete the untracked ones; ignore `*.h5`, `*.xfit`, `__pycache__/`, `.idea/`,
+`*.npz`, `.perr`, `mesh.txt`.
+
+**A0.4 Rewrite `Data/d6test.h5` out of the local commits.** [irreversible once pushed]
+Upstream has this file at 1.3 MB; our commit `d3e353e` replaced it with a 26.8 MB MCMC
+backend. Pushing adds 27 MB to every clone permanently. *Fix:* restore upstream's blob
+across the six local commits before any push.
+
+**A0.5 Revert `.idea/`.** `.idea/XModFit.iml` and `.idea/misc.xml` are modified only to
+encode one machine's absolute conda path. *Fix:* `git checkout -- .idea/`.
+
+## A1. Correctness fixes
+
+**A1.1 One source of truth for the PDB model-name list.** [crash]
+Three tuples disagree, all three uncommitted: `lmfit/minimizer.py:94` (6 names),
+`xmodfit.py:2634` (3, drops `_G`/`_H`/`_XPR`), `Fit_Routines.py:491` (a different 3, drops
+`_box`). Consequence: for `XLayersPDB_XPR`/`_G`/`_H` the engine builds a `CustomSampler`
+while the GUI supplies a stock emcee `HDFBackend`; `get_autocorr_time` then passes
+`angleindex=` into emcee's `integrated_time` and raises `TypeError`, which is not in the
+`except` list at `minimizer.py:2300`. Found independently by three agents. XPR is under
+active development, so this bites soonest. *Fix:* one module-level constant, imported by
+all three sites.
+
+**A1.2 `mkey` used before assignment in `_G`, `_H`, `_box`.** [crash]
+`self.__d__[mkey]` precedes `mkey`'s assignment (`XLayersPDB_G.py:696` vs `:699`,
+`_H.py:797` vs `:800`, `_box.py:523` vs `:526`). It survives only because `mkey` leaks from
+a loop that runs *only when `__fit__` is False*, and `Joint_Fit_Routines.py:452` sets
+`__fit__ = True` — so none of the three can be joint-fitted. *Fix:* hoist the assignment,
+or drop the variants (D1 — if they go, this item disappears).
+
+**A1.3 Seed workers ignore the per-column fit mask.** [wrong-result]
+`Fit.residual` applies the mask (`Fit_Routines.py:291-296`) and `JointFit.residual` applies
+`obj["imask"]` (`Joint_Fit_Routines.py:552-558`), but `pdb_seed_worker`,
+`pdb_joint_seed_worker.JointSeedScan.residual` and `_build_orientation_seed`'s slices all
+use bare `imin:imax`. The "parallel == serial bit-for-bit" validation is therefore only
+true while no column limit is active — and the two features were never exercised together.
+*Fix:* thread the frozen mask into both workers.
+
+**A1.4 `_eval_chisqr` ignores per-dataset ranges and column masks.** [wrong-result]
+The joint-vs-individual model comparison masks with the scalar Xrange only, so the two
+chi2 values are computed on different point sets whenever `#FitRange=` or a column limit
+is in use. *Fix:* route it through the same `imask_for`/`active_index` path as the fit.
+
+**A1.5 Mask + `__masked_x__` breaks the 1-D plot.** [crash, modal dialog]
+With both active, `self.fit.yfit` is shorter than `self.fit.x[imin:imax+1]`, but
+`update_plot` (`xmodfit.py:6297`) and `fitCallback` still pass the full slice as `x` to
+`PlotWidget.add_data`, whose length check (`PlotWidget.py:215`) pops a modal
+"dimensions … not matching" dialog (`:270`). The same slice feeds
+`output_params['Residuals']` (`:6301-6304`). Latent only because `GID2D` is the sole model
+declaring `__masked_x__` and it renders in the 2D panel. *Fix:* slice `x` by
+`active_index()` on both paths.
+
+**A1.6 Drop the discarded `super()` call in `CustomSampler.get_autocorr_time:336`.**
+[hygiene/perf] The identical double-autocorrelation pattern was deliberately removed from
+`CustomBackend`; this copy was missed. Costs a full-chain autocorrelation per call.
+
+**A1.7 NGL viewer poll loop never stops and has side effects.** [hygiene/perf]
+The 400 ms `QTimer` has no `hideEvent`/`closeEvent`, so it runs at 2.5 Hz for the rest of
+the session once opened, and each tick calls `func.update_parameters()` on the live model.
+Each full reload also writes a ~1.3 MB temp HTML and leaks the last one. *Fix:* stop on
+hide/close; make the poll read-only; clean up temp files.
+
+**A1.8 `update_fixed_parameters` leaks private attributes into saved files.** [hygiene]
+The filter is `key[:2] != '__'`, so single-underscore attributes pass — `_last_xsig` landed
+in `Data/dppc_q2d_gid_indexed.xpar:23`. *Fix:* also skip single-underscore keys.
+
+**A1.9 `validate_xpr.py` has no `if __name__ == '__main__'` guard.** [crash, latent]
+Top-level body with `sys.exit` at `:382`. Harmless only because every emcee call passes
+`emcee_cores=1` and all four spawn-`Pool` sites gate on `workers > 1`. Raise cores and it
+fork-bombs.
+
+**A1.10 `check()` never asserts in any validator.** [hides failures]
+Verdicts ride the exit code, so under pytest a failing check reports PASSED. *Fix:* make
+`check()` raise or accumulate a failure count; add one runner for all validators.
+
+**A1.11 `h5py` missing from the three newest requirements snapshots.** [crash]
+Absent from `requirements_07022026.txt`, `requirements_working_Mar2026.txt` and
+`requirements_xmodfit_viewer.txt`; present only in upstream's two and
+`requirements_01062026_old.txt`. An environment built from the "current" snapshot yields an
+XModFit that cannot save an MCMC run. *Fix:* add it; collapse the five superseded snapshots
+to one current file plus the two optional extras (viewer, xpr).
+
+**A1.12 `XPR.jl:262` still rejects `lo == hi`.** [hygiene]
+The phase-0 fix the stage-2 plan calls for was never applied, so every bake-off harness
+carries a `hi = lo + 1e-9` workaround. *Fix:* allow the degenerate bound; delete the hack.
+
+## A2. Data folder
+
+**A2.1 Remove testing artefacts.** The untracked `Data/*.h5` (A0.3), the 3.9 MB
+`Data/dppc_q2d_gid_indexed.xfit`, and the `*_test*` outputs that are not fixtures.
+
+**A2.2 Commit the three files that *are* required fixtures.**
+`Data/dppc_q2d_gid_indexed.txt` (only regenerable from a `T:\` share),
+`Data/i2_tim3_1000_test.txt`, `Data/i2_tim3_1000_test_fitparam.par`.
+
+**A2.3 Re-save `Data/dppc_q2d_gid_indexed.xpar` as a good example.**
+It carries `#Fit Scale=Linear` — the notes are explicit that this data must be fit in Log,
+because with multiplicative errors one pixel held 72% of the Linear weight — plus the
+leaked `_last_xsig`. As the only GID2D example in the repo it teaches the wrong workflow.
+*Fix:* re-save from a Log-scale fit after A1.8. (The `E` complaint is struck.)
+
+**A2.4 Adopt a neutral default PDB.** Every PDB model defaults to
+`./Data/tim3_hmmm_ext_all_bestframe.pdb` (`XLayersPDB.py:150`, `_XPR.py:107`,
+`_dev_smooth.py:455`). Recommended replacement: **ubiquitin (PDB 1UBQ)** — 76 residues,
+~600 atoms, universally recognised, and small enough to speed up every validator and JIT
+warm-up. Not membrane-binding, which is fine for a smoke-test default and arguably clearer
+than a structure implying a real system. *Fix:* add a stripped `Data/1ubq.pdb`, repoint the
+three defaults, and remove the 13 untracked personal MD/crystal structures from `Data/`,
+keeping only what a committed validator loads.
+
+**A2.5 Drop the beam-footprint bilayer campaign from the repo.**
+In-repo coupling is small: two docstring examples (`joint_covariance.py:18`,
+`joint_fit_spec.py:55`) and `validate_jointfit.py`, which hard-codes
+`El_Cat_Si_1_{DOPC,HBS_1,Air}_wtrans.txt` + `_c_factors.txt` at `:30-32` and `:210` and
+cannot run anyway (its `BASE` defaults to the POSIX path `/mnt/project`). *Fix:* generalise
+the two docstrings, delete `validate_jointfit.py`, and extend the already-synthetic
+`validate_joint_mask.py` to carry the cross-dataset GLS cases the deleted validator
+claimed. This keeps the *capability* and removes the *campaign*. See D2.
+
+## A3. Dead code, duplication, stale claims
+
+**A3.1** Delete `xmodfit_old.py` (4,428 lines, imported by nothing).
+**A3.2** Retire `joint_fit_orchestration.py` — effectively dead; its only caller is inside
+a triple-quoted block at `xmodfit.py:1798-1811`. `push_result_to_tables` has no caller;
+`_primary_curve` exists in three copies (there, `joint_fit_spec.py`, `xmodfit_old.py`).
+**A3.3** Collapse `gid_explorer.html` / `gid_template.html` — byte-identical except line
+184 (`{}` vs `__CFG__`), two 79 KB copies, and `write_browser_page` already generates one
+from the other.
+**A3.4** Remove five stale private `parratt_numba` copies now that `XLayersPDB` imports the
+shared optimised one; drop `prange` under `parallel=False` in three of them.
+**A3.5** Collapse the **seven** copies of the "is this dataset fitted?" predicate
+(`xmodfit.py:1212, 1548, 1609, 6350, 6401, 6696, 7573`), in two forms — two of them omit
+the `not hasattr(f,'objectives')` guard, so they are not merely redundant but
+inconsistent. `_dataset_is_fitted` already exists; use it.
+**A3.6** De-duplicate the Tableau-10 palette (`PlotWidget.py:244`, `xmodfit.py:557`).
+**A3.7** `PlotWidget.remove_data` leaks `linestyle`/`fit`/`yerr` entries, and its
+`legendItem.removeItem(dname)` (`:436`) is a silent no-op for exactly the label-mismatch
+reason that forced `legendItem.clear()` in `Plot`.
+**A3.8** Delete dead symbols: `_viridis` (`NGLViewerDialog.py:119-125`),
+`fitter._ext_workers` (`Joint_Fit_Routines.py:884`, read nowhere), the dead `names`
+argument of `ColumnLimitsDialog`, and the unreachable `emcee()` params
+`seed_uniform_frac` / `walkers_per_basin` (no caller sets them — plumb from the GUI or
+remove).
+**A3.9** De-duplicate the copy-pasted angleindex construction — 5x in `xmodfit.py`, once in
+`minimizer.py`. And the four masking validators' copy-pasted `Line` stubs and `check()`.
+**A3.10** Call the extracted seeding helpers: `build_orientation_grid` and
+`seed_thetaphi_from_costmap` were extracted as reusable, but `Minimizer.emcee` still holds
+inline copies. Caveat — the inline versions also fill `chi2mesh` and drive the refine loop,
+so this is a real refactor, not a delete.
+**A3.11** `xmodfit.py:1058` is one very long line with a run of spaces where a line
+continuation got flattened. Parses fine; looks like a botched edit.
+**A3.12 Fix stale docstrings and citations:** `JointFit.set_emcee_minimizer:900` still says
+the orientation-seeded joint path is serial; `Joint_Fit_Routines.py:243` cites
+"xmodfit.py ~3246/3254", which no longer matches; `pdb_cache.py`'s docstring claims every
+variant uses it (`_dev_smooth` does not); `XLayersPDB_XPR.py:54-56` and
+`pdb_geometry.py:90-92` still assert theta/phi do **not** transfer to XLayersPDB, a claim
+the notes retracted (they are bit-identical to scipy `'zx'`); four paths in
+`viewer_template.html:14,25` point at skill-package files absent here
+(`scripts/make_browser_viewer.py`, `references/*.md`, `assets/ngl.js`).
+**A3.13 Reconcile contradictory recorded numbers:** the sigma-floor pixel count (26 in the
+notes and `pack_gid_map.py` vs 37 in the shipped file header); `sigma/I` median (0.41 vs
+0.47); the `cov`-from-Patterson calibration (`phys_seed.py:3-11` r=0.969 / +/-1.06 vs
+`run_multistart.py:128` LOO sd 1.23 / max 2.09); the XPR divergence count (2-then-3 in
+`XPR.jl`, "two" then three listed in `julia/README.md:93`, four in
+`STAGE2_SEEDING_PLAN.md:26`; actual 5 patches + the Ipopt dep).
+**A3.14 Document arm D.** `run_armD.py`, `phys_seed.py`, `seed_utils.py` and 13
+`armD-*.npz` files are dated 2026-09-03 — later than every design doc and memory note,
+with no recorded verdict. Largest documentation gap in the fork.
+**A3.15 Attribution for vendored third-party code:** `Tools/StructureViewer/ngl.js`
+(NGL 2.4.0, 1.2 MB) and the vendored `julia/XPR/` need a license/provenance note before a
+public push.
+
+## A4. Merge guards — cheap now, expensive to discover later
+
+These are the regions where a careless upstream merge silently disables a feature rather
+than conflicting. Worth a comment in the code and a line in the merge checklist.
+
+- **`self.xmin = {}` -> `_LimitProxy` swap in `XModFit.__init__`.** Two lines. If lost to a
+  merge, the whole column-limits feature silently stops working while still importing.
+- **`Fit.residual`'s mask block must stay ABOVE `maxd = np.max(data)`.** Below it, an
+  excluded hot pixel still rescales the residual vector and `log10` of an excluded
+  non-positive point reaches `nan_policy='raise'`.
+- **Covariance composition order:** slice `[imin,imax]` -> apply `imask` -> concatenate ->
+  apply `_cov_mask`, folded in symmetrically in *both* `_build_chol` and `residual`.
+- **Highest-conflict functions** for the fold-in: `dataFileSelectionChanged`, `doFit`,
+  `update_plot`, `plot_extra_param`, `create_plotDock`, and `Minimizer.emcee`.
+
+---
+
+# Tier B — involved to-dos (features that are not actually finished)
+
+**B1. Picklable objectives for arbitrary models at cores>1.** [unreachable]
+Only the PDB and joint paths swap in a picklable log-probability. Stock lmfit still builds
+a pool whenever `workers > 1 and HAS_DILL` (`minimizer.py:1791`) and dill is installed, so
+any *other* model at cores>1 hits the original `cannot pickle 'Fit' object` crash — the
+objective is bound to a Qt `QObject` holding a `pyqtSignal`. Needs either a generic
+picklable-objective factory over the existing `_ext_objective` hook, or a real separation
+of the model from the Qt signal holder. Design work, then bit-for-bit validation per model
+family.
+
+**B2. Correlated-error / GLS fitting, end to end.** [unreachable + wrong-result risk]
+Three gaps:
+(a) the shared-beam **footprint** covariance term cannot be reached from the GUI at all —
+`_use_footprint` needs `cov['v']`/`cov['var_fwhm']`, which only `load_bundle_npz` returns,
+while the panel loads sidecars via `load_dataset_cov`, and `load_cov_npz` drops those keys
+even when the `.npz` contains them;
+(b) covariance/GLS joint **MCMC is still serial** — `JointLogProb` has no whitened
+residual, so `_attach_joint_parallel` is gated on `not self._use_cov`;
+(c) the real-data regression leaves with the campaign (A2.5), so the cross-dataset GLS
+cases need rebuilding synthetically.
+Do (c) first — it is the harness that makes (a) and (b) safe to touch.
+
+**B3. Subgroup (arbitrary-subset) parameter sharing needs a UI.** [unreachable]
+Engine, spec and `.jpar` all support sharing across an arbitrary subset of datasets; the
+panel offers only a share-across-ALL checkbox, so today it requires a hand-written `.jpar`.
+A headline capability of the fork that no user can reach.
+
+**B4. `doFit` routing and the mixed-selection question.**
+The joint **MCMC** route was deliberately hoisted above `doFit`'s individual-fit guards;
+the joint **least-squares** route was not, and works only because
+`clear_individual_selection` blocks signals and leaves `sfnames` stale. Separately, a Ctrl
+overlay where both lists have selections silently runs a whole-spec joint fit and ignores
+the individual selection. Both were deferred pending the planned overlay overhaul; settle
+them together.
+
+**B5. GID2D is not finished as an analysis.**
+The fit-and-interpret step was never done (does one NN-tilted phase with `sig_t` free fit
+both features?), and the tilt reading is a model choice the map does not support: at
+`t=30.5` the model's (11) sits at q_xy 1.28 against the data's 1.356, and freeing `t`/`eps`
+runs away to a0=17 A / t=60 deg. Also unresolved: `window='engine'` sets `active = err > 0`
+and discards the q window, so the 1-D reductions, the chi2 and the model panel's
+out-of-window view may not match their own docstrings. `GID2DMapDialog.py` is planned and
+absent; GID explorer coupling is unbuilt (`cfg_from_func` reads only `func.E`).
+
+**B6. Structure viewer: six catalogued improvements.**
+Canned/side-on orthographic views (the default `autoView()` lands looking from above, the
+wrong view for a layered interface), length-scale-normalised depth colours,
+contrast-normalised slab colours, a responsive panel merging the layer list with the
+legend, macOS compatibility, distance/protrusion measurements. **Warning on item 3:**
+`_DENSITY_STOPS` is deliberately absolute — a stack-relative map made every slab colour
+jump on any rho edit, and there is a 25-line comment saying so. Also merge the near-clone
+`Tools/GrazingIncidence/GIDViewerDialog.py`, noting a shared base class cannot live under
+`Tools/` because that loader turns every `.py` there into a menu item.
+
+**B7. Seeding completeness.**
+`_seed_shared_axis` (mixed sharing) never calls `_detect_orientation_basins`, so the
+guaranteed-walkers-per-basin property does not hold there. `seed_uniform_frac` and
+`walkers_per_basin` reach no caller. The two spawn pools (seeding + sampling) should be
+unified into one. Of the four originally-planned improvements, inverse-CDF and temperature
+landed; the sampler-move tuning never did.
+
+**B8. XLayersPDB variant triage.**
+Decide which of `_G`, `_H`, `_box`, `_dev_smooth` survive. Evidence: `_G`/`_H`/`_box` share
+the `mkey` bug and have no `.par` or fixture anywhere, suggesting they were never fitted
+with; `_dev_smooth` is the best-documented of the set but measured *worse* MCMC mixing than
+plain `XLayersPDB` (tau ~384 vs 238, acceptance 0.075 vs 0.139, ~3x slower) on a single
+caveated run. Keep `_G`'s exact `greens_grid_n` regardless — it is the natural reference for
+checking `soft_area`. Also check `XLayersPDB_H.py:632`
+(`layarea = 1 - Volfrac/xyarea` divides a sphere-segment volume by an area, where `_G`'s
+identical line is correct because its `Volfrac` is an area — probably a missing `1/fslice`),
+and fix `pdb_cache.pdbread` keying on filename only, so an in-place PDB edit is never
+invalidated.
+
+**B9. `XLayers_Beamfootprint` decision.** It is the *alternative* to the GLS approach —
+footprint as fit parameters (`fwhm`/`sub_wth`) inside the model — not a component of it. It
+forked a **pre-merge** `XLayers.py`, dropped `rrf`, and its private `parratt_numba` returns
+a scalar `r` where the shared one returns the `refc` array (`:40`). With the campaign
+leaving the repo it has no in-repo consumer: rebase it on the current `XLayers.py` and give
+it a fixture, or drop it.
+
+**B10. XPR stage 2 and 3 proper.** Stage 2 (global seeding returning a *list* of minima)
+exists only as a research harness: no `CONFIG.json` is committed, `make_tim1_config.py` is
+referenced at `run_multistart.py:10` but does not exist, data paths point outside the repo,
+and `validate_xpr_seed.py` is specified but unwritten — so `julia/bakeoff/` cannot run on a
+fresh clone. Stage 3 (feeding the minima to MCMC, possibly gradient-based HMC) is not
+started. `julia/bakeoff/README.md` documents 6 of 15 scripts.
+
+**B11. Reproducibility of the XPR/Julia environment.** `validate_xpr.py` needs
+`XPR-main/test_data`, which lives as a *sibling* of the repo, so a collaborator cannot run
+it. Julia 1.11.9 auto-downloads ~1 GB. The recorded environment traps (broken stdlib SSL in
+`cmcars`, juliapkg keying its install dir on `CONDA_PREFIX`, a broken `tomli`) are handled
+in `get_jl()` but only for the two known machines.
+
+**B12. Upstream-owned decisions, to raise with the collaborators rather than fix here.**
+`EMCEE_Widget.py` (upstream's independent non-lmfit MCMC, 780 lines) is imported by
+nothing, and `Fit.log_probability`/`log_likelihood`/`log_prior` exist only to serve it — so
+the repo carries two MCMC implementations, one dead. `Functions/XFNTR/XFNTR_Plus.py`
+crashes with `KeyError: 'filepaths'` on load (one-line fix, deferred, fails identically on
+clean upstream). `xraydb/` contains only `__pycache__` with seven orphan `.pyc` and no
+`__init__.py`; `xraydb_bak/` is 10.3 MB, tracked upstream, referenced by nothing.
+
+---
+
+# Decisions needed
+
+**D1.** Which XLayersPDB variants survive (B8)? Dropping `_G`/`_H`/`_box` removes ~2,150
+lines and makes A1.2 moot; keeping any means fixing and fixture-ing it.
+
+**D2.** Does the footprint *capability* stay (B2a)? Reading "the beam footprint data should
+not be part of the repo" as: the campaign and its data leave, the generic covariance
+mechanism stays. If the capability should also go, `_use_footprint` and the `v`/`var_fwhm`
+plumbing come out of `joint_covariance.py` and `Joint_Fit_Routines.py` too.
+
+**D3.** Ubiquitin as the default PDB (A2.4) — confirm, or name a preferred structure.
+
+**D4.** Push as the six existing commits (history rewritten per A0.4), or squash into
+themed commits? The latter is cleaner for two-person review but loses the development
+sequence.
