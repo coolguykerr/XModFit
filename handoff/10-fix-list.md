@@ -156,18 +156,22 @@ was hand-stripped, which is why it never showed. *Fix:* skip `HETATM`/`W` residu
 default, with an opt-in for genuine bound ions or ligands (the viewer already advertises
 showing those, so the filter must not be unconditional).
 
-**A1.14 `ED_profrot`'s centring is dead code and its docstring says otherwise.**
-[wrong-result, silent]
-`XLayersPDB.py:281` reads `"""Move protein to center of mass"""`, but the CoM
-subtraction immediately below is inside a string literal (`:286-288`) and the rotation
-uses raw `coord` (`:294`), with a note reading "Replace coord with coordCoM when done or
-make it an option". So the model rotates about the coordinate origin, not the protein,
-and **every template it is given must already be centred** -- an off-centre PDB swings
-through an arc as theta/phi vary, which changes the fit rather than raising. This is
-almost certainly why the working structures are named `*_center.pdb` / `*_com.pdb`.
-*Fix:* either enable the centring or make the requirement explicit and validated at
-load. Do not silently enable it without checking against existing fits: it would shift
-`protins` for every saved `.par`.
+**A1.14 Re-enable the centre-of-mass step in `ED_profrot` before the fold-in.**
+[deliberate, must be reverted]
+The CoM subtraction at `XLayersPDB.py:286-288` sits inside a string literal and the
+rotation uses raw `coord` (`:294`), so today the model rotates about the coordinate
+origin rather than the protein, and every template must arrive pre-centred (hence the
+`*_center.pdb` / `*_com.pdb` naming, and hence `Data/1ubq.pdb` being mass-centred).
+
+**This was intentional, not an oversight** -- confirmed by the author 2026-09-03: it was
+commented out to compare against older code that did not centre. It **should be
+commented back in for the final repo**. Deliberately not done yet.
+
+When re-enabling: the fold is not cosmetic, it changes what `protins` means for any
+template that was not already centred, so any saved parameter file from an off-centre
+template will need refitting. The in-repo `.par` fixtures no longer constrain this (see
+A2.6), but personal saved analyses will. The docstring at `:281` already describes the
+intended behaviour, so it needs no change -- only the code below it.
 
 **A1.12 `XPR.jl:262` still rejects `lo == hi`.** [hygiene]
 The phase-0 fix the stage-2 plan calls for was never applied, so every bake-off harness
@@ -219,6 +223,17 @@ cannot run anyway (its `BASE` defaults to the POSIX path `/mnt/project`). *Fix:*
 the two docstrings, delete `validate_jointfit.py`, and extend the already-synthetic
 `validate_joint_mask.py` to carry the cross-dataset GLS cases the deleted validator
 claimed. This keeps the *capability* and removes the *campaign*. See D2.
+
+**A2.6 DONE 2026-09-03.** Remove the saved `.par` files from `Data/`.
+They were per-analysis testing output, not source. `Data/i2_tim3_1000_test_fitparam.par`
+was the only one any code consumed -- `validate_xlayerspdb_joint.py`'s "a Nov-2024 `.par`
+must still load" test -- so it moved to `tests/fixtures/legacy_xlayerspdb_2024.par`
+(byte-identical, tabs intact), which is where a genuine fixture belongs and which starts
+the `tests/` directory A0.2 needs. `Data/d6_tim3_1000_test_fitparam.par` had no consumer
+and was untracked with `--cached`. `.gitignore` now covers `Data/*.par`, `Data/*.xpar`
+and `Data/*.jpar` so saved output cannot drift back in; `tests/fixtures/` is not ignored.
+Still to remove under A2.1: `Data/dppc_q2d_gid_indexed.xpar` (untracked already), which
+A2.3 wants re-saved from a Log-scale fit if it is kept as the GID2D example at all.
 
 ## A3. Dead code, duplication, stale claims
 
@@ -391,6 +406,35 @@ the repo carries two MCMC implementations, one dead. `Functions/XFNTR/XFNTR_Plus
 crashes with `KeyError: 'filepaths'` on load (one-line fix, deferred, fails identically on
 clean upstream). `xraydb/` contains only `__pycache__` with seven orphan `.pyc` and no
 `__init__.py`; `xraydb_bak/` is 10.3 MB, tracked upstream, referenced by nothing.
+
+**B13. A PDB preparation step for the XLayersPDB family.**
+Requested 2026-09-03. Every model in the family silently assumes its template has
+already been prepared by hand, and there is nothing in the repo that does the preparing
+or checks that it was done. Three separate assumptions, each of which currently fails
+quietly:
+
+- **waters and heteroatoms are already stripped** -- `pdb_cache.pdbread` counts every
+  atom Bio.PDB returns (A1.13), so a raw RCSB download inflates electrons, radii and
+  mass, and with them `protvol`, the coverage normalisation and the EDP;
+- **coordinates are already centred** -- the model rotates about the origin (A1.14),
+  so an off-centre template swings through an arc as theta/phi vary;
+- **every element parses** -- `pdb_cache.pdbread` indexes the element table directly
+  (`Functions/pdb_cache.py:83`) with only a special case for `CAL`, so an unusual atom
+  name raises a bare `KeyError` from deep inside the parse.
+
+Wanted: one preparation entry point -- CLI plus a call the model can make -- that strips
+waters and heteroatoms with an **opt-in to retain genuine bound ions and ligands** (the
+structure viewer already advertises showing those, so the filter must not be
+unconditional), centres by mass-weighted CoM, optionally adds hydrogens, validates that
+every element resolves, and reports atom count, total electrons, mass and bounding
+extent so the result can be sanity-checked. Then either prepare-on-load or refuse to load
+an unprepared file, rather than fitting one silently.
+
+`Data/1ubq.pdb` was produced by exactly this procedure by hand, so the script is mostly
+a matter of packaging what already had to be done once. That one-off is in the session
+scratchpad as `mk_ubq.py` and is worth starting from. Relevant to the 13 personal
+structures in `Data/` too: whichever survive A2.4 should go through the same step, so it
+is knowable which are centred.
 
 ---
 

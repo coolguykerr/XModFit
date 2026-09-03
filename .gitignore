@@ -10,6 +10,12 @@ __pycache__/
 # be re-added by accident; the shipped default template is Data/1ubq.pdb.
 Data/tim3_hmmm_ext_all_bestframe.pdb
 
+# Saved fit-parameter files are per-analysis testing output, not source. Genuine
+# test fixtures belong in tests/fixtures/ instead (and are not ignored there).
+Data/*.par
+Data/*.xpar
+Data/*.jpar
+
 # Local scratch
 .perr
 mesh.txt
