@@ -109,6 +109,7 @@ recommendation.
 | 09 | `09-validation-and-env.md` | the `validate_*.py` harnesses, conda environments and headless recipe, requirements snapshots, repo hygiene | repo root |
 | 10 | `10-fix-list.md` | what to fix before consolidating, and the involved to-dos where a feature is unfinished | — |
 | 11 | `11-audit-plan.md` | the deferred audit: the registry of unverified claims and how to test each | — |
+| 12 | `12-work-package-preaudit.md` | the pre-audit fix package handed to an implementation session: phases, guardrails, progress log | — |
 
 Two research write-ups that `05-xpr-julia.md` summarises — `STAGE2_SEEDING_PLAN.md` and
 `SEEDING_STUDY_TIM1.md` — **moved to `../xpr-seeding-study` on 2026-09-04** along with the
