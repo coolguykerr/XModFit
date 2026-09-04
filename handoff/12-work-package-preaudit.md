@@ -60,25 +60,30 @@ Source of every item: `10-fix-list.md`. IDs match it — keep them in commit mes
 
 Nothing after this is trustworthy until these three land.
 
-- [ ] **P-3 / A0.2 — recover the off-repo harnesses. DO THIS FIRST; they are in temp
-      directories that get cleaned.** 21 files, confirmed present 2026-09-04:
-      - 12 in `C:\Users\kerr\AppData\Local\Temp\claude\C--Users-kerr-Documents-GitHub-XModJointFit\22bf29f6-2dcf-4452-846a-74cdac330a9f\scratchpad\`
-        (`verify_fingerprint`, `verify_jointmcmc`, `verify_jointwindow`,
-        `verify_joint_mixed`, `verify_joint_neither`, `verify_joint_orient`,
-        `verify_joint_parallel_scan`, `verify_joint_seed_worker`, `verify_reuse_wrap`,
-        `verify_seedmode`, `verify_seed_gui`, `verify_seed_helpers`)
-      - 9 in `...\c0878594-9211-4c15-b276-03aabd2cec97\scratchpad\`
-        (`verify_banner_lifecycle`, `verify_detail_switch`, `verify_joint_4ds_parallel`,
-        `verify_joint_detail_and_legend`, `verify_joint_parallel_edge`,
-        `verify_joint_parallel_sample`, `verify_legend`, `verify_multifit_selection`,
-        `verify_plotting_B`)
+- [x] **P-3 / A0.2 — recover the off-repo harnesses. DONE 2026-09-04 by the orchestrator**,
+      because it was time-critical and the scope turned out to be larger than the 21 files
+      first identified: **eight** session scratchpads held ~100 scripts.
+      - **44 harnesses are now in `tests/recovered/`**, committed **as found, unmodified
+        and not yet run** — that commit is the provenance record. See
+        `tests/recovered/README.md` for what came from which session and the known
+        reasons they will need work.
+      - Everything else — ~60 one-off diagnostics, benchmarks and probes, plus the study's
+        session output — is preserved verbatim with per-session provenance in the sibling
+        repository **`../xmodjointfit-session-archive`** (528 files). Several of those are
+        the origin of measured numbers the audit's P3 items will re-check, so do not treat
+        the archive as disposable.
+      - `verify_joint_parallel_scan.py` was deliberately excluded (asserts the flipped
+        behaviour); `verify_joint_4ds_parallel.py` replaces it.
 
-      Copy into `tests/` (which already exists, holding `tests/fixtures/`). **Exclude
-      `verify_joint_parallel_scan.py`** — it asserts `sampler.pool is None`, the behaviour
-      later deliberately flipped; `verify_joint_4ds_parallel.py` is its corrected
-      replacement. Commit them **as found, unmodified**, in their own commit, before
-      adapting anything: that commit is the provenance record. Fix paths/imports in a
-      *second* commit. Expect some to fail — that is information, not a problem.
+- [ ] **P-3b — adapt the recovered harnesses.** This is the part left for you, and it is
+      the bulk of the work. In a commit *separate* from the provenance commit: fix
+      hardcoded paths, repoint PDB loads at `Data/1ubq.pdb` (the tim3 structure was
+      removed on 2026-09-04, so any numeric expectation tied to a specific fit result with
+      it is no longer meaningful — the structural and mechanical assertions still are),
+      repoint the `.par` fixture at `tests/fixtures/legacy_xlayerspdb_2024.par`, add
+      `if __name__ == '__main__':` where a spawn Pool is reachable, and move them onto the
+      shared `check()` from P-1. Expect a good fraction to fail on first run; record which
+      and why in the progress log rather than forcing them green.
 
 - [ ] **P-1 / A1.10 — make `check()` actually fail.** Every `validate_*.py` defines a
       local `check(name, cond, detail)` that prints PASS/FAIL and folds the result into a
@@ -272,6 +277,21 @@ refused-with-reason, or deferred.
 ### 2026-09-04 — package opened (orchestrator)
 
 Scope compiled from `10-fix-list.md` Tier A plus the three hard preconditions from
-`11-audit-plan.md` section 2. Verified while compiling: all 21 off-repo `verify_*.py`
-harnesses are still on disk at the two paths listed in Phase 0, and `pytest` is not
-installed in `cmc-py39` (so P-2 must be a plain script). No implementation work started.
+`11-audit-plan.md` section 2. Verified while compiling: `pytest` is not installed in
+`cmc-py39`, so P-2 must be a plain script. No implementation work started.
+
+### 2026-09-04 — P-3 done by the orchestrator (permanent storage)
+
+Recovering the off-repo harnesses was pulled forward and done directly, because it was
+time-critical (Windows temp tree) and because the scope was larger than first assessed:
+not 21 files in two sessions but ~100 scripts across **eight** sessions.
+
+- `tests/recovered/` — 44 harnesses, committed as found, unmodified, not yet run.
+- `../xmodjointfit-session-archive` — all 528 files, verbatim, per-session provenance,
+  including the ~60 diagnostics and benchmarks that are the origin of measured numbers
+  the audit will re-check.
+- `../xpr-seeding-study` — the study, extracted 2026-09-04 (separate action).
+
+Remaining Phase 0 work for the implementation session: **P-3b** (adapt them), **P-1**
+(make `check()` fail), **P-2** (the runner), then the **baseline**. Suite result: not yet
+established — that is the next artefact due.
