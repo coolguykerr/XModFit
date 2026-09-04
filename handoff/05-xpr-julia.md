@@ -7,6 +7,20 @@
 **Owner chat(s):** memory `xpr-julia-backend.md` and `homometry-seeding-for-xpr.md`; in-repo `STAGE2_SEEDING_PLAN.md` and `SEEDING_STUDY_TIM1.md`.
 **Last touched:** 2026-09-03 (`julia/bakeoff/run_armD.py`, `phys_seed.py`, `run_multistart.py`, `seed_utils.py`) - the most recently active work in the repo.
 
+> **MOVED, 2026-09-04 — read this first.** The seeding *study* half of this document has
+> been extracted to its own repository, `../xpr-seeding-study`: all of `julia/bakeoff/`
+> (the harness and the 107 `endpoints_*.npz` archives), `STAGE2_SEEDING_PLAN.md`,
+> `SEEDING_STUDY_TIM1.md`, and the newer `TIM1_SEEDING_REPORT.md` /
+> `PLAN_XMODFIT_FASTSCAN.md` / `PLAN_CLUSTER_TOOL.md`. It is research, not an XModFit
+> feature, and must not reach `chemmatcars/XModFit` — see fix-list A0.6 for the one
+> remaining step (commit `7942458` still holds the tracked half in local history) and for
+> the `.githooks/pre-push` guard. Everything this document says about those files remains
+> accurate, but their path is now that repository. **The model side stays here and is
+> XModFit's**: `Functions/xpr_backend.py`, `Functions/XRR/XLayersPDB_XPR.py`,
+> `Functions/pdb_geometry.py`, `julia/XPR/`, `validate_xpr.py`, `requirements_xpr.txt`,
+> and the `lmfit`/`Fit_Routines` wiring. One feature is owed from the study: the fast-scan
+> in `PLAN_XMODFIT_FASTSCAN.md`.
+
 > **BUCKET WARNING, read first.** Essentially all of this category is **working-tree-only**. `git log --oneline origin/develop..HEAD` contains nothing from it: `Functions/xpr_backend.py`, `Functions/XRR/XLayersPDB_XPR.py`, `Functions/pdb_geometry.py`, `validate_xpr.py`, `requirements_xpr.txt`, `julia/**`, `STAGE2_SEEDING_PLAN.md`, `SEEDING_STUDY_TIM1.md` are **untracked**, and the two upstream files it modifies carry their XPR changes as **uncommitted `git diff`**. Verified: `git diff origin/develop...HEAD -- Fit_Routines.py | grep -c can_jac` = 0, while `git diff -- Fit_Routines.py` holds the whole analytic-Jacobian block. One `git checkout .` destroys the upstream-side wiring; the untracked tree is not even in the reflog. **Commit before doing anything else.**
 
 ## 1. Why this exists

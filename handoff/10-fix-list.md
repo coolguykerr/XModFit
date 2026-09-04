@@ -72,6 +72,42 @@ Upstream has this file at 1.3 MB; our commit `d3e353e` replaced it with a 26.8 M
 backend. Pushing adds 27 MB to every clone permanently. *Fix:* restore upstream's blob
 across the six local commits before any push.
 
+**A0.6 The seeding study must not reach upstream — one step left.** [publishing risk]
+The September 2026 global-optimum seeding study was research, not an XModFit feature. It
+was **extracted to its own repository on 2026-09-04** (`../xpr-seeding-study`, 177 files,
+all 107 `endpoints_*.npz` archives preserved, no remote configured), and `.gitignore` now
+covers its paths so the untracked half cannot drift back in.
+
+What remains: commit **`7942458`** ("Add XPR global-seeding bake-off harness, saved
+endpoints and study write-ups", 114 files, ~3 MB mostly binary) still carries the tracked
+half in local history, **10 commits back** on `develop`. Nothing is pushed. Three routes,
+from the study's own exclusion manifest (now
+`../xpr-seeding-study/handoff/DO-NOT-COMMIT.md`):
+
+- **A — leave history, never push `develop`.** Push only curated branches that exclude
+  `7942458`. Now enforced mechanically by `.githooks/pre-push`, which refuses any push
+  whose range touches study paths (verified: it correctly refuses `develop` today).
+  Enable per clone with `git config core.hooksPath .githooks`.
+- **B — drop the commit.** `7942458` is self-contained: no later commit touches any of
+  its 114 files, so it rebases out without conflict. Now safe to do, since the study is
+  preserved elsewhere -- note the rebase WOULD have deleted those files from disk.
+  ```
+  git branch backup-before-dropping-7942458 develop
+  git rebase --onto 7942458^ 7942458 develop
+  ```
+  Costs: 10 commits get new hashes (a second rewrite after A0.4), and
+  `pre-merge-backup-b3e1ab5`'s relationship to `develop` is invalidated.
+- **C — separate repository.** DONE, as above.
+
+**Recommended: B**, because the fold-in wants a clean linear `develop` for two-person
+review and the only thing that made B risky (losing ~30 h of compute) no longer applies.
+Deferred rather than done, because it rewrites history and the hook makes deferral safe.
+
+One genuine XModFit feature is owed from the study: the fast-scan in that repository's
+`PLAN_XMODFIT_FASTSCAN.md`. The recorded recommendation is to **reimplement** the
+candidate physicality screen in `Functions/` root rather than import
+`julia/bakeoff/seed_utils.py`, which is hardwired to the study's config format.
+
 **A0.5 Revert `.idea/`.** `.idea/XModFit.iml` and `.idea/misc.xml` are modified only to
 encode one machine's absolute conda path. *Fix:* `git checkout -- .idea/`.
 

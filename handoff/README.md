@@ -7,6 +7,21 @@ into `chemmatcars/XModFit` and for the Claude instances that will work there. Wr
 Read this file, then the category document you need. Do not assume a feature works
 because it is documented: see **Verification status** below.
 
+> **September 2026: the seeding study has been moved out.** A separate investigation into
+> global-optimum seeding for XLayersPDB-class fits was carried out in this tree, because
+> the XPR backend lives here. **It is not part of XModFit and must not reach
+> `chemmatcars/XModFit`.** On 2026-09-04 it was extracted to its own repository,
+> `../xpr-seeding-study` (177 files, including the 107 `endpoints_*.npz` run archives that
+> are ~30 h of compute and the regression targets for anything built on it). Its four
+> workstream handoffs, its write-ups and the original exclusion manifest went with it.
+>
+> Two things remain to be done here, tracked as **A0.6** in `10-fix-list.md`: commit
+> `7942458` still holds the tracked half of the study (114 files, ~3 MB, mostly binary) in
+> local history, and one genuine XModFit feature — the fast-scan described in that
+> repository's `PLAN_XMODFIT_FASTSCAN.md` — still needs implementing here. Nothing has
+> been pushed. `.githooks/pre-push` refuses any push carrying study paths; enable it with
+> `git config core.hooksPath .githooks`.
+
 ---
 
 ## 1. Baseline — what "stock XModFit" means here
@@ -15,19 +30,35 @@ because it is documented: see **Verification status** below.
 |---|---|
 | upstream remote | `origin` = https://github.com/chemmatcars/XModFit (NOT a personal fork) |
 | upstream baseline | `origin/develop`, tip `81e53c8` |
-| local branch | `develop`, 6 commits ahead, 0 behind |
-| upstream already merged in | yes — merge commit `a4fd04e` (2026-08-05) |
-| safety branch | `pre-merge-backup-b3e1ab5` = the pre-commit tip |
+| local branch | `develop`, 19 commits ahead, 0 behind |
+| upstream already merged in | yes — merge commit `f3335f9` (2026-08-05) |
+| safety branches | `pre-merge-backup-b3e1ab5` (pre-commit tip, *pre-rewrite* hashes), `pre-h5-rewrite-bdb44ef` |
 
-Local commits not in upstream:
+Local commits not in upstream, newest first. **Hashes below `013eabe` differ from those
+recorded elsewhere in these documents**: `filter-branch` rewrote all of them on 2026-09-03
+to drop a 26.8 MB `.h5` blob (fix-list A0.4), so `d3e353e` is now `7b37f15`, `c5f697d` is
+`765754e`, `a4fd04e` is `f3335f9`, `babe1aa` is `5662813`.
 
 ```
-babe1aa  Fix MCMC confidence-interval workflow when run without a prior least-squares fit
-a4fd04e  Merge upstream chemmatcars/XModFit develop into joint-fit work
-c5f697d  Joint-fit system: global/subgroup parameter sharing + covariance (GLS) fitting
-b3e1ab5  MCMC Additions for Angles for XLayersPDB
-d955174  MCMC Additions for Angles for XLayersPDB
-d3e353e  MCMC Additions for Angles for XLayersPDB
+edc8b80  Clear saved .par files out of Data/; add the 1UBQ generator and a PDB-prep to-do
+8251c0a  Fix list: record the 1UBQ default, and two new PDB-handling defects
+c4300d0  Remove d6test.h5 and the unpublished tim3 structure; ship 1UBQ as the default
+a68f7a3  Note in the handoff index that the untracked work is now committed
+4b56db6  Add handoff documentation: one change record per category, plus a fix list
+3ca25a0  Add requirements snapshots for the viewer and the working environments
+d662335  Add regression harnesses for the fit-mask, column-limit and joint-PDB paths
+b953c3f  Per-column fit limits, multimodal MCMC seeding, parallel joint sampling, plotting
+433fab7  Add picklable MCMC objectives and parallel seed-scan workers
+7942458  Add XPR global-seeding bake-off harness, saved endpoints and study write-ups  <-- MUST NOT be pushed, see A0.6
+a1a2a62  Add XLayersPDB_XPR: vendored Julia differentiable reflectivity model + bridge
+dad9f9d  Add GID2D: 2D grazing-incidence map fitting, 2D Map tab and packing tools
+013eabe  Add .gitignore for caches, MCMC backends and saved fit output
+5662813  Fix MCMC confidence-interval workflow when run without a prior least-squares fit
+f3335f9  Merge upstream chemmatcars/XModFit develop into joint-fit work
+765754e  Joint-fit system: global/subgroup parameter sharing + covariance (GLS) fitting
+1293395  MCMC Additions for Angles for XLayersPDB
+c1815bb  MCMC Additions for Angles for XLayersPDB
+7b37f15  MCMC Additions for Angles for XLayersPDB
 ```
 
 Nothing has been pushed. The collaborators are working from `origin/develop`, i.e.
@@ -36,8 +67,9 @@ from the state *before* all of the above.
 ## 2. The change set has three buckets
 
 > **Superseded 2026-09-03, later the same day.** Everything that was uncommitted or
-> untracked has since been committed to `develop` in eight themed commits, `0296ec3`
-> through `b2b76ac`. The bucket statements throughout this directory — including every
+> untracked has since been committed to `develop` in eight themed commits, `013eabe`
+> through `a68f7a3` (hashes as rewritten; see section 1). The bucket statements
+> throughout this directory — including every
 > category document's section 2, and the many "untracked working-tree only" notes —
 > describe the state at the time of writing, i.e. at `babe1aa`. They are still the right
 > guide to *what was ours versus upstream's*, which is what the merge cares about; they
@@ -58,8 +90,9 @@ Reconciling the "+60k lines" figure: ~29,400 lines of that is Python/Julia/HTML 
 and documentation. The rest is artefacts — `xmodfit_old.py` (a 4,428-line backup copy),
 92 `julia/bakeoff/endpoints_*.npz` result arrays, 31 untracked `Data/` files (PDB
 structures, `.h5` MCMC backends, datasets, `.xpar`/`.par` fit files), and `__pycache__`
-trees. There is **no `.gitignore`**, which is why they all show up. See
-`09-validation-and-env.md` section 8 for the keep/ignore/drop recommendation.
+trees. There was **no `.gitignore`** at the time, which is why they all showed up; one was
+added in `013eabe`. See `09-validation-and-env.md` section 8 for the keep/ignore/drop
+recommendation.
 
 ## 3. Category documents
 
@@ -74,12 +107,13 @@ trees. There is **no `.gitignore`**, which is why they all show up. See
 | 07 | `07-structure-viewer.md` | the NGL protein-in-layers 3-D viewer driven by fit parameters | `Tools/StructureViewer/` |
 | 08 | `08-core-app.md` | per-column fit limits and the mask engine, per-dataset fit memory, plotting/legend/overlay work, fit-engine miscellany | `xmodfit.py`, `Fit_Routines.py`, `PlotWidget.py` |
 | 09 | `09-validation-and-env.md` | the `validate_*.py` harnesses, conda environments and headless recipe, requirements snapshots, repo hygiene | repo root |
-| 10 | `10-merge-and-consolidation.md` | the fold-in plan: conflict surface, ordering, and what to consolidate or drop first | — |
+| 10 | `10-fix-list.md` | what to fix before consolidating, and the involved to-dos where a feature is unfinished | — |
 | 11 | `11-audit-plan.md` | the deferred audit: the registry of unverified claims and how to test each | — |
 
-Two research write-ups predate this directory and are **not** duplicated here:
-`STAGE2_SEEDING_PLAN.md` and `SEEDING_STUDY_TIM1.md` at the repo root (both untracked).
-`05-xpr-julia.md` summarises them and says which of their sections are superseded.
+Two research write-ups that `05-xpr-julia.md` summarises — `STAGE2_SEEDING_PLAN.md` and
+`SEEDING_STUDY_TIM1.md` — **moved to `../xpr-seeding-study` on 2026-09-04** along with the
+rest of the study, so its references to them as "at the repo root" now point there. It
+says which of their sections are superseded.
 
 ## 4. Verification status — read this before trusting anything
 

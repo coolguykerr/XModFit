@@ -19,9 +19,14 @@ recoverable from the code.
   already merged in via `a4fd04e`.
 - A large amount of work is **uncommitted or untracked**. Check
   `git status --porcelain -uall` before assuming a file is under version control.
-- There is no `.gitignore`, so `__pycache__`, data files, `.h5` MCMC backends and
-  `.npz` result arrays all show as untracked. Do not "clean them up" without checking
-  `handoff/09-validation-and-env.md` — some are test fixtures the validators need.
+- A `.gitignore` was added in `0296ec3` covering caches, `.h5` MCMC backends, saved
+  `.xpar`/`.par` output and the seeding study. Files still showing as untracked are
+  mostly personal structures and test output in `Data/`; do not "clean them up" without
+  checking `handoff/09-validation-and-env.md` — a few are fixtures the validators need.
+- **`origin` is the upstream project.** Run `git config core.hooksPath .githooks` in a
+  fresh clone: `.githooks/pre-push` refuses to push commits carrying the XPR seeding
+  study, which is research material that must not reach `chemmatcars/XModFit`. See
+  `handoff/10-fix-list.md` A0.6.
 - Collaborators are working from stock `origin/develop`. Anything you change in a file
   that upstream also touches raises the merge cost; `handoff/10-merge-and-consolidation.md`
   tracks that surface.

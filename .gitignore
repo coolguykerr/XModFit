@@ -16,6 +16,17 @@ Data/*.par
 Data/*.xpar
 Data/*.jpar
 
+# XPR global-optimum seeding study -- research, not an XModFit feature. Extracted to
+# its own repository (../xpr-seeding-study) on 2026-09-04. Ignored here so it cannot
+# drift back in; commit 7942458 still has the tracked half, see 10-fix-list.md A0.6.
+/julia/bakeoff/
+/handoff/seeding-study/
+/SEEDING_STUDY_TIM1.md
+/STAGE2_SEEDING_PLAN.md
+/TIM1_SEEDING_REPORT.md
+/PLAN_XMODFIT_FASTSCAN.md
+/PLAN_CLUSTER_TOOL.md
+
 # Local scratch
 .perr
 mesh.txt
