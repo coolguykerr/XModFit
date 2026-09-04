@@ -10,6 +10,12 @@ around.
 
 Source of every item: `10-fix-list.md`. IDs match it — keep them in commit messages.
 
+**Where this sits in the plan** (settled 2026-09-04): this package -> the audit
+(`11-audit-plan.md`) -> the fast-scan feature -> reorganisation and condensing -> only then
+a push to `chemmatcars/XModFit`. **Nothing is being pushed for the foreseeable future**;
+XModJointFit exists so the real repo was not disturbed while this work happened. Treat a
+push as out of scope entirely, not as something to prepare for.
+
 > **Line numbers in the fix list may already be stale.** Several were recorded before the
 > commits of 2026-09-03/04, and every edit in this package shifts more. **Locate by symbol
 > name, not by line number**, and correct any citation you find wrong as you go.
@@ -44,9 +50,13 @@ Source of every item: `10-fix-list.md`. IDs match it — keep them in commit mes
 - **Do not refactor, rename, reformat or reorganise** beyond what an item asks for. No
   reflowing, no import reordering, no type hints, no docstring rewrites except where an
   item names one.
-- **Do not delete any `XLayersPDB` variant** (`_G`, `_H`, `_box`, `_dev_smooth`). That
-  decision (D1) is open. Fix them in place.
-- **Do not remove the footprint covariance capability.** Decision D2 is open.
+- **Do not remove the footprint covariance capability.** D2 is decided and it **stays** —
+  the `XLayers_Beamfootprint` model, `_use_footprint`, and the `v`/`var_fwhm` plumbing in
+  `joint_covariance.py` and `Joint_Fit_Routines.py`. Only the *specific analysis* that was
+  conducted with it leaves (item A2.5), because that analysis was not done with XModFit's
+  tools and its specifics would mislead a reader.
+- **Retire exactly three `XLayersPDB` variants, no more** — see item B8/D1 below. `_box`
+  stays, along with the `XLayersPDB` base and `_XPR`.
 - **Do not "fix" these deliberate designs** — each was a considered choice and each has a
   note saying so: theta/phi being unbounded for MCMC; `_DENSITY_STOPS` being an absolute
   rather than stack-relative colour map; the `'map2d'` choices value; `nan_policy='raise'`
@@ -109,6 +119,24 @@ Nothing after this is trustworthy until these three land.
 
 Each item: fix, add or extend a regression check, confirm the suite still passes.
 
+- [ ] **B8/D1 — retire `XLayersPDB_G`, `XLayersPDB_H` and `XLayersPDB_dev_smooth`. Do
+      this first in this phase**, so nothing below is spent on files that are leaving.
+      `XLayersPDB_box` stays, as do the `XLayersPDB` base and `_XPR`. Delete the three
+      files and update every reference — 8 code sites plus 2 harnesses, as of 2026-09-04:
+      - `lmfit/minimizer.py` `_PDB_FUNCNAMES` and the comment above it
+      - `xmodfit.py` `_PDB_MCMC_FUNCS`
+      - `Fit_Routines.py` the inline tuple in `set_emcee_minimizer`
+      - `Functions/pdb_cache.py` docstring ("XLayersPDB, XLayersPDB_G/_H/_box")
+      - `Functions/gid2d_core.py` a comment referencing `_dev_smooth`'s cache
+      - `validate_perdataset_fit.py` and `tests/recovered/test_phase1.py` variant loops
+      - `tests/recovered/compare_models.py` compares XLayersPDB against `_dev_smooth` —
+        retire the script or reduce it to the surviving models, and say which
+      All three remain in git history, so this is recoverable. **Before deleting, read and
+      preserve two things** in a comment or in `04-pdb-xrr-models.md`: `_G`'s exact
+      `greens_grid_n`, which is the natural reference for checking `_box`'s `soft_area`
+      (audit P1 will want it), and `_dev_smooth`'s `protins_new = protins_old - fslice`
+      registration warning against old `XLayersPDB` fits. Losing those two facts is the
+      only real cost of this deletion.
 - [ ] **A1.1 — one source of truth for the PDB model-name list.** Three tuples disagree:
       `lmfit/minimizer.py` `_PDB_FUNCNAMES` (6 names), `xmodfit.py` `_PDB_MCMC_FUNCS`
       (3, dropping `_G`/`_H`/`_XPR`), and an inline tuple in
@@ -118,11 +146,12 @@ Each item: fix, add or extend a regression check, confirm the suite still passes
       `angleindex=` into emcee's `integrated_time` → `TypeError` not caught by the
       `except` list in `Minimizer.emcee`. **Found independently by three agents; highest
       confidence and highest value in this package.** One constant, imported everywhere.
-- [ ] **A1.2 — `mkey` used before assignment** in `XLayersPDB_G.py`, `_H.py`, `_box.py`:
-      `self.__d__[mkey]` precedes `mkey`'s assignment, surviving only because `mkey` leaks
-      from a loop that runs *only when `__fit__` is False*, and `Joint_Fit_Routines.py`
-      sets `__fit__ = True`. So none can be joint-fitted. Hoist the assignment. **Fix, do
-      not delete** (D1 open).
+- [ ] **A1.2 — `mkey` used before assignment in `XLayersPDB_box.py`** (the `_G`/`_H` copies
+      leave with B8/D1): `self.__d__[mkey]` precedes `mkey`'s assignment, surviving only
+      because `mkey` leaks from a loop that runs *only when `__fit__` is False*, and
+      `Joint_Fit_Routines.py` sets `__fit__ = True` — so `_box` cannot currently be
+      joint-fitted at all. Hoist the assignment, and add a joint-fit smoke test for `_box`,
+      since the absence of one is why this survived.
 - [ ] **A1.3 — seed workers ignore the per-column fit mask.** `Fit.residual` applies the
       mask and `JointFit.residual` applies `obj["imask"]`, but `pdb_seed_worker`,
       `pdb_joint_seed_worker.JointSeedScan.residual` and
@@ -174,9 +203,23 @@ Each item: fix, add or extend a regression check, confirm the suite still passes
       encode one machine's absolute conda path. `git checkout -- .idea/`.
 - [ ] **A2.1 — `Data/` cleanup.** Delete the untracked test outputs
       (`*_test_fit.txt`, `n1_tim3_1500_raw_test.txt`, `dppc_q2d_gid_indexed.xfit`).
-      **The 13 personal `.pdb` structures need a user decision — do not delete them.**
-      Instead list them with sizes and any in-repo references, and report; the user will
-      say which go. Same for the three `Data/*.expr` files.
+      **Do not delete any `.pdb` or `.expr` file from disk** — decided 2026-09-04: the
+      structures stay locally but none ship, which is already handled by the `.gitignore`
+      rule (`Data/*.pdb`, with `1ubq`/`Nd9`/`Pr4` exempted). Users get one example
+      template, `Data/1ubq.pdb`. Nothing further needed here beyond confirming that
+      `git status` shows no `.pdb` as untracked-and-addable.
+- [ ] **A2.5 — strip the specific beam-footprint analysis** (D2: the *capability* stays,
+      the conducted analysis goes; it was not done with XModFit's tools, so its specifics
+      would only mislead). Three sites: generalise the `El_Cat_Si_1` docstring example in
+      `joint_covariance.py`, and the `El_Cat_Si` / `TGP_Qz` one in `joint_fit_spec.py`, to
+      neutral wording; and remove `validate_jointfit.py`, which hard-codes
+      `El_Cat_Si_1_{DOPC,HBS_1,Air}_wtrans.txt` and cannot run anyway (its `BASE` defaults
+      to the POSIX path `/mnt/project`). **Do not just delete its coverage** — it was the
+      only cross-dataset GLS regression. Rebuild those cases synthetically in
+      `validate_joint_mask.py`, which is already fully synthetic and already exercises the
+      covariance + footprint whitening path including the one-dataset-without-`v`
+      `zeros(nseg)` branch. This is a prerequisite for audit item P1.1, so do not skip the
+      rebuild.
 - [ ] **A2.3 — re-save `Data/dppc_q2d_gid_indexed.xpar`** from a Log-scale fit (it
       currently carries `#Fit Scale=Linear`, which the GID2D notes are explicit is wrong
       for this data), after A1.8 so it no longer leaks `_last_xsig`. If a headless
@@ -295,3 +338,18 @@ not 21 files in two sessions but ~100 scripts across **eight** sessions.
 Remaining Phase 0 work for the implementation session: **P-3b** (adapt them), **P-1**
 (make `check()` fail), **P-2** (the runner), then the **baseline**. Suite result: not yet
 established — that is the next artefact due.
+
+### 2026-09-04 — decisions landed, scope adjusted (orchestrator)
+
+D1, D2, A2.1 and D4 answered by the user, so two items changed and one was added:
+
+- **D1: keep `XLayersPDB_box` only.** `_G`, `_H` and `_dev_smooth` are retired — new
+  Phase 1 item **B8/D1**, to be done first in that phase. A1.2 narrows to `_box`.
+- **D2: the footprint capability STAYS**; only the specific conducted analysis goes. New
+  Phase 2 item **A2.5**, which I had omitted from the original package — including the
+  requirement to rebuild the cross-dataset GLS coverage synthetically rather than just
+  deleting `validate_jointfit.py`. B9 is settled as keep-and-fix, not drop.
+- **A2.1: no structures deleted from disk**, none shipped; handled by a `.gitignore` rule
+  rather than deletions. No per-file decision needed.
+- **D4: no push in prospect.** Reorganisation comes first, then a push, so commit strategy
+  is not a live question and the pre-push guard stays.

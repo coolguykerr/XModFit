@@ -476,17 +476,42 @@ is knowable which are centred.
 
 # Decisions needed
 
-**D1.** Which XLayersPDB variants survive (B8)? Dropping `_G`/`_H`/`_box` removes ~2,150
-lines and makes A1.2 moot; keeping any means fixing and fixture-ing it.
+**D1. RESOLVED 2026-09-04 — keep `XLayersPDB_box` only.** `XLayersPDB_G`,
+`XLayersPDB_H` and `XLayersPDB_dev_smooth` are retired. The surviving PDB family is
+`XLayersPDB` (base), `XLayersPDB_box`, `XLayersPDB_XPR`. Consequences: A1.2's `mkey` bug
+now needs fixing in `_box` only; both PDB-name tuples shrink to three entries, which
+simplifies A1.1; `tests/recovered/compare_models.py` (XLayersPDB vs `_dev_smooth`) and the
+variant loops in `validate_perdataset_fit.py` and `tests/recovered/test_phase1.py` need
+updating. All three files stay recoverable from git history, so nothing is lost — but note
+that `_G`'s exact `greens_grid_n` was the natural reference for checking `_box`'s
+`soft_area`, and `_dev_smooth` carried a `protins_new = protins_old - fslice` registration
+warning against old `XLayersPDB` fits. Both are worth reading before the files go.
 
-**D2.** Does the footprint *capability* stay (B2a)? Reading "the beam footprint data should
-not be part of the repo" as: the campaign and its data leave, the generic covariance
-mechanism stays. If the capability should also go, `_use_footprint` and the `v`/`var_fwhm`
-plumbing come out of `joint_covariance.py` and `Joint_Fit_Routines.py` too.
+**D2. RESOLVED 2026-09-04 — the capability stays; the specific analysis goes.**
+The beam-footprint model and the ability to run that kind of joint fit are wanted. What
+must not be in the repo is the particular analysis that was conducted — which was not
+performed with XModFit's tools, so its specifics would only mislead. Concretely: keep
+`XLayers_Beamfootprint`, keep `_use_footprint` and the `v`/`var_fwhm` plumbing in
+`joint_covariance.py` and `Joint_Fit_Routines.py`, and keep B2a on the list as
+"wire it up so it is reachable from the GUI". Remove per A2.5 the campaign specifics: the
+`El_Cat_Si` / `TGP_Qz` docstring examples and `validate_jointfit.py`'s hard-coded dataset
+names. This also settles **B9** — `XLayers_Beamfootprint` is kept, so it needs rebasing on
+the current `XLayers.py` and a fixture of its own, not dropping.
 
 **D3. RESOLVED 2026-09-03** — ubiquitin (1UBQ) adopted as the default template; the
 unpublished tim3 structure and `d6test.h5` removed from the branch.
 
-**D4.** Push as the six existing commits (history rewritten per A0.4), or squash into
-themed commits? The latter is cleaner for two-person review but loses the development
-sequence.
+**A2.1 RESOLVED 2026-09-04.** The personal structures are **not** to be deleted from disk,
+but none ship: users get one example template. Implemented as a `.gitignore` rule
+(`Data/*.pdb` with `1ubq`/`Nd9`/`Pr4` exempted) rather than by deleting files, so adding
+another needs a deliberate `git add -f`. No per-file decision needed.
+
+**D4. DEFERRED 2026-09-04 — nothing is being pushed yet.** The sequence is: this fix
+package -> the audit -> the fast-scan feature -> reorganisation and condensing -> only then
+a push to `chemmatcars/XModFit`. XModJointFit exists precisely so the real repo was not
+disturbed while this work happened. So the commit-strategy question is not live, and the
+`.githooks/pre-push` guard stays in place for the duration. Revisit at the reorganisation.
+
+**Also settled 2026-09-04:** `Data/d6test.h5` holds no meaningful result — it only proves
+MCMC runs at all — so the 26.8 MB blob does not need recovering. See the note under A0.4
+about why reclaiming the space is nonetheless not urgent.
