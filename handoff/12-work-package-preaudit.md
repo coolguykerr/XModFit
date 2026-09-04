@@ -111,9 +111,11 @@ Nothing after this is trustworthy until these three land.
 - [ ] **Phase 0 checkpoint — the BASELINE.** Run everything and report the results
       **before fixing anything**. This is the most valuable single artefact in the
       package: it separates "already broken" from "broken by this work". Record it in the
-      progress log below. Known in advance: `validate_jointfit.py` was deleted with the
-      bilayer campaign, and `validate_xpr.py` needs `XPR-main/test_data` from outside the
-      repo.
+      progress log below. Two failures are expected and are not yours to fix here:
+      `validate_jointfit.py` cannot run at all (its `BASE` defaults to the POSIX path
+      `/mnt/project` and its `El_Cat_Si_1_*` data is not in the repo) — it is removed later
+      under A2.5, so record it as a known failure now rather than repairing it; and
+      `validate_xpr.py` needs `XPR-main/test_data` from outside the repo.
 
 ## Phase 1 — correctness
 
