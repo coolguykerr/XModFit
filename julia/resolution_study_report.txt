@@ -1,0 +1,193 @@
+C:\Users\kerr\Documents\GitHub\XModJointFit\Functions\XRR\XLayersPDB_XPR.py:718: RuntimeWarning: XPR: box length 40 exceeds the mesh reference length 30, so the in-box mesh coarsens to 0.6667 A against the requested 0.5. Not an error, but raise box_ref_length if you want the finer mesh -- and note that changes chi2.
+  xb.check_headroom(p, num_boxes, include_protein)
+==============================================================================
+XPR parameter-dependent resolution: effect on R, R/R_F and logL
+==============================================================================
+dataset   mTIM3 d20_tim3_1 / t3hmmm
+          94 points, q 0.0280..0.5600, median sigma/R 0.0094
+template  tim3_hmmm_ext_all_bestframe.pdb (1815 atoms)
+pose      theta 51.376  phi 125.370  protins_top 8.6622 -> protins -14.0654 (maxh 22.7276)
+film      d = [12.73124, 8.747107]   rho = [0.2413187, 0.4654535]   sig 3.400
+cov       raw 15.1445  (fraction 0.2417, cov_scale 62.65)
+mesh      spacez 0.5, box_ref 30 -> in-box 0.2122 A, 693 smearing nodes
+          chi2 386.56  chi2/N 4.112  logL -193.2785
+
+==============================================================================
+1. MESH CONVERGENCE. spacez refines the WHOLE mesh uniformly (both the rigid
+   outer spacing and the in-box spacing d_b*spacez/box_ref are proportional
+   to it), so this is a clean h-refinement.
+==============================================================================
+  spacez      nodes   in-box A           logL         chi2    eval ms
+  0.5000        693     0.2122     -193.27851       386.56        9.5
+  0.2500       1383     0.1061     -194.56165       389.12       26.3
+  0.1250       2764     0.0530     -194.91378       389.83       85.8
+  0.0625       5525     0.0265     -195.00395       390.01      300.4
+  successive dlogL -1.2831 -0.3521 -0.0902 -> observed order 1.87 then 1.97
+  Richardson limit logL_inf = -195.03499
+  => the DEFAULT mesh (spacez 0.5) is off by +1.756 in logL, -3.513 in chi2
+     for reference, chi2/N here is 4.11 over 94 points, and a 1-sigma
+     movement of one datum contributes 1.0 to chi2.
+
+==============================================================================
+2. WHERE THE ERROR LIVES IN q.  R here IS R/R_F (the data is .rrf and the
+   model runs Fresnel-normalised); the raw-R column repeats it with rrf=False.
+==============================================================================
+  q band             n    mean dR/R   max |dR/R|     raw mean mean |dR|/sig
+  0.028-0.100       36    -5.95e-05     1.13e-04    -5.95e-05        0.008
+  0.100-0.200       20    -2.98e-05     1.13e-04    -2.98e-05        0.008
+  0.200-0.300       11     3.72e-05     3.25e-03     3.72e-05        0.054
+  0.300-0.400       10    -2.88e-03     3.36e-03    -2.88e-03        0.147
+  0.400-0.500       10    -1.65e-03     2.30e-03    -1.65e-03        0.077
+  0.500-0.560        7     4.64e-03     1.11e-02     4.64e-03        0.038
+  power law |dR/R| ~ q^1.91  (midpoint-rule quadrature predicts q^2)
+  R/R_F and raw R give the same RELATIVE error to 1.7e-16 -- the Fresnel
+  divisor is analytic in q and carries no mesh dependence.
+  chi2 of the model difference, sum((dR/sigma)^2) = 0.355
+  worst single point: 0.168 sigma at q = 0.330
+
+==============================================================================
+3. DECOMPOSING THE ERROR.  Only the IN-BOX mesh is parameter dependent
+   (h_box = d_b*spacez/box_ref); everything outside the boxes is rigid at
+   spacez.  box_ref_length refines ONLY the in-box mesh, so it isolates the
+   parameter-dependent half.
+==============================================================================
+  at the fitted d1 = 12.7312:
+    in-box error  mean|dR/R| 2.709e-04   sum(dR/sig)^2 0.0240   dchi2 +1.2367
+    TOTAL error   mean|dR/R| 9.916e-04   sum(dR/sig)^2 0.3547   dchi2 -3.4509
+    => by the model-difference norm sum((dR/sigma)^2), the in-box mesh is
+       only 6.8% of the total: the RIGID spacez region dominates.
+    => and note the two dchi2 have OPPOSITE SIGNS (+1.237 in-box vs -3.451
+       total), i.e. the in-box and outer errors partially CANCEL. Refining
+       one alone therefore makes absolute chi2 worse, not better -- which is
+       exactly what raising box_ref_length on its own does. Refine spacez.
+
+  IN-BOX error alone, as d1 sweeps (this IS the parameter-dependent part):
+  d1 (A)        h_box A    mean|dR/R| sum(dR/sig)^2   max|dR|/sig
+  4.000          0.0667     1.214e-04        0.0017        0.0151
+  8.000          0.1333     1.092e-04        0.0250        0.0685
+  12.731         0.2122     2.709e-04        0.0240        0.0496
+  18.000         0.3000     1.478e-03        0.1159        0.1145
+  24.000         0.4000     1.235e-03        1.7693        0.5733
+  30.000         0.5000     3.458e-03        7.9802        1.3785
+  40.000         0.6667     7.811e-03        5.6939        0.7538
+  55.000         0.9167     9.910e-03       66.5839        4.4954
+  mean|dR/R| ~ h_box^1.96   (h^2 quadrature predicts 2)
+  so the parameter-dependent part of the error scales as expected, and at
+  the fitted d1 it is 2.7e-04 in R -- 35x below the 9.4e-03 median sigma/R.
+
+==============================================================================
+4. DOES IT BIAS THE ANSWER?  Fit the REAL data on each mesh, same start,
+   and compare. theta/phi held at the archived pose (fitting orientation
+   from one start is the multimodal problem, out of scope here).
+==============================================================================
+  (two fits in 8.1 s)
+  chi2 at each fitted optimum: default 129.763   fine 128.957
+
+  param                   fit @ 0.5    fit @ 0.125        shift       stderr  shift/err
+  qoff                  6.05601e-05    6.00854e-05   +4.747e-07    1.602e-05      0.030
+  protins                  -14.1972       -14.1888    -0.008325       0.2913     -0.029
+  cov                        15.123        15.1201    +0.002868       0.1682      0.017
+  sig                        3.2116        3.21074   +0.0008614       0.1154      0.007
+  __Model_d_001             12.3347        12.3289    +0.005834       0.2046      0.029
+  __Model_d_002             9.87689        9.88524    -0.008344       0.6384     -0.013
+  __Model_rho_001          0.233962        0.23387   +9.259e-05     0.004101      0.023
+  __Model_rho_002          0.448384       0.448224   +0.0001598      0.00849      0.019
+  worst |shift| / stderr = 0.030  (< 0.1 means the mesh is irrelevant to the
+  fitted values; ~1 would mean it moves them by a full error bar)
+
+  cross-evaluation, to separate "the mesh moved the optimum" from "the mesh
+  moved chi2 at fixed parameters":
+  chi2                  at P(0.5)      at P(0.125)
+  mesh 0.5               129.7626         130.0501
+  mesh 0.125             129.2451         128.9568
+  -> on the fine mesh, the default-mesh parameters cost only +0.2884 in chi2
+     compared with the fine-mesh parameters. THAT is the cost of the mesh
+     bias. The +0.517 offset between rows is the mesh error itself, which is
+     common to all parameter points and cancels from any Delta(chi2).
+
+==============================================================================
+5. LANDSCAPE DISTORTION for a global search.  The relevant comparison is
+   between CANDIDATE MINIMA, which all have comparable chi2 -- not between
+   a good fit and a terrible one.  Perturb around the optimum, keep only
+   points within +100 chi2, and look at the SPREAD of the mesh error.
+==============================================================================
+  55 perturbed candidates within +100 chi2 of the optimum
+  mesh error (chi2_default - chi2_fine): min -5.2263  max +7.9371  spread 13.1634
+  sd of the mesh error across candidates: 2.5284 chi2 (1.2642 in logL)
+
+  => for basin merging on a Delta(-logL) tolerance of 11-20, the mesh
+     contributes a spread of 1.264 logL between candidates, i.e. 11.49%
+     of the tightest tolerance. It is a common-mode offset to first
+     order, and only its VARIATION between candidates can reorder them.
+
+==============================================================================
+6. THE POSE.  Sections 4-5 held theta/phi fixed, but the protein is binned on
+   the RIGID spacez grid, so rotating it is exactly what moves atoms across
+   fixed cell boundaries -- and orientation is what the campaign is about.
+   Release theta/phi and refit on both meshes.
+==============================================================================
+  (two 10-parameter fits in 21.2 s)
+  chi2: default 128.810   fine 128.202
+
+  param                   fit @ 0.5    fit @ 0.125        shift       stderr  shift/err
+  qoff                  5.76043e-05    5.75143e-05   +8.994e-08    1.711e-05      0.005
+  protins                  -14.1236       -14.1209    -0.002762       0.6506     -0.004
+  cov                       15.0686        15.0728    -0.004192       0.2081     -0.020
+  sig                       3.20028        3.19964    +0.000631       0.2023      0.003
+  __Model_d_001             12.3114        12.3062    +0.005206       0.3793      0.014
+  __Model_d_002             9.95575        9.96156    -0.005817          1.2     -0.005
+  __Model_rho_001          0.233765       0.233651   +0.0001137     0.007393      0.015
+  __Model_rho_002          0.447249       0.447138   +0.0001112      0.01572      0.007
+  theta                     51.6111        51.5742      +0.0368       0.9844      0.037  <-- pose
+  phi                       126.656        126.543      +0.1131        7.673      0.015  <-- pose
+  worst |shift| / stderr including the pose = 0.037
+  the mesh moves the fitted orientation by 0.0368 deg in theta, 0.1131 deg in phi
+  (campaign pose tolerance is ~5 deg; replicate disagreement is 11-20 logL)
+
+==============================================================================
+CONCLUSIONS
+==============================================================================
+
+1. The moving mesh is a well-behaved O(h^2) quadrature error, not an artifact.
+   Convergence order 1.87 -> 1.97; the q-dependence is q^1.91 against the
+   midpoint-rule prediction of q^2. It is smooth, predictable, and refinable.
+
+2. R/R_F is not a separate concern. The Fresnel divisor is analytic in q and
+   carries no mesh dependence, so R and R/R_F have the SAME relative error to
+   1.7e-16. Everything below applies to both.
+
+3. The parameter-dependent half is the MINOR half. Only the in-box spacing moves
+   with the parameters, and at the fitted point it is ~7%% of the total
+   model-difference norm; the rigid spacez region dominates. The two also have
+   opposite signs in chi2 and partially cancel.
+
+4. The default mesh does not bias the answer. Refitting real data at spacez 0.125
+   moves every fitted parameter by <= 0.04 of its own standard error, INCLUDING
+   theta (0.037 deg) and phi (0.113 deg). Parameter estimation is safe.
+
+5. Absolute chi2 is NOT mesh-transferable (~3.5 chi2 between default and
+   converged), and across near-optimal candidates the mesh error varies with
+   sd ~1.3 logL. Delta(chi2) within one mesh is safe; across meshes it is not.
+
+RECOMMENDATIONS
+
+  A. Keep spacez = 0.5 and box_ref_length = 30 as production defaults. The bias
+     they introduce is 25x smaller than the parameter uncertainties.
+  B. Fix spacez and box_ref_length once per campaign and record them alongside
+     the results. Never compare absolute chi2 across different values, or across
+     code versions.
+  C. Set box_ref_length >= the thickest box you intend to fit. Above it the
+     in-box mesh coarsens past spacez (the model warns); the error grows as
+     h_box^2, so a 55 A box at box_ref 30 reaches 4.5 sigma at one q point.
+  D. Confirm mesh convergence once per campaign, not per fit: refit the final
+     answer at spacez/2 and check the parameters move much less than their
+     error bars. Cost is ~4x per evaluation.
+  E. For the multistart, treat ~1.3 logL as a mesh noise floor on candidate
+     RANKING. Candidates closer than that cannot be ordered on the default mesh;
+     re-score the shortlist at spacez/2 before declaring a winner. The 11-20 logL
+     merge tolerance is unaffected (mesh noise is ~11%% of it).
+  F. Refine spacez, never box_ref_length alone -- the two error terms partially
+     cancel, so refining one degrades absolute chi2.
+
+
+saved julia\resolution_study.npz
