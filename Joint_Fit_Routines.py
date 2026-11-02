@@ -1035,7 +1035,7 @@ class JointFit(QObject):
                 method='emcee', params=self.emcee_params, burn=0, steps=emcee_steps,
                 thin=emcee_thin, is_weighted=('w/o' not in fit_scale), nwalkers=emcee_walkers,
                 workers=_workers, reuse_sampler=reuse_sampler)
-            return fit_report(self.result), 'None'
+            return self._report(), 'None'
 
         if fit_method == "leastsq":
             self.fitter = Minimizer(self.residual, self.master_params,
@@ -1059,7 +1059,43 @@ class JointFit(QObject):
         self.result = self.fitter.minimize(method=fit_method,
                                            params=self.master_params,
                                            **fit_kws)
-        return fit_report(self.result), self.result.message
+        return self._report(), self.result.message
+
+    def _report(self):
+        """lmfit's fit_report plus each objective's derived quantities.
+
+        A model may expose ``derived_report(result, keymap, label)``, reporting a
+        FUNCTION of its fitted parameters with the error propagated through
+        ``result.covar`` -- XLayersPDB_XPR's top-referenced insertion, whose
+        relation to the fitted (centroid-referenced) one depends on theta and phi.
+        The keymap is what makes it work here: master parameters are namespaced
+        per dataset unless shared, so the model cannot find 'protins' by name.
+
+        One block per objective, but a SHARED insertion+orientation gives every
+        dataset the same three master parameters and hence the same block, so
+        duplicates are collapsed.
+        """
+        rep = fit_report(self.result)
+        blocks, seen = [], set()
+        for idx, obj in enumerate(self.objectives):
+            func = obj.get('func')
+            derive = getattr(func, 'derived_report', None)
+            if derive is None:
+                continue
+            keymap = {k: self._master_key(idx, k)
+                      for k in ('protins', 'theta', 'phi')}
+            key = tuple(sorted(keymap.values()))
+            if key in seen:
+                continue
+            try:
+                txt = derive(self.result, keymap=keymap,
+                             label='(%s)' % self.objective_names[idx]) or ''
+            except Exception:
+                txt = ''
+            if txt:
+                seen.add(key)
+                blocks.append(txt)
+        return rep + '\n\n' + '\n\n'.join(blocks) if blocks else rep
 
     # ----------------------------------------------------------------- #
     #  viewer / GUI duck-typing contract

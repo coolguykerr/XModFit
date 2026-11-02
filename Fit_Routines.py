@@ -455,13 +455,18 @@ class Fit(QObject):
                                     nan_policy='raise',max_nfev=maxiter)
         if fit_method!='emcee':
             self.result = self.fitter.minimize(method=fit_method, params=self.fit_params)
-            self._canonicalize_result()
-            return fit_report(self.result),self.result.message
+            extra=self._canonicalize_result()
+            return self._report(extra),self.result.message
         else:
             self.result = self.fitter.minimize(method=fit_method, params=self.emcee_params, burn=0, steps=emcee_steps, thin=emcee_thin, is_weighted=True,
                                         nwalkers=emcee_walkers, workers=emcee_cores, reuse_sampler=reuse_sampler)
-            self._canonicalize_result()
-            return fit_report(self.result), 'None'
+            extra=self._canonicalize_result()
+            return self._report(extra), 'None'
+
+    def _report(self, extra=''):
+        """lmfit's fit_report, plus whatever the model derived from the result."""
+        rep = fit_report(self.result)
+        return rep + '\n\n' + extra if extra else rep
 
     def _canonicalize_result(self):
         """Let the model put periodic/degenerate parameters back in their window.
@@ -473,15 +478,33 @@ class Fit(QObject):
         .par all show the conventional value rather than the optimiser's raw
         coordinate. It re-labels an identical model, so chi2 and the residual are
         untouched.
+
+        Returns the model's derived_report(result) text, if it has one, for
+        appending to the fit report -- computed here because it has to run BEFORE
+        the fold (see below) and this is the only place that owns that ordering.
         """
+        # Derived quantities FIRST: a model may report a function of the fitted
+        # parameters with an error propagated through result.covar, and covar is in
+        # the optimiser's raw coordinates -- the ones canon is about to relabel. See
+        # XLayersPDB_XPR.derived_params, which needs the un-folded angles to get the
+        # SIGN of d(maxh)/d(theta) right.
+        extra = ''
+        if self.result is not None:
+            derive = getattr(self.func, 'derived_report', None)
+            if derive is not None:
+                try:
+                    extra = derive(self.result) or ''
+                except Exception:
+                    extra = ''
         canon = getattr(self.func, 'canonical_params', None)
         if canon is None or self.result is None:
-            return
+            return extra
         try:
             canon(self.result.params)
             canon(self.fit_params)
         except Exception:
             pass
+        return extra
 
 
     def set_emcee_minimizer(self,fit_scale='Linear',emcee_walkers=100, emcee_steps=100, emcee_cores=1,
