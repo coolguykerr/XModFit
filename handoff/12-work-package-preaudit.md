@@ -266,9 +266,9 @@ Low risk individually; the value is that the later refactor starts from a smalle
 - [ ] **A3.12** Fix stale docstrings and citations: `JointFit.set_emcee_minimizer` still
       says the orientation-seeded joint path is serial; `Joint_Fit_Routines.py` cites
       "xmodfit.py ~3246/3254" which no longer matches; `pdb_cache.py` claims every variant
-      uses it (`_dev_smooth` does not); `XLayersPDB_XPR.py` and `pdb_geometry.py` still
-      assert theta/phi do **not** transfer to XLayersPDB, which was retracted — they do,
-      bit-identically to scipy `'zx'`; and four paths in `viewer_template.html` point at
+      uses it (`_dev_smooth` does not); ~~`XLayersPDB_XPR.py` and `pdb_geometry.py` still
+      assert theta/phi do **not** transfer to XLayersPDB~~ (**done 2026-09-06** — both now
+      state the equality to scipy `'zx'`, re-verified over 475 angle pairs); and four paths in `viewer_template.html` point at
       skill-package files absent here (`scripts/make_browser_viewer.py`,
       `references/*.md`, `assets/ngl.js` — note `scripts/` now exists for other reasons).
 - [ ] **A4 — merge guards.** Add a short comment at each of these, since a careless

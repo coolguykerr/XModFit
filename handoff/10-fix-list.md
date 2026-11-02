@@ -74,15 +74,25 @@ across the six local commits before any push.
 
 **A0.6 The seeding study must not reach upstream — one step left.** [publishing risk]
 The September 2026 global-optimum seeding study was research, not an XModFit feature. It
-was **extracted to its own repository on 2026-09-04** (`../xpr-seeding-study`, 177 files,
-all 107 `endpoints_*.npz` archives preserved, no remote configured), and `.gitignore` now
-covers its paths so the untracked half cannot drift back in.
+was **extracted to its own repository on 2026-09-04** (`../xpr-seeding-study`, still with
+no remote configured), and `.gitignore` now covers its paths so the untracked half cannot
+drift back in. That repository has since grown to 1829 tracked files / 19.3 MB, including
+915 `.npz` — 703 endpoint archives under `julia/bakeoff/` with a `MANIFEST.sha256`, and
+212 cost maps. The 703 were produced *here*, in this repo's gitignored
+`julia/bakeoff/`, and were unversioned in either repo until 2026-09-06.
 
 What remains: commit **`7942458`** ("Add XPR global-seeding bake-off harness, saved
-endpoints and study write-ups", 114 files, ~3 MB mostly binary) still carries the tracked
-half in local history, **10 commits back** on `develop`. Nothing is pushed. Three routes,
-from the study's own exclusion manifest (now
-`../xpr-seeding-study/handoff/DO-NOT-COMMIT.md`):
+endpoints and study write-ups", 114 files, 2.18 MB, 92 of them `.npz`) still carries the
+tracked half in local history, **15 commits back** on `develop` as of 2026-09-06. Nothing
+is pushed.
+
+**Full inventory and the two verifications behind the recommendation:
+`handoff/seeding-study/AUDIT-7942458.md`** (untracked, and hook-guarded, so it cannot be
+pushed either). Re-checked 2026-09-06: (1) of the 15 commits from `7942458` to `HEAD`,
+**none touches any of the 114 files**; (2) all **114 are preserved in the study repo** —
+103 byte-identical, 11 differing only by line endings and later edits there, **0 absent**.
+So dropping the commit loses no content. Three routes, from the study's own exclusion
+manifest (now `../xpr-seeding-study/handoff/DO-NOT-COMMIT.md`):
 
 - **A — leave history, never push `develop`.** Push only curated branches that exclude
   `7942458`. Now enforced mechanically by `.githooks/pre-push`, which refuses any push
@@ -95,7 +105,7 @@ from the study's own exclusion manifest (now
   git branch backup-before-dropping-7942458 develop
   git rebase --onto 7942458^ 7942458 develop
   ```
-  Costs: 10 commits get new hashes (a second rewrite after A0.4), and
+  Costs: 15 commits get new hashes (a second rewrite after A0.4), and
   `pre-merge-backup-b3e1ab5`'s relationship to `develop` is invalidated.
 - **C — separate repository.** DONE, as above.
 
@@ -213,6 +223,29 @@ intended behaviour, so it needs no change -- only the code below it.
 The phase-0 fix the stage-2 plan calls for was never applied, so every bake-off harness
 carries a `hi = lo + 1e-9` workaround. *Fix:* allow the degenerate bound; delete the hack.
 
+**A1.15 The NGL viewer only understands the old top-referenced `protins`.** [wrong-result]
+Logged 2026-10-26. The user has confirmed this is expected: the viewer was written
+before XPR was integrated and hasn't been revisited since.
+The page places the protein's top slice centre at `-sum(d[:-1]) + protins`
+(`viewer_template.html:145-147`, `zref = ztop - zslice/2`), and `NGLViewerDialog.py`
+passes `func.protins` through raw (`:209`, `:466`). That matches `XLayersPDB`. Since the
+2026-09-08 XPR revision, however, `XLayersPDB_XPR.protins` is measured from the **mass
+centroid** (`handoff/05-xpr-julia.md` §3.9). So for any XPR model, any post-2026-09-08 fit,
+or any `configs_newconv/` value, the protein is drawn `maxh(theta, phi)` too deep: about
+14-31 A depending on template and pose, so a bound protein appears to hang clear of the
+film. Orientation is **not** affected: `rotRows` is the same extrinsic `'zx'`, `Rx(theta)Rz(phi)`, and
+the membrane is at +z in both. No error is raised, the picture is simply wrong, and
+`07-structure-viewer.md` §4 item 5 lists `_XPR` as supported, so nothing warns the user.
+*Fix:* when `func` has `protins_top` (`XLayersPDB_XPR.py:475`), send
+`func.protins_top()` to the page instead of `func.protins`, in both `scene_cfg_from_func`
+and `_snapshot`. Show both values, labelled, in the read-only panel. Then check that the
+two reference points really coincide: `maxh` is `max(r3·c + rad)` about the centroid,
+while the page's `zref` adds `fslice` and subtracts `zslice/2`, and A1.14 changes the
+rotation origin. Close it with audit claim 07 #5, run on an `_XPR` model
+(`zprot[0]`/`sim_ref` against the page's placement). Stub `.par` files
+(`stub_func_from_par`) carry no convention tag, so the standalone entry point needs a flag
+or must assume old-convention input.
+
 ## A2. Data folder
 
 **A2.1 Remove testing artefacts.** The untracked `Data/*.h5` (A0.3), the 3.9 MB
@@ -306,9 +339,10 @@ continuation got flattened. Parses fine; looks like a botched edit.
 **A3.12 Fix stale docstrings and citations:** `JointFit.set_emcee_minimizer:900` still says
 the orientation-seeded joint path is serial; `Joint_Fit_Routines.py:243` cites
 "xmodfit.py ~3246/3254", which no longer matches; `pdb_cache.py`'s docstring claims every
-variant uses it (`_dev_smooth` does not); `XLayersPDB_XPR.py:54-56` and
-`pdb_geometry.py:90-92` still assert theta/phi do **not** transfer to XLayersPDB, a claim
-the notes retracted (they are bit-identical to scipy `'zx'`); four paths in
+variant uses it (`_dev_smooth` does not); ~~`XLayersPDB_XPR.py:54-56` and
+`pdb_geometry.py:90-92` still assert theta/phi do **not** transfer to XLayersPDB~~ **(done
+2026-09-06** -- both now state the equality to scipy `'zx'`, re-verified over 475 angle
+pairs**)**; four paths in
 `viewer_template.html:14,25` point at skill-package files absent here
 (`scripts/make_browser_viewer.py`, `references/*.md`, `assets/ngl.js`).
 **A3.13 Reconcile contradictory recorded numbers:** the sigma-floor pixel count (26 in the

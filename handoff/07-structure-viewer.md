@@ -161,6 +161,10 @@ preserved. Joint engine details: `handoff/01-*`.
    present in `XLayersPDB`, `XLayersPDB_G`, `XLayersPDB_H`, `XLayersPDB_box`,
    `XLayersPDB_dev_smooth`, `XLayersPDB_XPR` (all also define `update_parameters` and
    `__d__`). Plain `XLayers` is correctly rejected. Models themselves: `handoff/04-pdb-xrr-models.md`.
+   **Except for `_XPR`, where attribute presence is not enough:** its `protins` is
+   centroid-referenced, but the page treats every `protins` as top-referenced, so XPR fits
+   are drawn about `maxh(theta, phi)` too deep (14-31 A). Orientation is correct. See
+   fix-list A1.15.
 6. Standalone, no fitting stack:
    `python Tools/StructureViewer/NGLViewerDialog.py fitparam.par structure.pdb Tools/StructureViewer/ngl.js`
    — `stub_func_from_par` (`:533-560`) parses `theta`/`phi`/`protins`/`fslice` and
@@ -278,7 +282,8 @@ Each hook below was verified against the current code.
 | 6 | Under a joint fit, switching the current objective reloads the viewer to that dataset's model | `Joint_Fit_Routines.py:1067-1073` docstring | Open the viewer during a joint fit, call `set_current` from the GUI/console, confirm reload |
 | 7 | `AA_ShareOpenGLContexts` is genuinely required (the tool "fails to open" without it) | `requirements_xmodfit_viewer.txt:168-172` | Comment out `xmodfit.py:7716` and reopen the tool |
 | 8 | The absolute density ramp's control points are the right physical anchors (tails 0.23, water 0.334, headgroups 0.42-0.50, Si/oxide 0.66-0.70, Au 4.42) | comment `NGLViewerDialog.py:127-163` | Spot-check against tabulated electron densities |
-| 9 | The non-`XLayersPDB` variants (`_G`, `_H`, `_box`, `_dev_smooth`, `_XPR`) render sensibly, not just import-compatibly | this doc only checked attribute presence | Open each with the same PDB and compare the slab stack against its EDP plot |
+| 9 | The non-`XLayersPDB` variants (`_G`, `_H`, `_box`, `_dev_smooth`, `_XPR`) render sensibly, not just import-compatibly | this doc only checked attribute presence | Open each with the same PDB and compare the slab stack against its EDP plot. **`_XPR` is already known to fail on insertion depth (fix-list A1.15)**; re-test it after that fix |
+| 12 | After A1.15, an `_XPR` model's displayed insertion equals its `protins_top()` | fix-list A1.15 | For one pose, compare the page's top placement with `xb.sim_ref`'s `protins_top` and with `func.protins_top()`; the residual should be sub-`fslice` |
 | 10 | `stub_func_from_par` still parses current `.par` output | `:533-560` | Save a `.par` from a current XLayersPDB fit and run the standalone entry point |
 | 11 | PySide6 fallback path works at all | `:61-65` | Import the module in a PySide6-only env |
 

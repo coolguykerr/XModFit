@@ -7,12 +7,12 @@ development notes, **not** by running anything. Each ends with a section 7 recor
 its author could not confirm. This is the plan for working through those, in the order
 that puts the highest-consequence claims first.
 
-**137 recorded claims** across the nine documents:
+**138 recorded claims** across the nine documents (07 gained #12 on 2026-10-26, for fix-list A1.15):
 
 | doc | claims | doc | claims |
 |---|---|---|---|
 | `01-joint-fit.md` | 14 | `06-gid2d.md` | 13 |
-| `02-mcmc-stack.md` | 12 | `07-structure-viewer.md` | 11 |
+| `02-mcmc-stack.md` | 12 | `07-structure-viewer.md` | 12 |
 | `03-orientation-seeding.md` | 20 | `08-core-app.md` | 15 |
 | `04-pdb-xrr-models.md` | 12 | `09-validation-and-env.md` | 15 |
 | `05-xpr-julia.md` | 25 | | |
@@ -65,7 +65,7 @@ Before any of this is worth starting:
 
 | # | Item | State |
 |---|---|---|
-| P0.1 | Seeding study out of the fold-in path (fix-list A0.6) | study extracted to `../xpr-seeding-study`; `.gitignore` and `.githooks/pre-push` in place; commit `7942458` still in local history — decision B pending |
+| P0.1 | Seeding study out of the fold-in path (fix-list A0.6) | study extracted to `../xpr-seeding-study`; `.gitignore` and `.githooks/pre-push` in place; commit `7942458` still in local history, 15 commits back — decision B pending, and **now unblocked**: `handoff/seeding-study/AUDIT-7942458.md` inventories all 114 files and verifies (2026-09-06) that no later commit touches any of them and that all 114 are preserved in the study repo, 0 absent |
 | P0.2 | `Data/d6test.h5` 26.8 MB blob out of history (A0.4) | done, `filter-branch`; backups still hold the blob until `gc` |
 | P0.3 | Unpublished tim3 structure out of the branch (A2.4) | done — but it remains in upstream's *published* history since 2024-09-24, which a branch deletion cannot undo |
 | P0.4 | Vendored third-party code has attribution (A3.15) | not done — `ngl.js` (NGL 2.4.0, 1.2 MB) and `julia/XPR/` |
@@ -78,6 +78,26 @@ git diff --stat origin/develop..<branch> -- julia/bakeoff \
     SEEDING_STUDY_TIM1.md STAGE2_SEEDING_PLAN.md   # must print nothing
 ```
 
+Run today it prints **114 files changed, 3035 insertions** — that is the expected state
+until B is done, not a fault in the check. The 114 files of `7942458` are still in
+`HEAD`'s tree and still tracked (112 under `julia/bakeoff/` plus the two root write-ups),
+because "extracted to its own repository" copied them out; it never removed them here.
+`.gitignore` covers the paths only for the *untracked* half. So the command is a genuine
+gate: it must print nothing before a push, and it will only do that once `7942458` is
+dropped or the branch is curated.
+
+`.githooks/pre-push` is the belt to this braces — it scans the commit range with
+`git log --name-only`, so it also catches a branch that adds and then deletes study
+files, which the tip-only diff would miss.
+
+One dependency runs the other way, and it is why B is deferrable but not indefinitely:
+**the 703 endpoint archives the study's published numbers rest on were produced in this
+repo's gitignored `julia/bakeoff/`.** They were copied into the study repo on 2026-09-06
+with per-file SHA-256 verification, so `julia/bakeoff/` here is now disposable — and note
+that route B's rebase *will* delete these 114 files from disk. Before doing it, confirm
+`sha256sum -c julia/bakeoff/MANIFEST.sha256` passes in `../xpr-seeding-study`, since that
+repo has no remote and is the sole copy.
+
 ## 4. P1 — claims where being wrong corrupts a reported number
 
 These are the audit. Everything else is housekeeping by comparison.
@@ -89,8 +109,8 @@ These are the audit. Everything else is housekeeping by comparison.
 | P1.3 | `_eval_chisqr` compares joint vs individual on mismatched point sets when per-dataset ranges are used (A1.4) | 01 | Two datasets with different `#FitRange=`, compare its chi2 against one computed on `active_index()` |
 | P1.4 | GID2D must be fit in Log scale; one pixel holds 72% of the Linear weight | 06 | `GID2D._weight_report` on the shipped map; check the 72.2% and the `L_dom` 144 -> 313 A shift |
 | P1.5 | `window='engine'` sets `active = err > 0` and discards the q window, so reductions/chi2 may not match their docstrings | 06 | Compare `redchi` and the 1-D reductions between `window='model'` and `'engine'` on a windowed map. Recorded: identical params, `redchi` 0.131 -> 0.271 = exactly n/n_active |
-| P1.6 | XPR `cov_norm='protvol'` removes the dimensional inconsistency in `area_slices_sphere_seg!`, and `xb.grad` is exact with `cov` raw | 05 | Reference log-likelihoods (2box -1214.2981, 3box -600.6506, protein+2box -466.4557) to 1e-4; finite-difference the gradient off the grid-alignment kinks |
-| P1.7 | theta/phi transfer between XPR and XLayersPDB (bit-identical to scipy `'zx'`); `cov` and `protins` do not | 05 | Direct numeric comparison at several angle pairs. Two source docstrings still assert the retracted opposite (A3.12) |
+| P1.6 | XPR `cov_norm='protvol'` removes the dimensional inconsistency in `area_slices_sphere_seg!`, and `xb.grad` is exact with `cov` raw | 05 | Reference log-likelihoods (2box -1214.1600, 3box -600.6398, 4box -62408.5320, protein+2box -466.4557) to 1e-4; finite-difference the gradient off the grid-alignment kinks. **The gradient half is DONE 2026-09-08**: AD vs central differences is at the round-off floor for every parameter, and the only remaining kink is `sum(d)` on a 0.5 A node (`handoff/05-xpr-julia.md` 3.9, claim 26). Rebaselined onto the 2026-09-08 upstream |
+| P1.7 | theta/phi transfer between XPR and XLayersPDB (bit-identical to scipy `'zx'`); `cov` and `protins` do not | 05 | **PARTLY REFUTED 2026-09-04** (`xpr-seeding-study/TIM4_STAGE0_INVENTORY.md` §6b, mTIM4 corpus). `protins` **does** transfer: offset -0.01 A / -0.17 A on two datasets, below the 0.5 A grid. `cov` transfers **through a documented deterministic conversion**, not "not at all": `'approx'` wants `cov = frac*cov_scale(theta,phi)` (63-90 for this template), `'exact'` wants `cov = frac`. theta/phi confirmed independently here - XPR's theta optimum lands within 2 deg of the archived value and 180-theta is worse by 9-13x. So the correct statement is **all four pose coordinates transfer; absolute `logL` does not** (model discretization differs by 0.17-0.36% in R, which is 0.25-0.6x these data's error bars and therefore 20-42% in chi2). The two source docstrings that asserted the retracted theta/phi claim (`Functions/pdb_geometry.py:xpr_rotation_matrix` and `Functions/XRR/XLayersPDB_XPR.py`) were **fixed 2026-09-06** (A3.12) |
 | P1.8 | `pdb_cache.pdbread` counts waters as protein (A1.13) | new | Parse a raw vs stripped structure, diff electron totals. Expected to FAIL |
 | P1.9 | The MCMC fingerprint hashes `y[active_index()]`, so a backend from an unmasked run is rejected for a masked one | 08 | Round-trip an `.h5` across a mask change |
 | P1.10 | Angle canonicalisation is a relabelling only — chi2 and residuals untouched | 05, 08 | Fit with an out-of-window start, compare pre/post `chisqr`. Recorded caveat: a reflected theta flips the sign of its correlations |
@@ -168,3 +188,20 @@ fails when something is broken.
 - XPR claims need `XPR-main/test_data` from outside the repo, and the study harness cannot
   run from a clean clone at all (no `CONFIG.json`, missing `make_tim1_config.py`) — so P1.6
   and P1.7 are reproducible only on the original machine until B11 is addressed.
+- **Amended 2026-09-10.** On the original machine the harnesses *can* run again. The
+  2026-09-10 upstream integration broke all 32 of them on the sizing API
+  (`alloc_bounds_for` now returns a dict; `load()` dropped `max_sig`/`slab_headroom`),
+  which for part of that day made **no** XPR fitting possible in either repo. They were
+  migrated the same day and one real fit was run end to end to confirm it. Full record in
+  `05-xpr-julia.md` §3.10.1. Three consequences for this audit:
+  1. **The fingerprint to check provenance against is `2402cb195df0ce6f`**, not the
+     `432da5d0da1b10fe` recorded elsewhere on the day — that one was taken
+     mid-integration. Any claim keyed to the wrong value will look like a mismatch.
+  2. **The 32 harness files are freshly modified.** The change is mechanical and verified,
+     but it is *not* in any commit yet, so a diff-based audit will see churn across
+     `julia/bakeoff/` and `tests/recovered/check_aproj.py` that postdates every category
+     document.
+  3. **No number in any document was recomputed** and no completed analysis was re-run, so
+     every recorded result still refers to the revision it was measured under — and by
+     the fingerprint rule those archives still cannot be pooled with anything produced
+     from here on.

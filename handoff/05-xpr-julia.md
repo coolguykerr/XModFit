@@ -5,7 +5,7 @@
 **Category:** the differentiable Julia reflectivity model (`XLayersPDB_XPR`) and the homometry-seeded Ipopt multistart research programme built on it.
 **Status:** Research harness on top of a Working-but-unvalidated-live model class. `validate_xpr.py` is the only gate and it needs an out-of-tree `XPR-main/test_data`. No global-search fit method exists in the GUI.
 **Owner chat(s):** memory `xpr-julia-backend.md` and `homometry-seeding-for-xpr.md`; in-repo `STAGE2_SEEDING_PLAN.md` and `SEEDING_STUDY_TIM1.md`.
-**Last touched:** 2026-09-03 (`julia/bakeoff/run_armD.py`, `phys_seed.py`, `run_multistart.py`, `seed_utils.py`) - the most recently active work in the repo.
+**Last touched:** 2026-09-10 - integrated the 2026-09-10 upstream (all four of our asks accepted; two of our divergences retired), and measured what the parameter-dependent mesh costs on real data. See 3.9 and 3.10. Later the same day, migrated the 32 downstream harnesses onto the new sizing API and corrected the source fingerprint in circulation to `2402cb195df0ce6f`. See 3.10.1.
 
 > **MOVED, 2026-09-04 — read this first.** The seeding *study* half of this document has
 > been extracted to its own repository, `../xpr-seeding-study`: all of `julia/bakeoff/`
@@ -33,12 +33,13 @@ The plan had three stages: stage 1, the model class and forward evaluation (done
 
 | File | Lines | State | Role |
 |---|---|---|---|
-| `julia/XPR/src/XPR.jl` | 1370 | new-untracked | vendored + patched Julia model (upstream `XPR-main/XPR`) |
+| `julia/XPR/src/XPR.jl` | 1415 | new-untracked | vendored + patched Julia model (upstream `XPR-main/XPR`, **2026-09-08 revision**) |
+| `julia/merge_upstream.py` | 426 | new-untracked | re-applies the four divergences onto an upstream drop; anchored + asserted + idempotent (3.9) |
 | `julia/XPR/{Project,Manifest}.toml` | 16 + lock | new-untracked | ForwardDiff 1.4.5, SpecialFunctions 2.8.3, **Ipopt 1.15.0** (added here) |
-| `Functions/xpr_backend.py` | 529 | new-untracked | one juliacall session per process; load fingerprint; slab guard; `sim`/`grad`/`hess`/`jac`/`edp`/`sim_edp` |
-| `Functions/XRR/XLayersPDB_XPR.py` | 584 | new-untracked | the XModFit model class |
-| `Functions/pdb_geometry.py` | 165 | new-untracked | numba union volume + projected area, for coverage bookkeeping |
-| `validate_xpr.py` | 382 | new-untracked | regression gate; needs `../XPR-main/test_data` |
+| `Functions/xpr_backend.py` | 621 | new-untracked | one juliacall session per process; load fingerprint; slab guard; `sim`/`sim_ref`/`grad`/`hess`/`jac`/`edp`/`sim_edp`/`maxh` |
+| `Functions/XRR/XLayersPDB_XPR.py` | 772 | new-untracked | the XModFit model class |
+| `Functions/pdb_geometry.py` | 245 | new-untracked | numba union volume + projected area for coverage bookkeeping; `com_extent`/`com_extent_grad` for the insertion conversion |
+| `validate_xpr.py` | 582 | new-untracked | regression gate; needs `../XPR-main/test_data` |
 | `requirements_xpr.txt` | 25 | new-untracked | pinned juliacall 0.9.28 + transitive deps |
 | `julia/README.md` | 171 | new-untracked | setup, juliapkg/SSL notes, divergences, Jacobian notes |
 | `STAGE2_SEEDING_PLAN.md` | 423 | new-untracked | stage-2 design + bake-off; **its own section 2 is flagged superseded** |
@@ -60,7 +61,8 @@ The plan had three stages: stage 1, the model class and forward evaluation (done
 | `julia/bakeoff/endpoints*.npz` | 92 files, 2.4 MB | new-untracked | every saved multistart run (see 4.5) |
 | `julia/bakeoff/results_p3i2.txt` | 13 | new-untracked | the bake-off table as printed |
 | `lmfit/minimizer.py` | - | modified (uncommitted) | `XLayersPDB_XPR` added to `_PDB_FUNCNAMES` (`:95`) |
-| `Fit_Routines.py` | - | modified (uncommitted) | `can_jac` / `residual_jac` / `_canonicalize_result`; `set_emcee_minimizer` tuple |
+| `Fit_Routines.py` | - | modified (uncommitted) | `can_jac` / `residual_jac` / `_canonicalize_result` / `_report`; `set_emcee_minimizer` tuple |
+| `Joint_Fit_Routines.py` | - | modified (uncommitted) | `_report`, appending each objective's derived block with a namespace keymap |
 | `xmodfit.py` | - | modified, **no XPR change** | grep for `xpr` is empty; modified for other categories |
 
 Out of scope, cross-reference only: the numba XLayersPDB family is `handoff/04-pdb-xrr-models.md`; MCMC/orientation walker seeding inside `lmfit` is `handoff/03-orientation-seeding.md`; the joint-fit engine is `handoff/01-*`.
@@ -73,10 +75,10 @@ Out of scope, cross-reference only: the numba XLayersPDB family is `handoff/04-p
 
 ### 3.2 Divergences of the vendored `XPR.jl`
 
-The header (`XPR.jl:1-40`) enumerates three; the file actually carries five patches, all marked inline.
+The header enumerates four; the file carries five distinct patches, all marked inline. **Do not hand-merge an upstream drop** - run `python julia/merge_upstream.py` (3.9), which re-applies all of them from anchors and fails loudly if upstream has moved one.
 
 1. **Optional keywords on `load_data`/`prealloc`** (`XPR.jl:210`, `:246`), each defaulting to the upstream literal: `xray_energy` (was 10.0), `fres` (was `true`), and the three slab-sizing ones `max_box_length` (was a literal 30 A/box), `max_sig` (was 5 A), `slab_headroom` (new, 0). The sizing ones exist because overrunning `max_ed_slabs`/`max_refl_slabs` **segfaults, it does not raise** - and a segfault in the Qt process takes XModFit down.
-2. **`XPR_edp` / `XPR_sim_edp`** (`:1268`, `:1297`), returning the smeared EDP, the second alongside R from one `XPR!` call (`sim` then `edp` runs the forward model twice; `sim_edp` is claimed ~1.9x faster).
+2. **`XPR_edp` / `XPR_sim_edp` / `XPR_maxh`**, returning the smeared EDP (the second alongside R and the protein height from one `XPR!` call - `sim` then `edp` runs the forward model twice; `sim_edp` is claimed ~1.9x faster), and `XPR_maxh(theta, phi)` -> `(maxh, mindepth, atom)`, the centroid-to-top offset with no model evaluation at all. `maxh` is what converts between the two definitions of the insertion parameter (3.9).
 3. **`XPR_jac(params, active)`** (`:1335`), `dR_i/dp_j` by forward-mode AD over a subset. `const JAC_CHUNK = 4` (`:1328`) **pins** the ForwardDiff chunk: the default derives from `length(x)`, and letting it float makes Julia recompile the model (~3 s) every time the varying set changes.
 4. **Unit-cube reparameterisation** (`to_physical`, `:87`, applied at `:1178` inside `XPR!`). `load_data(...; param_lower, param_upper)`, each 8+2n long, makes every entry point take a `[0,1]` vector; because the map is *inside* the AD tape, `XPR_grad`/`XPR_hess`/`XPR_jac` come back already chain-ruled in normalised coordinates. Motivation: raw `cond(J^T J)` ~ 1e13. Omit the bounds and behaviour is unchanged in physical units.
 5. **`int_pts` allocation fix** (`:336-352`), not in the header. `TempVars.int_pts` is `zeros(T, 2*max_intersect, 2)` with `max_intersect = N(N-1)/2`, 6.6e6 entries for 1815 atoms; `TempVars` is parameterised by `T`, so nested Hessian duals (~169 components) made that one array ~9 GB. It is read only by `greens!`, i.e. `vol_calc="exact"`, so it (with `cell_max`/`max_neighbor`) is now sized to 1 under `"approx"`.
@@ -115,6 +117,239 @@ Sixth change, in `Project.toml`: **Ipopt 1.15.0**, purely for the bake-off. Pre-
 `parameter_columns(names)` (`XLayersPDB_XPR.py:441`) maps lmfit names to `(column, sign)` in the 8+2n vector, returning `None` if *any* name is unmappable so the caller falls back to finite differences for the whole Jacobian rather than mixing exact and missing columns. Column `-1` means provably zero (top/bulk `d`); theta carries sign `-1` when the fold reflected it; `rho` of the first/last layer is unmappable (baked into `SimData` as `Float64`). `dydp(names)` (`:526`) calls `xb.jac` seeded only on live columns.
 
 `Fit.can_jac` (`Fit_Routines.py:315`) gates it: opt out with `fit.use_jacobian=False` (`:54`); refused for joint fits (`type(self.x)==dict`), for any `expr` constraint (needs an unimplemented chain rule), and **when fewer than 4 parameters vary** (`:330`). `Fit.residual_jac` (`:338`) mirrors `residual()`'s scaling term by term for all four fit scales. Handed to lmfit as `Dfun` for **leastsq only** (`:442`): `least_squares` takes its own `jac` with a different signature and no `Minimizer.__jacobian` wrapper, so the bounded-to-internal gradient rescaling would be missing. The `nvarys>=4` gate is measured - a clear win from 4 up, a loss at 2 - and in the emcee orientation seed scan (sub-fits with ~2 nuisance params) it made things *worse*: 30 -> 34 s serial, 51 -> 74 s at 16 workers, because every worker re-pays the ~3 s AD specialisation. End to end on 5 varying parameters: 261 model calls -> 41, same optimum to 1.3e-5.
+
+### 3.9 The 2026-09-08 upstream revision: insertion redefined, lattice rebuilt
+
+Elias Boshara's updated `XPR-main/XPR` changed two things in the physics layer, both
+for **smoothness**, and one of them changes the meaning of a fitted parameter.
+
+**(a) `d_protein` (XModFit's `protins`) is now measured from the protein's MASS
+CENTROID.** It used to be measured from the TOP of the protein: `rotate_protein!`
+translated by `z_top = d_protein - sum(box_lengths) - maxh` where
+`maxh = max_i (r3(theta,phi).c_i + rad_i)`. That `maximum` over atoms is only
+piecewise smooth in (theta, phi) - the topmost atom changes as the protein turns -
+so the *translation itself* carried a kink, which is the one thing a differentiable
+backend cannot afford. Upstream now subtracts the mass-weighted centroid from the
+coordinates in `prealloc` (hence the new `masses_py` argument to `load_data`) and
+translates by `z_offset = d_protein - sum(box_lengths)`, which is exactly linear in
+`d_protein` and exactly smooth in the angles. `rotate_protein!` returns the old
+quantity as `protein_height = d_protein + maxh`, and `XPR_sim_ref` passes it back as
+a third value.
+
+**(b) `smear_xy_interface!` was rebuilt onto one rigid lattice.** A single `spacez`
+grid spans the whole padded profile, the box interfaces are injected into it with
+`sort(unique(...))`, everything is ascending in z and `reflectivity!` reverses the
+views. Previously the smearing lattice and the reflectivity lattice were assembled
+separately out of parameter-dependent `collect(a:step:b)` ranges, so their *length*
+moved with the parameters. `eval_smeared!` lost its `ns` argument accordingly, and
+`smear_lattice`/`rho_hard_z`/`mu` are now sized `max_refl_slabs`.
+
+**Neither is a change of physics.** `validate_xpr.py` reproduces the stored protein
+reference `-466.4557` **exactly** at `protins = 13.358030329245691 - maxh`, and
+`protein_height` comes back as `13.358030329246`. The box references moved in the
+fourth decimal from the new lattice (`-1214.2981 -> -1214.1600`,
+`-600.6506 -> -600.6398`) and those are upstream's own new `demo.ipynb` numbers,
+which we now match to all printed digits, 4-box included.
+
+**Measured smoothness gain** (1697-atom test protein, `protein_2box.rrf`):
+
+* Along `phi = 112.59` the topmost atom changes at **10** values of `theta` in
+  `[1, 179]`, and `d(maxh)/d(theta)` genuinely jumps at each (4e-4 to 1.2e-1). The
+  old convention would have put that jump straight into `dlogL/dtheta`. It now does
+  not: worst left/right disagreement over those 10 angles **3.5e-5 relative**, with
+  the AD gradient sitting between the two one-sided differences. `validate_xpr.py`
+  asserts this and names the mechanism if it ever fails.
+* AD vs central differences for `(theta, phi, protins)` over 24 random orientations:
+  worst **7.4e-6** relative, at the round-off floor (it stops falling with `h`).
+* The `10*sig` grid-alignment kink is **gone**: at `sig = 3.4` (i.e. `10*sig = 34.0`,
+  exactly on a node) AD vs central differences is **1.4e-8**, where the old code
+  disagreed by ~1e-2. The smearing extent now goes through `floor`/`ceil`, which
+  carries no derivative.
+* The `sum(d)` kink **remains**, because `sort(unique(...))` merges a box interface
+  with the grid point it lands on. At `d = [11.0, 9.0]` the one-sided `dlogL/dd1`
+  slopes are `+39549.0` and `+39553.3` and stay ~4.3 apart as `h -> 0`; AD returns
+  the right-hand one. ~9e-3 relative in `dR/dd` at the worst q point. Measure zero,
+  but round-number defaults sit exactly on it.
+* Crossing a lattice node in `protins` (which moves the padded grid ends by 0.5 A
+  and changes the slab count) leaves the derivative stable to six digits.
+* Hessian symmetric to 2.3e-10; its `theta`/`phi`/`protins` rows match finite
+  differences of the AD gradient to 1.3e-8 / 1.2e-6 / 5.3e-7.
+
+**What XModFit does with the redefinition.** `protins` is passed to Julia raw, as
+always, so the fit is in the new coordinate and the AD chain stays exact. The old
+quantity is *derived and reported*, three ways:
+
+* `y()` publishes `protins_top` and `maxh` as scaler outputs, taking `protins_top`
+  from Julia's own `protein_height` so it cannot drift from what was evaluated.
+* `XLayersPDB_XPR.protins_top(protins, theta, phi)` / `.protins_from_top(...)`
+  broadcast, so an emcee chain converts in one pass with no model evaluations -
+  which is the honest way to get its credible interval.
+* `derived_params(result)` / `derived_report(result)` give it with a **propagated
+  error and its covariance against every other varying parameter**, linearising
+  `protins_top = protins + maxh(theta, phi)` through `result.covar` with
+  `d/d(protins) = 1` and `d(maxh)/d(theta, phi)` taken analytically from the atom
+  that currently attains the maximum (`pdb_geometry.com_extent_grad`).
+  `Fit._canonicalize_result` calls it **before** folding the angles, because
+  `result.covar` is in the optimiser's raw coordinates and, while `maxh` is exactly
+  invariant under the fold (`r3(360-theta, phi+180) == r3(theta, phi)`, so the
+  *value* does not care), the SIGN of `d(maxh)/d(theta)` does.
+  `Joint_Fit_Routines._report` does the same per objective through a namespace
+  keymap built from `_master_key`, collapsing duplicates when the pose is shared.
+  Both append a `[[Derived]]` block to the fit report.
+
+The linearisation is verified exact (Monte Carlo from the same covariance shrunk to
+1% agrees to 1.0002), but it is a linearisation of a `max` over atoms: on the
+validator's test fit, where `sigma(phi) = 8.2 deg`, the full-covariance Monte Carlo
+gives 0.374 against the linearised 0.488, a 31% difference. That is nonlinearity,
+not error. `derived_report` prints the active atom index and a tie count so a fit
+sitting on a kink is visible.
+
+**Sizing.** `protins = 0` now puts the centroid on the bottom interface, so roughly
+half the protein always hangs below the stack: there is *always* an overhang where
+the old convention needed none. `_prepare` therefore derives `slab_headroom` from
+`com_extent(theta, phi)` rather than from `protins` alone, and
+`xb.check_headroom` / `alloc_bounds_for` take `prot_up`/`prot_down`. The `min=0`
+bound on `protins` was wrong under the new convention and is now `-PROTINS_MAX`.
+
+### 3.10 The 2026-09-10 upstream, and what the moving mesh actually costs
+
+Upstream took all four asks from `XPR_FEEDBACK_FOR_ELIAS_2026-09-09.md`: `spacez` and
+`min_box_length_sum` are keyword arguments, an out-of-window protein is a hard
+`error("protein out of bounds")`, and `XPRsim._import_pdb` gives the CAL ion calcium's
+mass (plus `.capitalize()` on the element lookup). **Two of our divergences became
+upstream features and were retired** -- the `max_box_length`/`max_sig` sizing keywords
+and `slab_headroom`. `julia/merge_upstream.py` is rebaselined; it re-applies four
+divergences now, not five, and is idempotent.
+
+All four of upstream's `demo.ipynb` references reproduce to every printed digit:
+2-box **-1212.2127**, 3-box **-600.1768**, 4-box **-62404.0635**, protein+2box
+**-464.6397** at `protins = -13.717` (the demo now quotes the centroid-referenced
+pose directly, which was the fifth thing we asked for).
+
+**The sizing contract split in two, and conflating the halves is silent.** Measured:
+
+| argument | changes the answer? | why |
+|---|---|---|
+| `spacez` | **YES** | mesh outside the boxes, and `cells_per_box = ceil(box_ref/spacez)` |
+| `box_ref_length` (-> `max_box_length`) | **YES** | in-box mesh `d_b*spacez/box_ref` |
+| `d_protein_bounds` | no (4e-11) | extends constant-density far field; but Julia ERRORS outside it |
+| `sig_max` | no (6e-11) | Gaussian tail length |
+| `min_box_length_sum` | no (4e-13) | trims top cells |
+
+So `_param_box`/`alloc_bounds_for` derive the *fatal* window from the lmfit bounds
+and the *answer-bearing* mesh from `spacez`/`box_ref_length`, which are model
+attributes and deliberately NOT bounds-derived: two people fitting the same data with
+different `d` bounds must get the same chi2. The old ratcheting `_quantize_up` sizing
+is gone -- under the new code it would have stepped the objective mid-descent.
+`check_headroom` now mirrors Julia's window test (using the rotation-invariant
+`prot_extent`, as upstream does) and RAISES; box-length and `sig` overruns only warn,
+because they degrade gracefully.
+
+**The resolution study (`julia/resolution_study.py`, report in
+`julia/resolution_study_report.txt`), on real data:** mTIM3 `d20_tim3_1` + `t3hmmm`,
+94 points, q 0.028-0.560, median sigma/R 0.94%.
+
+1. **Convergence is clean O(h^2)** -- observed order 1.87 then 1.97 over
+   `spacez` 0.5/0.25/0.125/0.0625, Richardson limit logL = -195.035. The default mesh
+   is off by **+1.76 in logL (-3.51 in chi2)**.
+2. **The error is a smooth q^1.91 distortion of R**, from -6e-5 (q<0.1) to +4.6e-3
+   (q>0.5), worst point 0.168 sigma, `sum((dR/sigma)^2) = 0.355`. **R/R_F and raw R
+   carry the SAME relative error to 1.7e-16** -- the Fresnel divisor is analytic in q
+   and mesh-independent, so normalising changes nothing.
+3. **The parameter-dependent half is the MINOR half.** Only the in-box spacing
+   moves with the parameters; by the model-difference norm `sum((dR/sigma)^2)` it is
+   **6.8%** of the total at the fitted point, and the rigid `spacez` region dominates.
+   The two also have OPPOSITE SIGNS in chi2 (+1.24 in-box vs -3.45 total), i.e. they
+   partially cancel -- which is why raising `box_ref_length` alone makes absolute chi2
+   *worse*, and why exposing `spacez` was the ask that mattered. The in-box part alone
+   scales as **h_box^1.96** and is 2.7e-4 in R at the fitted `d1`, 35x below the noise.
+4. **It does not bias the answer, pose included.** Two real 8-parameter fits,
+   default vs `spacez=0.125`: every fitted value moves by **<= 0.030 of its own
+   standard error**. Releasing `theta`/`phi` as well (10 parameters) the worst shift is
+   **0.037 sigma**, with the orientation moving **0.037 deg in theta and 0.113 deg in
+   phi** -- against a campaign pose tolerance of ~5 deg. Cross-evaluating, the
+   default-mesh parameters cost only **+0.29 chi2** on the fine mesh, while the
+   **+0.52 chi2** common-mode offset cancels from any Delta(chi2).
+5. **For the global search it is small but not nothing.** Over 55 candidates drawn
+   from the fit covariance within +100 chi2, the mesh error has sd **2.53 chi2 =
+   1.26 logL** -- about **11%** of the tightest basin-merge tolerance (11 logL).
+   Common-mode to first order; only its variation between candidates can reorder them.
+
+**Recommendations** (full list printed by the study; summary here): keep
+`spacez=0.5`/`box_ref_length=30` as production defaults, the bias is 25x smaller than
+the parameter errors; fix both once per campaign and RECORD them, because absolute
+chi2 is not transferable across them or across code versions; set `box_ref_length` >=
+the thickest box you will fit (above it the in-box mesh coarsens past `spacez` and the
+model warns); confirm convergence once per campaign by refitting the final answer at
+`spacez/2`; for the multistart treat **~1.3 logL as a mesh noise floor on candidate
+RANKING** and re-score the shortlist at `spacez/2` before declaring a winner; and
+refine `spacez`, never `box_ref_length` alone.
+
+### 3.10.1 The downstream migration, and a fingerprint correction (2026-09-10)
+
+Retiring the two divergences in 3.10 **broke every offline fitting harness**, in both this
+repo and `../xpr-seeding-study`. The model itself was fine; the callers were not:
+
+* `xb.alloc_bounds_for()` returns a **dict** (`max_box_length`, `sig_max`, `spacez`,
+  `min_box_length_sum`, `d_protein_bounds`). Every harness still did
+  `mbl, ms, sh = xb.alloc_bounds_for(...)` -> `ValueError: too many values to unpack
+  (expected 3)`.
+* `xb.load()` no longer accepts `max_sig=` or `slab_headroom=`.
+
+**Migrated the same day: 32 files, +81/-89 lines.** 31 harnesses (10 in
+`julia/bakeoff/`, 10 in the study's mirror of it, 11 in the study's
+`stage0_tim4/`) now do `sizing = xb.alloc_bounds_for(...)` and splat `**sizing` into
+`xb.load()`, which is the pattern `Functions/XRR/XLayersPDB_XPR.py:707` already used. Five
+scripts also echoed the old 3-tuple (`alloc(box=.. sig=.. head=..)`) and now print the
+whole dict, so nothing is silently dropped from a run log.
+
+`slab_headroom` was **dropped, not translated.** `julia/merge_upstream.py:120` records it
+as obsolete because the slab count no longer depends on the parameters, so there is no
+proposal it could protect against; no replacement value was invented for it.
+`min_box_length_sum` is its nearest relative but is not the same quantity.
+
+`tests/recovered/check_aproj.py` is the one caller that talks to Julia directly rather than
+through the bridge. Besides `max_sig` -> `sig_max` it needed **`masses_py=`** added, which
+the new `load_data` requires for the mass-centroid recentring; the script already unpacked
+the masses from `pdbread` and was discarding them.
+
+**Verification.** `stage0_tim4/tolerance_scale_tim3.py t5lowis` under
+`XPR_PIN=pose XPR_CFGDIR=configs_newconv/tim3_cond`: exit 0, 12 datasets x (own optimum +
+pinned-pose re-optimise) = 24 real fits, every `-logL` finite (20.267-52.128), no NaN and
+no warnings. Separately, `alloc_bounds_for`'s dict keys were asserted to be a subset of
+`load()`'s parameters, and all 32 files byte-compile. **No published number was recomputed
+and no completed analysis was re-run.**
+
+> **Correction for anyone checking provenance.** The source fingerprint of this tree is
+> **`2402cb195df0ce6f`**, not the `432da5d0da1b10fe` that was in circulation on the day --
+> that value appears to have been taken mid-integration, between `XPR.jl` (11:51) and
+> `XLayersPDB_XPR.py` (12:19). The migration itself **cannot** move the fingerprint:
+> `source_fingerprint()` hashes only the six MODEL sources, and none of them is a harness
+> script. The conclusion that mattered is unaffected -- the corpus is still either
+> unstamped (pre-2026-09-08) or `b815f595af37b2cc`, so **archives produced under this
+> revision must not be pooled with it**, and `stage0_tim4/archive_guard.py` enforces that
+> (re-verified after the migration: 2587 archives, all `PRE-2026-09-08`, single
+> convention).
+
+**`run_multistart.py` had diverged into a dead duplicate.** The study's copy carried
+neither `XPR_OUT_DIR` nor the `src_sha256` stamp, and could not run at all: it derived
+`REPO` as `HERE/../..`, but that repo carries the harness and **not** the model (no
+`Functions/`, no `julia/XPR/`), so it died on `ModuleNotFoundError: No module named
+'Functions'`. Porting the two blocks verbatim would have been worse than leaving it --
+`source_fingerprint()`'s `root` is derived the same way, so all five model files would have
+hashed to `MISSING` and every archive would have carried an authoritative-looking stamp of
+nothing. It now resolves `REPO` through `XMODFIT_ROOT` (the convention the other 16 study
+scripts already used unanimously), reads the five model files from there and `solvers.jl`
+from its own directory (the copy `jl.include` actually loads; byte-identical to ours
+today), and keeps the label strings unchanged so **both copies emit a bit-identical stamp**
+-- verified, both give `2402cb195df0ce6f`. Apart from that path resolution the two files
+are now the same, and the rest of the two `julia/bakeoff/` trees was already byte-identical.
+
+Two things an auditor should know about that copy: `stage0_tim4/run_wave.py` defaults
+`XMODFIT_BAKEOFF` to **this** repo's `julia/bakeoff`, so production waves have always
+executed our copy and the study copy is still not on any live path; and
+`archive_guard.assert_single()` refuses via `SystemExit`, not a catchable `Exception`, so a
+caller wrapping it in `except Exception` will not see it fire.
 
 ### 3.7 Registration in upstream files
 
@@ -158,7 +393,20 @@ The first MCMC step is slow for three reasons, none of them the sampler: Julia s
 
 ### 4.3 Regression gate
 
-`python validate_xpr.py [path/to/XPR-main/test_data]` (defaults to `<repo>/../XPR-main/test_data`). Checks the three published `demo.ipynb` log-likelihoods to 1e-3 - 2-box `-1214.2981` (`:84`), 3-box `-600.6506` (`:91`), protein+2box `-466.4557` (`:100`) - plus the grid footprint against XPR's own union area, coverage consistency between `vol_calc` modes, EDP output, grad/hess finiteness, leastsq and emcee through `Fit_Routines`, angle canonicalisation, the normalised-load round trip, and the analytic Jacobian against central differences.
+`python validate_xpr.py [path/to/XPR-main/test_data]` (defaults to `<repo>/../XPR-main/test_data`). **Run 2026-09-08 against the new upstream: ALL CHECKS PASSED.**
+
+Checks the published `demo.ipynb` log-likelihoods to 1e-3 - 2-box `-1214.1600`, 3-box `-600.6398`, 4-box `-62408.5320` (new), protein+2box `-466.4557` at `protins = 13.358030329245691 - maxh` - plus, added with the 2026-09-08 integration:
+
+* `maxh`/`mindepth` from `XPR_maxh` against `pdb_geometry.com_extent`, **bit-identical**, same argmax atom;
+* Julia's `protein_height == protins + maxh` to 1e-9, and `protins_top`/`protins_from_top` round-tripping;
+* `com_extent_grad` against central differences (worst 1.2e-9);
+* **the smoothness assertion**: `dlogL/dtheta` one-sided differences at all 10 atom-switch angles, failing with the message "the insertion offset has leaked back into the forward model" if it regresses;
+* upstream demo parity for the protein cell after correcting the documented CAL-mass divergence (below), `-897.7146` to 2e-3;
+* `derived_params`' propagated error against Monte Carlo at 1% of sigma (must match to 2%, this is the Jacobian test) and at full sigma (loose bound only - see 3.9).
+
+Then as before: the grid footprint against XPR's own union area, coverage consistency between `vol_calc` modes, EDP output, grad/hess finiteness, leastsq and emcee through `Fit_Routines`, angle canonicalisation, the normalised-load round trip, and the analytic Jacobian against central differences (worst 3.7e-6; `use_jacobian` 271 -> 33 residual calls, same chi2 to 3e-9).
+
+**One knowing divergence from upstream `XPRsim.py`, found here.** `test_data/protein.pdb` line 2 is a calcium ion named `CAL` whose element columns are blank, so Bio.PDB guesses element `'C'`. `XPRsim._import_pdb` overrides the name to `'Ca'` for the electron count and the radius but takes the **mass** from `atom.element`, i.e. 12.011; `Functions/pdb_cache.pdbread` uses calcium's 40.078 for all three, which is right and is what every numba `XLayersPDB*` already does. One atom in 1697, but it moves the mass centroid - and hence the zero of `protins` - by **0.0345 A** on this structure. `validate_xpr.py` corrects for it explicitly and then matches `-897.7146` to 8e-4, which is how we know that is the whole of the difference. Worth telling Elias: his line is inconsistent with itself, not just with us.
 
 ### 4.4 The recommended production recipe (settled)
 
@@ -215,9 +463,39 @@ Why Sobol: perfect stratification at powers of two (64 Sobol points put exactly 
 
 ### 4.8 Parameter transfer to/from XLayersPDB (in scope, and important)
 
-* **theta/phi DO transfer.** Recorded once as "do not transfer"; that was **wrong**, corrected 2026-09-02. XPR's hand-written matrix in `rotate_protein!` (`julia/XPR/src/XPR.jl:406-409`) - rows `[cosP,-sinP,0]`, `[cosT sinP, cosT cosP, -sinT]`, `[sinT sinP, sinT cosP, cosT]` - is bit-identical to scipy `R.from_euler('zx',[phi,theta],degrees=True)`, which is exactly what `XLayersPDB.ED_profrot` uses; `R_xpr @ v == rot.apply(v)` to 4e-16. `XPR.jl:1185-1186` converts deg->rad internally, so the *parameter* is in degrees on both sides. Verified at 4 angle pairs and empirically: XPR's p1d2 pose (34.7, 115.2) lands inside the XLayersPDB cluster for the same film series (34.3-35.7, 104-115). **Safe to seed XLayersPDB from XPR angles and to feed them to the NGL viewer.** **Two source docstrings still assert the old wrong claim:** `Functions/XRR/XLayersPDB_XPR.py:54-56` and `Functions/pdb_geometry.py:90-92`.
-* **`cov` does NOT transfer**: XPR raw `n_s*A` ~26 vs XLayersPDB's fraction ~0.37. Convert via `cov_scale` / `coverage_fraction` first.
-* **`protins` is close but unverified**: XPR uses `z_top = protins - sum(d) - maxh` (`XPR.jl:412-413`), a different z reference.
+* **theta/phi DO transfer.** Recorded once as "do not transfer"; that was **wrong**, corrected 2026-09-02. XPR's hand-written matrix in `rotate_protein!` (`julia/XPR/src/XPR.jl:406-409`) - rows `[cosP,-sinP,0]`, `[cosT sinP, cosT cosP, -sinT]`, `[sinT sinP, sinT cosP, cosT]` - is bit-identical to scipy `R.from_euler('zx',[phi,theta],degrees=True)`, which is exactly what `XLayersPDB.ED_profrot` uses; `R_xpr @ v == rot.apply(v)` to 4e-16. `XPR.jl:1185-1186` converts deg->rad internally, so the *parameter* is in degrees on both sides. Verified at 4 angle pairs and empirically: XPR's p1d2 pose (34.7, 115.2) lands inside the XLayersPDB cluster for the same film series (34.3-35.7, 104-115). **Safe to seed XLayersPDB from XPR angles and to feed them to the NGL viewer.** **Both source docstrings that asserted the old wrong claim are now fixed (2026-09-06):** `Functions/pdb_geometry.py:xpr_rotation_matrix` and the Euler-convention bullet in `Functions/XRR/XLayersPDB_XPR.py` both state the equality and cite this section.
+* **`cov` transfers, but only after rescaling** - it is not a raw copy: XPR's `cov` is the raw `n_s*A` (~26) where XLayersPDB carries a covered fraction (~0.37). The conversion is **asymmetric between volume modes** (`validate_xpr.py:133`): `vol_calc='approx'` (what `run_multistart.py` uses) wants `cov = frac*cov_scale(theta,phi)`, `vol_calc='exact'` wants `cov = frac` directly. `cov_scale` is 63-90 for `Tim4-orig-cen.pdb`. With that rescaling applied, XPR's free-`cov` optimum at an archived XLayersPDB pose lands **within 1%** of the archived value on all five TIM4 datasets tested. Passing the *scaled* value to `'exact'` inflates chi2 ~2x and looks convincingly like a model disagreement; reading XPR's `cov` as a fraction gives chi2 15,000-78,000 against archived 321-729. Both mistakes were made and caught.
+* **`protins` NO LONGER transfers - `protins_top` does.** This bullet used to say
+  `protins` transfers directly, verified 2026-09-04 (`xpr-seeding-study/TIM4_STAGE0_INVENTORY.md`
+  §6b): profiling `protins` in XPR with theta/phi/boxes/sig pinned to an archived
+  XLayersPDB fit and `cov` matched by `frac*cov_scale` put the XPR optimum at
+  **-0.01 A** (`Tim4_F2`, archived 7.010) and **-0.17 A** (`p4m2_tim4`, archived
+  6.174). **That measurement stands and its conclusion still holds - about the OLD
+  parameter.** The mechanism it identified was that XPR's z reference
+  `z_top = protins - sum(d) - maxh` agreed with XLayersPDB's
+  `ztop_grid = -sum(d[:-1]) + protins`: both anchor the TOP of the protein.
+
+  The 2026-09-08 upstream revision moved XPR's anchor to the mass centroid (3.9), so
+  the transferable quantity is now `protins_top = protins + maxh(theta, phi)`, and
+  raw `protins` differs from XLayersPDB's by `maxh` - **27.08 A on the 1697-atom test
+  protein at (32.92, 112.59)**, i.e. larger than the film. Use
+  `XLayersPDB_XPR.protins_top()` and `.protins_from_top()`; both broadcast, so an
+  archived chain or a whole seeding-study endpoint table converts in one pass. The
+  old measurement is worth re-running once in the new coordinate, as claim 11 now
+  says, but the geometry says it must come out the same.
+
+  **MIGRATION, and it is not optional.** Every stored XPR `protins` predating
+  2026-09-08 is in the old convention: saved `.par`/`.xpar` files, the
+  `xpr-seeding-study` `endpoints_*.npz` tables, the TIM1/TIM3/TIM4 campaign records,
+  and anything seeded from an XLayersPDB fit. Reading one back into the new model
+  silently misplaces the protein by `maxh`, which is tens of Angstroms - it will not
+  look like a subtle error, but it will look like a bad starting guess rather than a
+  unit mismatch. Also note `protins`' default lower bound changed from 0 to
+  `-PROTINS_MAX`, and **a saved `.par` restores its own bounds**, so an old file
+  reloaded into the new model keeps `min=0` and will rail against it.
+
+  Combined with the theta/phi result above: **theta, phi and cov transfer; the
+  insertion transfers only through `protins_top`**; absolute `logL` does not.
 * **`sig` does not map structurally**: one scalar here vs a per-layer mpar column there.
 
 ## 5. Contact surface with stock XModFit
@@ -275,7 +553,7 @@ Merge risk is low on the additive side and concentrated in two places: the `eval
 
 **Stale documentation inside the source (fix on merge)**
 
-25. `XLayersPDB_XPR.py:54-56` and `pdb_geometry.py:90-92` still say theta/phi do not transfer. They do (4.8).
+25. ~~`XLayersPDB_XPR.py:54-56` and `pdb_geometry.py:90-92` still say theta/phi do not transfer.~~ **FIXED 2026-09-06** -- both now state the equality (they do transfer, 4.8).
 26. `XPR.jl`'s header says "Divergence 1 of 2" / "2 of 2" then "Divergence 3"; `julia/README.md:93` says "Two changes" then lists three; `STAGE2_SEEDING_PLAN.md:26` says "the 4 divergences". The actual count is 5 source patches plus the Ipopt dependency.
 27. `julia/bakeoff/README.md` covers 6 of 15 scripts and neither TIM1-era naming scheme. `run_multistart.py:10` references `make_tim1_config.py`, which **does not exist anywhere in the repo**.
 28. `STAGE2_SEEDING_PLAN.md:38` still describes the harness as living in `%TEMP%/bake`; it was repointed to the in-repo `julia/bakeoff/solvers.jl`, which is authoritative.
@@ -285,16 +563,16 @@ Merge risk is low on the additive side and concentrated in two places: the `eval
 | # | Claim | Asserted by | Suggested check |
 |---|---|---|---|
 | 1 | `validate_xpr.py` passes | memory; plan `:20` | run it in `cmc-py39`; confirm `../XPR-main/test_data` still exists and note the out-of-repo coupling |
-| 2 | The three reference log-likelihoods are upstream `demo.ipynb` outputs, reproduced to 1e-4 | memory | diff against `XPR-main/demo.ipynb` stored outputs; note the gate's tolerance is 1e-3 (`validate_xpr.py:84`), not 1e-4 |
+| 2 | The reference log-likelihoods are upstream `demo.ipynb` outputs, reproduced to 1e-4 | memory | **DONE 2026-09-08** against the new upstream. 2-box `-1214.1600`, 3-box `-600.6398`, 4-box `-62408.5320` all reproduce to every printed digit. The protein cell reproduces to 8e-4 *after* correcting the CAL-mass centroid offset of 0.0345 A (4.3) - without that correction it is 60 in logL out, which is the whole discrepancy and nothing else. Gate tolerance is 1e-3, not 1e-4 |
 | 3 | `XPR_grad` is EXACT for `XLayersPDB_XPR` because nothing derived is folded into `cov` | `xpr_backend.py:461-467` | complex-step or high-order FD on `logL` over all 10 free params at a **generic (non-grid-aligned)** point; expect ~1e-9 |
 | 4 | `projected_area` matches XPR's Green's-theorem union area to 0.07-0.31% at `fslice=0.5` | memory | re-run `validate_xpr.py:106-129` and record the per-orientation numbers |
-| 5 | `cov = frac*cov_scale` makes `'approx'` reproduce `'exact'` to 0.03-0.25% rms (2.8% raw) | memory; `validate_xpr.py:135-158` | re-run that block; confirm the 2.8% comparison is still printed |
+| 5 | `cov = frac*cov_scale` makes `'approx'` reproduce `'exact'` to 0.03-0.25% rms (2.8% raw) | memory; `validate_xpr.py:135-158` | **CONFIRMED (approximately) 2026-09-04 on mTIM4/Tim4-orig-cen**, `xpr-seeding-study/TIM4_STAGE0_INVENTORY.md` §6b. rms dR/R = 0.173% (`p4m2_tim4`) and 0.358% (`Tim4_F2`) - same order, but F2 sits *above* the quoted 0.03-0.25% band, so treat that band as test-protein-specific rather than a bound. **Important corollary the claim does not state:** on these data (median error 0.60-0.71%, chi2_red ~10) that sub-percent R difference is a **19.6-41.5% chi2 difference**. So `'approx'` and `'exact'` are interchangeable for *parameters* and NOT for absolute `logL`. Also note the mapping is asymmetric and easy to misuse: `'approx'` takes `cov = frac*cov_scale`, `'exact'` takes `cov = frac` directly (`validate_xpr.py:133`); passing the scaled value to `'exact'` inflates chi2 ~2x and looks like a model disagreement |
 | 6 | `alpha_approx` integrates to exactly `N/sum(pi r^2)` while the truth is `V_union/A_proj` | memory | integrate `alpha` from `XPR_edp` with all `rho` zeroed, at two orientations |
 | 7 | `electron_scale = N/V_union` is rotation invariant to 0.13% ("grid noise") | `XLayersPDB_XPR.py:301-305` | it is exactly invariant analytically, so 0.13% is grid error - confirm it scales with `fslice` |
 | 8 | Gauss-Newton `J^T J` within 0.2% of exact `-H`, and PSD where `-H` is not | plan `:330-336` | `hess_report.py` + `xb.jac` at a saved best endpoint; report `norm(H - J^T J)/norm(H)` and both eigenspectra |
 | 9 | `cond(J^T J)` ~ 1e13 raw / ~1e11 normalised; p3i2 has one near-flat direction | memory; plan phase 2 | `hess_report.py CONFIG.json md`; also name the softest eigenvector's composition |
-| 10 | theta/phi bit-identical to scipy `'zx'`, `R_xpr @ v == rot.apply(v)` to 4e-16 | memory, corrected 2026-09-02 | compare numerically at 8 angle pairs including theta=0/180 and phi=0/360, then fix the two stale docstrings (6.25) |
-| 11 | `protins` is "close but not verified identical" between XPR and XLayersPDB | memory | fit one dataset with both at pinned identical theta/phi and matched coverage fraction; derive the exact z offset from `XPR.jl:412` vs `XLayersPDB.ED_profrot` |
+| 10 | theta/phi bit-identical to scipy `'zx'`, `R_xpr @ v == rot.apply(v)` to 4e-16 | memory, corrected 2026-09-02 | **DONE 2026-09-06.** Re-verified over 475 pairs (theta 0-180 x phi 0-359): `4.4e-16` on the matrix vs `from_euler('zx',[phi,theta],degrees=True)`, `2.1e-14` on `rot.apply(v)` vs `M @ v` at 20 A, `3.3e-16` vs `R_x(theta) @ R_z(phi)`. Both stale docstrings fixed (was 6.25) |
+| 11 | `protins` transfers between XPR and XLayersPDB | memory; resolved 2026-09-04 | **SUPERSEDED 2026-09-08 by the upstream redefinition.** The 2026-09-04 measurement was correct and still is, but it was about the OLD top-anchored `protins`; upstream now anchors on the mass centroid, so the transferable quantity is `protins_top = protins + maxh` and raw `protins` differs by `maxh` (27.08 A on the test protein). See 4.8 for the migration. **Re-run the TIM4 profile in the new coordinate** to confirm the -0.01/-0.17 A agreement survives the reparameterisation; the geometry says it must, and `validate_xpr.py` already shows the *test* protein reproduces `-466.4557` exactly under the conversion, but the archived-fit comparison is the one that was quoted and it should be redone rather than assumed |
 | 12 | N=48 -> 100%, recommend 64, generalises | study sec 5 | it explicitly does **not** yet: 2 systems only. Run the planned third/fourth before quoting N=64 as general |
 | 13 | Arm B "wins 6-21x" pooled over seeds | study sec 3 | Sobol points within a run are dependent, so pooling 3 seeds x 128 as 384 independent trials is questionable. Recompute with the **run** as the unit of analysis |
 | 14 | "MD beats crystal by 26-31 in -logL" | study sec 6 | confirm both templates have effectively the same atom count (1693 vs 1697) and identical `electron_scale` treatment before comparing likelihoods |
@@ -309,6 +587,9 @@ Merge risk is low on the additive side and concentrated in two places: the `eval
 | 23 | "261 model calls -> 41, same optimum to 1.3e-5" | `julia/README.md:126-130` | `validate_xpr.py:352` prints a with/without comparison; re-run and record |
 | 24 | The 92 `.npz` files are internally consistent (same `LO`/`HI`/`FREE` per dataset) | this document | assert `LO`/`HI` match across arms for a given tag before any pooled statistic; also check `compare_arms.py`'s `FNAME` regex (`:32`) against the `BACKUP`/`PILOT16`/`B5only` names |
 | 25 | `p1d2_tim1`'s published pose is a seeding artifact and the flipped solution is a saddle 179 worse | study sec 6 | classify that pose directly with `xb.hess`. A strong claim about published work - verify before repeating it |
+| 26 | The `sum(d)` grid-alignment kink is a property of `sort(unique(...))` merging a box interface with the grid point it lands on, and AD returns the correct right-hand derivative | 3.9, measured 2026-09-08 | the *existence* of the kink is measured (one-sided slopes 4.3 apart, stable as `h -> 0`, at `d = [11.0, 9.0]`); the *mechanism* is inferred from reading `smear_xy_interface!`. Confirm by instrumenting `length(rall)` either side of the coincidence, and check whether `unique` on `ForwardDiff.Dual` compares by value (which would drop the interface point and its partials) or by object identity (which would not). If it is the former, upstream has a measure-zero AD bug worth reporting |
+| 27 | `protins_top`'s linearised error is exact, and its 31% disagreement with the full-covariance Monte Carlo on the validator's test fit is nonlinearity of `maxh` rather than a bug | 3.9, `validate_xpr.py` | **partly DONE 2026-09-08**: the small-step Monte Carlo agrees to 1.0002, which is the correctness half. The adequacy half is only shown on one fit at `sigma(phi) = 8.2 deg`; on a real TIM3/TIM4 fit with a better-determined orientation the two should converge, and if they do not, `protins_top()` over the emcee chain is the number to quote. Record the ratio the first time this is run on real data |
+| 28 | Elias's `XPRsim._import_pdb` is internally inconsistent for the `CAL` ion (name-override for electrons and radius, `atom.element` for mass) | 4.3, measured 2026-09-08 | measured and quantified here (0.0345 A of centroid shift on `protein.pdb`, worth 60 in logL at the demo point). **Send it upstream** - it is a one-line fix in `XPRsim.py`, and until it lands, any protein `protins` compared between XPRsim and XModFit carries that offset |
 
 ## 8. Consolidation candidates
 
