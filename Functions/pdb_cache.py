@@ -52,6 +52,31 @@ def _element_table():
     return ptable.set_index('symbol').T.to_dict('list')
 
 
+def _lookup(atominfo, element, atom_name, fname):
+    """``atominfo`` row for a Bio.PDB element symbol, tolerating its casing.
+
+    mendeleev keys the table by proper-case symbols (``Nd``, ``Zn``, ``Ca``) while
+    Bio.PDB upper-cases what it reads from the element columns and what it guesses
+    from an atom name, so ANY two-letter element missed the table and raised a bare
+    ``KeyError: 'ND'`` from inside the cache -- reproduced on ``Data/Nd9.pdb``.
+    Single-letter elements (the whole of a plain protein: C, N, O, S, H) were
+    unaffected, which is why it went unnoticed; selenomethionine, a bound Zn/Mg/Fe,
+    or a chloride would each have hit it.
+
+    Exact key first, so nothing that already worked can change; then the
+    capitalised form; then a message that names the file and the atom.
+    """
+    for key in (element, str(element).capitalize()):
+        if key in atominfo:
+            return atominfo[key]
+    raise KeyError(
+        "%s: no element data for atom %r (Bio.PDB element %r). If the PDB leaves "
+        "columns 77-78 blank, Bio.PDB guesses the element from the atom NAME, and "
+        "for a non-standard atom that guess is often wrong -- set the element "
+        "column, or add a name override next to the CAL one in pdb_cache.pdbread."
+        % (fname, atom_name, element))
+
+
 @lru_cache(maxsize=32)
 def pdbread(fname):
     """Parse ``fname`` and return per-atom ``(x, y, z, electrons, radius, mass)``.
@@ -59,6 +84,17 @@ def pdbread(fname):
     Keyed on ``fname`` alone, so all XLayersPDB* instances reading the same file
     share one parse.  Body is the byte-for-byte equivalent of the original
     ``XLayersPDB.pdbread`` method (element table now via ``_element_table()``).
+
+    **``mass`` is load-bearing geometry for XLayersPDB_XPR**, not bookkeeping. Since
+    XPR's 2026-09-08 revision it re-centres the coordinates on the MASS centroid and
+    measures ``protins`` from there, so a mis-typed atom moves the zero of the
+    insertion parameter. The ``CAL`` override below therefore has to set the mass as
+    well as the electron count and the radius -- upstream ``XPRsim._import_pdb``
+    overrides only the latter two and takes the mass from ``atom.element``, which on
+    a blank element column Bio.PDB guesses as ``'C'``; that is worth 0.0345 A of
+    centroid shift on ``XPR-main/test_data/protein.pdb``. Audited 2026-09-08 over
+    the 18 structures in ``Data/`` and ``../xpr-seeding-study``: every ``CAL`` is
+    correctly given calcium's 40.078 here.
     """
     atominfo = _element_table()
     pdbcode = 'struct'
@@ -80,9 +116,10 @@ def pdbread(fname):
             radius[ind] = atominfo['Ca'][1] / 100
             mass[ind] = atominfo['Ca'][2]
         else:
-            electrons[ind] = atominfo[atom.element][0]
-            radius[ind] = atominfo[atom.element][1] / 100
-            mass[ind] = atominfo[atom.element][2]
+            row = _lookup(atominfo, atom.element, atom.name, fname)
+            electrons[ind] = row[0]
+            radius[ind] = row[1] / 100
+            mass[ind] = row[2]
         ind += 1
 
     xcoord = np.squeeze(coord[:, 0])

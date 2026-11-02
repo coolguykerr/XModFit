@@ -390,10 +390,14 @@ def _read_template(key):
         coord = np.zeros((n, 3))
         for ind, atom in enumerate(atoms):
             coord[ind, :] = atom.coord
+            # mendeleev keys by proper-case symbol while Bio.PDB upper-cases the
+            # element, so any two-letter element (Nd, Zn, Se, Cl...) raised a bare
+            # KeyError here. Exact key first, so nothing that worked can change.
             sym = 'Ca' if atom.name == 'CAL' else atom.element
-            electrons[ind] = atominfo[sym][0]
-            radius[ind] = atominfo[sym][1] / 100
-            mass[ind] = atominfo[sym][2]
+            row = atominfo.get(sym) or atominfo[str(sym).capitalize()]
+            electrons[ind] = row[0]
+            radius[ind] = row[1] / 100
+            mass[ind] = row[2]
         """Centre the template once, on the unrotated coordinates.  The model is
         translation invariant, but centring makes max_i(|r_i| + rad_i) rotation
         invariant, which is what lets a single lab-frame lattice serve every
