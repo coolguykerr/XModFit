@@ -88,14 +88,94 @@ def _mark_area(x, y, radius, sx, sy, x0, y0, grid):
 def xpr_rotation_matrix(theta_deg, phi_deg):
     """XPR's rotation matrix -- rows r1, r2, r3 of ``rotate_protein!``.
 
-    NOT the scipy ``'zx'`` Euler convention XLayersPDB uses; angles are not
-    interchangeable between the two models.
+    Hand-written in Julia, but the SAME rotation ``XLayersPDB`` applies: it equals
+    ``Rotation.from_euler('zx', [phi, theta], degrees=True).as_matrix()``
+    (extrinsic, so ``R_x(theta) @ R_z(phi)``), which is exactly what
+    ``XLayersPDB.ED_profrot`` uses, and ``M @ v`` reproduces its ``rot.apply(v)``
+    -- 4e-16 on the matrix and 2e-14 on 20 A coordinates, over 475 (theta, phi)
+    pairs covering theta 0-180 and phi 0-359.  Both take the angles in DEGREES
+    (``XPR.jl`` converts to radians inside ``XPR!``), so theta/phi transfer between
+    the two models: safe to seed one from the other and to hand either to the NGL
+    viewer.  An earlier version of this docstring claimed they do not; that was
+    retracted 2026-09-02, see ``handoff/05-xpr-julia.md`` 4.8.
+
+    The ORIGIN of the rotation differs since XPR's 2026-09-08 revision: XLayersPDB
+    rotates the raw PDB coordinates about the file origin, XPR about the mass
+    centroid (``prealloc`` subtracts it at load time).  That is a pure translation,
+    so it does not touch the orientation and the angles still transfer -- but it is
+    absorbed into the insertion parameter, which is why XPR's ``protins`` is no
+    longer XLayersPDB's.  Use :func:`com_extent` to convert.
     """
     t = np.radians(float(theta_deg))
     p = np.radians(float(phi_deg))
     return np.array([[np.cos(p), -np.sin(p), 0.0],
                      [np.cos(t) * np.sin(p), np.cos(t) * np.cos(p), -np.sin(t)],
                      [np.sin(t) * np.sin(p), np.sin(t) * np.cos(p), np.cos(t)]])
+
+
+@lru_cache(maxsize=16)
+def com_coordinates(fname):
+    """``(coords - mass centroid, radii)`` for ``fname``, as XPR stores them.
+
+    XPR's ``prealloc`` subtracts the MASS-weighted centroid from the coordinates at
+    load time and measures its insertion parameter from there, so anything that
+    reasons about where the protein's ends fall has to use the same origin.
+    """
+    xc, yc, zc, _e, radius, mass = pdbread(fname)
+    coord = np.transpose(np.array([xc, yc, zc], dtype=float))
+    mass = np.asarray(mass, dtype=float)
+    com = (coord * mass[:, None]).sum(axis=0) / mass.sum()
+    return coord - com, np.asarray(radius, dtype=float)
+
+
+def com_extent(fname, theta, phi):
+    """``(maxh, mindepth, iatom)``: the protein's reach either side of its centroid.
+
+    Along the rotated z axis, ``maxh`` is the distance from the mass centroid to the
+    top of the topmost atomic sphere and ``mindepth`` the same downwards, so the
+    protein occupies ``[protins - mindepth, protins + maxh]`` above the bottom of
+    the box stack. ``maxh`` is the offset between XPR's two insertion conventions::
+
+        protins_top = protins + maxh(theta, phi)
+
+    with ``protins`` placing the CENTRE OF MASS (what XPR fits, post-2026-09-08) and
+    ``protins_top`` the TOP OF THE PROTEIN (the old XPR convention, and still the
+    one every numba ``XLayersPDB*`` model uses). Reproduces ``XPR.XPR_maxh``.
+
+    ``iatom`` is the 0-based index of the atom attaining the maximum. ``maxh`` is a
+    maximum over atoms, hence only piecewise smooth in (theta, phi) -- which is
+    precisely why the offset was taken out of the forward model -- and a derivative
+    needs to know which atom is active; see :func:`com_extent_grad`.
+    """
+    coord, radius = com_coordinates(fname)
+    proj = coord @ xpr_rotation_matrix(theta, phi)[2]
+    hi = proj + radius
+    k = int(np.argmax(hi))
+    return float(hi[k]), float(-np.min(proj - radius)), k
+
+
+def com_extent_grad(fname, theta, phi):
+    """``(maxh, d maxh/d theta, d maxh/d phi, iatom, nties)``, angles in DEGREES.
+
+    Exact wherever the topmost atom is unique -- ``maxh`` is then just
+    ``r3(theta, phi) . c_k + rad_k`` for that one atom -- which is almost everywhere.
+    ``nties`` counts the atoms whose top comes within 1e-6 A of the maximum: more
+    than one means (theta, phi) sits on a kink where ``maxh`` has a one-sided
+    derivative on each side and no two-sided one, so a propagated error bar there is
+    only indicative. Reported so a caller can say so rather than guess.
+    """
+    coord, radius = com_coordinates(fname)
+    t, p = np.radians(float(theta)), np.radians(float(phi))
+    st, ct, sp, cp = np.sin(t), np.cos(t), np.sin(p), np.cos(p)
+    r3 = np.array([st * sp, st * cp, ct])
+    dr3_dt = np.array([ct * sp, ct * cp, -st])
+    dr3_dp = np.array([st * cp, -st * sp, 0.0])
+    hi = coord @ r3 + radius
+    k = int(np.argmax(hi))
+    nties = int(np.count_nonzero(hi >= hi[k] - 1e-6))
+    rad = np.pi / 180.0
+    return (float(hi[k]), float(coord[k] @ dr3_dt) * rad,
+            float(coord[k] @ dr3_dp) * rad, k, nties)
 
 
 def _axis_grid(lo, hi, step):

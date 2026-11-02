@@ -51,9 +51,31 @@ class XLayersPDB_XPR:  # Please put the class name same as the function name
     * **Layer table.**  Row 0 is the top medium and the last row is the bulk; only
       their ``rho`` is used (``d`` is ignored, as in XLayersPDB).  The rows between
       them are the boxes, ordered top to bottom.
-    * **Euler convention.**  ``theta``/``phi`` follow XPR's rotation matrix, which is
-      NOT the ``scipy`` ``'zx'`` convention XLayersPDB uses.  Angles do not transfer
-      between the two models.
+    * **Euler convention.**  ``theta``/``phi`` follow XPR's hand-written rotation
+      matrix, which IS the ``scipy`` ``'zx'`` convention XLayersPDB uses --
+      ``pdb_geometry.xpr_rotation_matrix`` equals
+      ``from_euler('zx', [phi, theta], degrees=True)`` to 4e-16, and both sides
+      take degrees.  Angles therefore transfer between the two models, and so does
+      ``cov`` after rescaling by ``frac*cov_scale``; only the absolute ``logL`` does
+      not.  See ``handoff/05-xpr-julia.md`` 4.8 and its claims 10/11 -- an earlier
+      version of this bullet asserted the opposite.
+    * **``protins`` does NOT transfer; ``protins_top`` does.**  Upstream XPR
+      redefined the insertion parameter on 2026-09-08: it now places the protein's
+      MASS CENTROID above the bottom of the box stack, where it used to place the
+      TOP of the protein (and where every numba ``XLayersPDB*`` still does,
+      ``ztop_grid = -sum(d[:-1]) + protins``).  The reason is smoothness: the top of
+      the protein is ``max_i (r3(theta,phi).c_i + rad_i)``, a maximum over atoms,
+      so anchoring on it put a kink into the forward model at every (theta, phi)
+      where the topmost atom changes -- which defeats the whole point of a
+      differentiable backend.  Anchoring on the centroid is exactly linear in
+      ``protins`` and exactly smooth in the angles.
+
+      The old quantity is still what one reads off a figure, so it is reported
+      rather than dropped: ``protins_top = protins + maxh(theta, phi)``, published
+      as a scaler output by ``y()`` and, with its propagated error and its
+      covariance against every other varying parameter, by
+      :meth:`derived_params` after a fit.  Converting an existing setup, in either
+      direction, is :meth:`protins_top` / :meth:`protins_from_top`.
     * **The bounding media are load-time constants.**  XPR bakes ``rho`` of row 0
       and of the last row into its preallocated ``SimData``, so varying either one
       forces a full Julia reallocation on every iteration.  Keep them fixed unless
@@ -90,18 +112,34 @@ class XLayersPDB_XPR:  # Please put the class name same as the function name
       per-structure CONSTANT, rotation invariant, folded into the data at load time,
       hence invisible to the parameters and to AD.  ``cov_norm='xpr'`` reproduces
       upstream XPR exactly, dimensional gap included.
-    * **Default parameter bounds are finite, and that is a performance decision.**
-      The cost of one evaluation is proportional to the z-span of the profile, which
-      XPR walks on a fixed 0.5 A lattice. Leaving ``d``, ``protins`` or ``sig``
-      unbounded lets an MCMC walker sit at, say, ``d = [210, 320]`` -- a legal
-      proposal that spans 500 A instead of 130 and costs 15-20 ms instead of 1.8 ms.
-      Since the walkers are seeded by scattering each parameter by its RELATIVE
-      standard error, a poorly determined thickness scatters that far routinely, and
-      the chain then crawls for the first few hundred steps until it burns in. The
-      class constants ``D_MAX``, ``RHO_MAX``, ``SIG_MAX`` and ``PROTINS_MAX`` are
-      generous but finite; out-of-range proposals are then rejected by the prior
-      without evaluating the model at all. NB a saved .par restores whatever bounds
-      it holds, so an existing setup keeps its old (possibly infinite) ones.
+    * **Finite parameter bounds are now REQUIRED, not just faster.**  Until
+      2026-09-09 this was a performance argument: evaluation cost tracked the z-span
+      of the profile on a fixed 0.5 A lattice, so an unbounded ``d`` let a walker sit
+      at ``d = [210, 320]`` and cost 15-20 ms instead of 1.8 ms.  That is obsolete --
+      the slab count is a load-time constant now and cost is flat across parameter
+      space (measured 6.6-9.1 ms everywhere).  The bounds matter for a different and
+      stricter reason: ``_param_box`` derives XPR's grid from them.
+      ``max(d)`` sets ``cells_per_box``, hence the in-box mesh, hence THE ANSWER;
+      and the ``protins`` bounds become ``d_protein_bounds``, which Julia enforces
+      with a hard ``error("protein out of bounds")``.  An infinite bound would give
+      an absurd mesh, so ``_param_box`` substitutes the class constants ``D_MAX``,
+      ``SIG_MAX`` and ``PROTINS_MAX`` for any non-finite one -- which also rescues a
+      .par saved before those defaults existed.  Widen a bound and you change the
+      mesh: expect logL to move a little (see ``spacez`` below), so do it between
+      fits rather than during one.
+    * **``spacez`` is the dominant discretization error, and it is yours to set.**
+      The mesh is ``spacez`` everywhere outside the boxes and ``d_b/ceil(max(d)/
+      spacez)`` inside box ``b`` -- so it is always at least as fine as ``spacez``
+      in the boxes, and exactly ``spacez`` in the two regions where most of an
+      inserted protein actually sits.  Measured on the 1697-atom test protein at its
+      published fit: refining ``spacez`` 0.5 -> 0.25 -> 0.125 moves logL by -0.76
+      then -0.25, extrapolating to a continuum limit ~1.1 below the default.  The
+      error is a smooth q^2.23 distortion of R -- 3.9e-5 at q < 0.1 rising to
+      1.5e-3 at q > 0.5 -- so it is concentrated where the protein signal is.  It
+      biases fitted parameters by <= 0.002 A, i.e. negligibly, but it does NOT
+      cancel from absolute chi2.  **Never compare chi2 across different ``spacez``
+      or different box bounds.**  Halve ``spacez`` once at the end to confirm a
+      result is mesh-converged.
     """
 
     def __init__(self, x=0.1, E=10.0, fname='./Data/1ubq.pdb',
@@ -109,7 +147,8 @@ class XLayersPDB_XPR:  # Please put the class name same as the function name
                                  'd': [0.0, 13.4, 10.0, 1.0],
                                  'rho': [0.0, 0.243, 0.453, 0.334]}},
                  rrf=True, use_protein=True, vol_calc='approx', cov_norm='protvol',
-                 fslice=0.5, qoff=0.0, yscale=1.0, bkg=0.0, sig=3.4,
+                 fslice=0.5, spacez=0.5, box_ref_length=30.0,
+                 qoff=0.0, yscale=1.0, bkg=0.0, sig=3.4,
                  theta=0.0, phi=0.0, protins=0.0, cov=0.1):
         """
         x         : array of wave-vector transfer along z-direction
@@ -126,13 +165,30 @@ class XLayersPDB_XPR:  # Please put the class name same as the function name
         fslice    : grid step (Angs) for the union volume and projected area. Only
                     the constant N/V_union enters the model; the projected area is
                     used purely to report the covered fraction.
+        spacez    : z mesh (Angs) for XPR's profile. Sets the spacing everywhere
+                    OUTSIDE the boxes (above the top interface, below the stack, and
+                    in the Gaussian tails) and, through
+                    cells_per_box = ceil(max(d)/spacez), the number of cells each box
+                    is divided into. THE DOMINANT DISCRETIZATION ERROR -- see the
+                    class docstring. 0.5 is upstream's default; halve it to check a
+                    result is mesh-converged, at ~2x the cost.
+        box_ref_length: box length (Angs) at which the in-box mesh equals spacez.
+                    Each box is cut into ceil(box_ref_length/spacez) cells whatever
+                    its length, so the in-box spacing is d_b*spacez/box_ref_length --
+                    finer than spacez for a thinner box, coarser for a thicker one.
+                    DELIBERATELY not derived from the d bounds: it sets the answer,
+                    so it must not change when someone widens a bound. 30.0 is
+                    upstream's default and reproduces its published numbers.
         qoff      : q-offset to correct the zero q of the instrument
         yscale    : a scale factor for R or R/Rf
         bkg       : Incoherent background
         sig       : single interfacial roughness applied to the whole profile, Angs
         theta/phi : Euler angles of the protein in degrees (XPR convention)
-        protins   : insertion of the protein into the box stack, Angs, >= 0 puts the
-                    top of the protein that far above the bottom of the stack
+        protins   : insertion of the protein into the box stack, Angs, measured to
+                    the protein's CENTRE OF MASS: protins puts the centroid that far
+                    above the bottom of the stack, so it is routinely NEGATIVE. The
+                    old top-of-protein insertion is reported as 'protins_top'; see
+                    :meth:`protins_top`
         cov       : surface coverage of the protein
         mpar      : Dictionary of Phases where,
                     Layers: Layer description,
@@ -155,6 +211,8 @@ class XLayersPDB_XPR:  # Please put the class name same as the function name
         self.vol_calc = vol_calc
         self.cov_norm = cov_norm
         self.fslice = fslice
+        self.spacez = spacez
+        self.box_ref_length = box_ref_length
         self.qoff = qoff
         self.yscale = yscale
         self.bkg = bkg
@@ -165,6 +223,8 @@ class XLayersPDB_XPR:  # Please put the class name same as the function name
         self.cov = cov
         # NB 'approx'/'exact' are not Python names, so they survive XModFit's eval()
         # of Fixed-Parameter cells as strings; True/False are meant to become bools.
+        # spacez is a free float, not a choice -- it appears as a Fixed Parameter
+        # cell because __init__ takes it, and XModFit eval()s that cell.
         self.choices = {'rrf': [True, False], 'use_protein': [True, False],
                         'vol_calc': ['approx', 'exact'],
                         'cov_norm': ['protvol', 'xpr']}
@@ -198,10 +258,12 @@ class XLayersPDB_XPR:  # Please put the class name same as the function name
         # -- a reflecting wall at the poles that would bias the chain.
         self.params.add('theta', self.theta, vary=1, min=-np.inf, max=np.inf, expr=None, brute_step=1)
         self.params.add('phi', self.phi, vary=1, min=-np.inf, max=np.inf, expr=None, brute_step=1)
-        # protins < 0 drops the protein below the stack and grows the profile; > the
-        # protein's own length lifts it clear above and grows it the other way.
-        self.params.add('protins', self.protins, vary=1, min=0, max=self.PROTINS_MAX,
-                        expr=None, brute_step=0.1)
+        # protins places the MASS CENTROID above the bottom of the stack, so unlike
+        # the old top-of-protein convention it is negative for a protein sitting on
+        # or in the film -- the floor cannot be 0. Either sign moves the protein off
+        # the stack and grows the z-span of the profile, so the bound is symmetric.
+        self.params.add('protins', self.protins, vary=1, min=-self.PROTINS_MAX,
+                        max=self.PROTINS_MAX, expr=None, brute_step=0.1)
         # cov is XPR's RAW coverage, whose scale depends on vol_calc and on the
         # protein's size (see the class docstring), so there is no useful universal
         # upper bound to impose -- 100% coverage sits at whatever the 'cov_scale'
@@ -276,17 +338,6 @@ class XLayersPDB_XPR:  # Please put the class name same as the function name
         params['phi'].value = ph
         self.theta, self.phi = th, ph
         return th, ph
-
-    @staticmethod
-    def _quantize_up(value, floor, step):
-        """Round ``value`` up to a multiple of ``step``, never below ``floor``.
-
-        The allocation bounds handed to XPR must not wobble with every proposal or
-        each iteration would trigger a full (expensive) reallocation; quantizing
-        makes them a monotone staircase that settles after one or two steps.
-        """
-        v = max(float(value), float(floor))
-        return float(step * np.ceil(v / step))
 
     def _norm_mode(self):
         return getattr(self.cov_norm, '__name__', None) or str(self.cov_norm)
@@ -405,6 +456,150 @@ class XLayersPDB_XPR:  # Please put the class name same as the function name
                                          phi=float(p))
         return float(out) if out.ndim == 0 else out
 
+    # ---- the two insertion conventions ------------------------------------- #
+
+    def maxh(self, theta=None, phi=None):
+        """``maxh(theta, phi)``: mass centroid to the top of the protein, Angs.
+
+        The offset between the fitted ``protins`` (centroid-referenced, what XPR
+        uses) and ``protins_top`` (top-referenced, the old convention and the one
+        every numba ``XLayersPDB*`` uses). Computed from the structure alone -- no
+        model evaluation, no Julia -- so a whole MCMC chain costs one pass.
+        """
+        if not (self.fname and os.path.isfile(self.fname)) or not self.use_protein:
+            return 0.0
+        return pg.com_extent(self.fname,
+                             self.theta if theta is None else float(theta),
+                             self.phi if phi is None else float(phi))[0]
+
+    def protins_top(self, protins=None, theta=None, phi=None):
+        """The insertion measured to the TOP of the protein: ``protins + maxh``.
+
+        Broadcasts, so an emcee chain converts in one call::
+
+            top = model.protins_top(chain['protins'].values,
+                                    chain['theta'].values, chain['phi'].values)
+
+        which is the right way to get a credible interval on it -- the propagated
+        error from :meth:`derived_params` linearises a ``max`` over atoms, this does
+        not.
+        """
+        return self._map_insertion(protins, theta, phi, +1)
+
+    def protins_from_top(self, protins_top, theta=None, phi=None):
+        """Inverse of :meth:`protins_top`: a top-referenced insertion -> ``protins``.
+
+        Use this to carry a starting value, or a whole saved setup, over from
+        ``XLayersPDB`` or from a pre-2026-09-08 XPR fit.
+        """
+        return self._map_insertion(protins_top, theta, phi, -1)
+
+    def _map_insertion(self, value, theta, phi, sign):
+        value = self.protins if value is None else value
+        th = self.theta if theta is None else theta
+        ph = self.phi if phi is None else phi
+        v, t, p = np.broadcast_arrays(np.asarray(value, dtype=float),
+                                      np.asarray(th, dtype=float),
+                                      np.asarray(ph, dtype=float))
+        out = np.empty(v.shape, dtype=float)
+        flat = out.reshape(-1)
+        for k, (vi, ti, pi) in enumerate(zip(v.reshape(-1), t.reshape(-1),
+                                             p.reshape(-1))):
+            flat[k] = vi + sign * self.maxh(float(ti), float(pi))
+        return float(out) if out.ndim == 0 else out
+
+    def derived_params(self, result=None, keymap=None):
+        """``protins_top`` with its error and covariances, from a finished fit.
+
+        ``protins_top = protins + maxh(theta, phi)`` is a function of three fitted
+        parameters, so its variance follows from the fit covariance by the usual
+        linearisation, with
+
+            d/d(protins) = 1,   d/d(theta), d/d(phi) = d(maxh)/d(theta, phi)
+
+        taken analytically from the atom that currently attains the maximum
+        (``pdb_geometry.com_extent_grad``). Also returns the covariance of
+        ``protins_top`` with every other varying parameter,
+        ``cov(top, p_k) = sum_j J_j Sigma_jk``, which is what a downstream
+        propagation (a shared insertion in a joint fit, say) needs.
+
+        MUST be called on the RAW optimiser coordinates, i.e. BEFORE
+        :meth:`canonical_params` folds the angles: ``result.covar`` is in those
+        coordinates, and although ``maxh`` is exactly invariant under the fold
+        (``r3(360-theta, phi+180) == r3(theta, phi)``) so its VALUE does not care,
+        the sign of ``d(maxh)/d(theta)`` does. ``Fit._canonicalize_result`` calls it
+        in that order.
+
+        Caveat, and the reason ``nties`` is reported: ``maxh`` is a maximum over
+        atoms and is only piecewise smooth, so this error bar is a linearisation
+        around one active atom. Where the fit sits on a kink (two atoms tied for
+        topmost) there is no two-sided derivative and the number is indicative
+        only; :meth:`protins_top` over an MCMC chain is the honest interval.
+        Returns None when there is no protein or no usable covariance.
+
+        ``keymap`` renames the three parameters this reads, for a result whose
+        parameters are not called ``protins``/``theta``/``phi`` -- a joint fit
+        namespaces the un-shared ones as ``d{i}_protins`` and so on. Pass
+        ``{'protins': 'd0_protins', ...}``; Joint_Fit_Routines builds it from
+        ``_master_key``.
+        """
+        if not (self.use_protein and self.fname and os.path.isfile(self.fname)):
+            return None
+        if result is None or getattr(result, 'params', None) is None:
+            return None
+        km = {'protins': 'protins', 'theta': 'theta', 'phi': 'phi'}
+        km.update(keymap or {})
+        params = result.params
+        if not all(km[k] in params for k in ('protins', 'theta', 'phi')):
+            return None
+        ins = float(params[km['protins']].value)
+        th, ph = float(params[km['theta']].value), float(params[km['phi']].value)
+        h, dh_dth, dh_dph, iatom, nties = pg.com_extent_grad(self.fname, th, ph)
+        out = {'protins_top': ins + h, 'maxh': h, 'maxh_atom': iatom + 1,
+               'maxh_ties': nties, 'protins_top_err': None, 'cov': {}}
+
+        covar = getattr(result, 'covar', None)
+        names = list(getattr(result, 'var_names', []) or [])
+        if covar is None or not names or np.shape(covar) != (len(names), len(names)):
+            return out
+        J = np.zeros(len(names))
+        for k, nm in enumerate(names):
+            if nm == km['protins']:
+                J[k] = 1.0
+            elif nm == km['theta']:
+                J[k] = dh_dth
+            elif nm == km['phi']:
+                J[k] = dh_dph
+        cov = np.asarray(covar, dtype=float)
+        var = float(J @ cov @ J)
+        out['protins_top_err'] = float(np.sqrt(var)) if var >= 0 else None
+        row = cov @ J
+        out['cov'] = {nm: float(row[k]) for k, nm in enumerate(names)}
+        return out
+
+    def derived_report(self, result=None, keymap=None, label=''):
+        """:meth:`derived_params` as a block of text to append to a fit report."""
+        info = self.derived_params(result, keymap=keymap)
+        if info is None:
+            return ''
+        L = ['[[Derived]]' + (' %s' % label if label else '')]
+        err = info['protins_top_err']
+        L.append('    protins_top:  %-12.6g %s (= protins + maxh, insertion to the '
+                 'TOP of the protein)'
+                 % (info['protins_top'],
+                    '+/- %-10.4g' % err if err is not None else '(no covariance)'))
+        L.append('    maxh:         %-12.6g       centroid -> top at theta/phi, '
+                 'atom %d%s' % (info['maxh'], info['maxh_atom'],
+                                '' if info['maxh_ties'] <= 1
+                                else ', %d ATOMS TIED -- kink, error indicative only'
+                                     % info['maxh_ties']))
+        if info['cov']:
+            pairs = ['%s=%.4g' % (k, v) for k, v in info['cov'].items()]
+            L.append('    cov(protins_top, .):  ' + ', '.join(pairs))
+        L.append('    NB the fitted protins is measured to the MASS CENTROID; '
+                 'protins_top is the pre-2026-09-08 / XLayersPDB convention.')
+        return '\n'.join(L)
+
     def _full_params(self, d, rho, num_boxes):
         """Assemble XPR's 8 + 2n parameter vector.
 
@@ -501,27 +696,57 @@ class XLayersPDB_XPR:  # Please put the class name same as the function name
         # be a Python name arrives as that object rather than the string.
         vol_calc = getattr(self.vol_calc, '__name__', None) or str(self.vol_calc)
 
-        # Sizing bounds for XPR's preallocated slab arrays. Generous multiples of the
-        # current values, quantized so they only ever ratchet up.
-        max_box_length = self._quantize_up(1.5 * np.max(d[1:-1]), 30.0, 10.0)
-        max_sig = self._quantize_up(1.5 * self.sig, 5.0, 1.0)
-        # A protins outside [0, box stack] stretches the profile past the stack in
-        # one direction or the other; buy slab budget for both (see
-        # xpr_backend.check_headroom for the exact span).
-        overhang = (max(0.0, -self.protins)
-                    + max(0.0, self.protins - max_box_length * num_boxes))
-        slab_headroom = self._quantize_up(1.5 * overhang, 10.0, 10.0)
+        # Sizing arguments for XPR's grid, derived ONCE from the lmfit parameter
+        # BOUNDS. This is not an optimisation any more, it is required: since the
+        # 2026-09-09 revision `cells_per_box = ceil(max_box_length/spacez)` sets the
+        # in-box mesh, so max_box_length and spacez CHANGE THE ANSWER. Sizing them
+        # from live values (as this used to, quantized to ratchet upwards) would step
+        # the objective in the middle of a descent every time the ratchet clicked.
+        # d_protein_bounds must additionally bracket the fitted protins, because
+        # Julia enforces it with a hard error(); see xb.check_headroom.
+        sizing = xb.alloc_bounds_for(*self._param_box(num_boxes),
+                                     num_boxes=num_boxes, spacez=float(self.spacez),
+                                     box_ref_length=float(self.box_ref_length))
 
         xb.load(x, num_boxes, pdbfile=self.fname if include_protein else None,
                 vol_calc=vol_calc, rho_top=float(rho[0]),
                 rho_bottom=float(rho[-1]), E=float(self.E), rrf=bool(self.rrf),
-                max_box_length=max_box_length, max_sig=max_sig,
-                slab_headroom=slab_headroom,
-                electron_scale=self.electron_scale(vol_calc) if include_protein else 1.0)
+                electron_scale=self.electron_scale(vol_calc) if include_protein else 1.0,
+                **sizing)
 
         p = self._full_params(d, rho, num_boxes)
         xb.check_headroom(p, num_boxes, include_protein)
         return p, num_boxes, include_protein, vol_calc, mkey
+
+    def _param_box(self, num_boxes):
+        """(lower, upper) in XPR's 8+2n layout, from the lmfit parameter bounds.
+
+        Infinite or absent bounds fall back to the class ``*_MAX`` constants, which
+        are the same finite defaults ``init_params`` installs -- so a .par saved
+        before those defaults existed still yields a usable, finite grid rather than
+        an infinite one. A bound TIGHTER than the current value is widened to
+        include it, so a hand-edited value outside its own bounds cannot make the
+        declared window exclude the point we are about to evaluate.
+        """
+        lo = np.zeros(8 + 2 * num_boxes)
+        hi = np.zeros(8 + 2 * num_boxes)
+
+        def box(name, col, floor, ceil_):
+            v = float(self.params[name].value) if name in self.params else 0.0
+            a, b = (float(self.params[name].min), float(self.params[name].max)) \
+                if name in self.params else (floor, ceil_)
+            if not np.isfinite(a):
+                a = min(floor, v)
+            if not np.isfinite(b):
+                b = max(ceil_, v)
+            lo[col], hi[col] = min(a, v), max(b, v)
+
+        box('protins', xb.IDX_PROTINS, -self.PROTINS_MAX, self.PROTINS_MAX)
+        box('sig', xb.IDX_SIG, 0.0, self.SIG_MAX)
+        mkey = self.__mkeys__[0]
+        for i in range(num_boxes):
+            box('__%s_d_%03d' % (mkey, i + 1), xb.IDX_BOXES + i, 0.0, self.D_MAX)
+        return lo, hi
 
     def dydp(self, names):
         """dR/dp for the named lmfit parameters: (len(x), len(names)), or None.
@@ -556,7 +781,7 @@ class XLayersPDB_XPR:  # Please put the class name same as the function name
             # separately evaluates the model twice, and XModFit never actually sets
             # __fit__ on the model, so that doubling would apply to every single
             # likelihood evaluation in a fit or an MCMC chain.
-            logL, R, z, edp = xb.sim_edp(p)
+            logL, R, prot_top, z, edp = xb.sim_edp(p)
             self.output_params['%s_EDP' % mkey] = {
                 'x': z, 'y': edp, 'names': ['z (Angs)', 'rho (el/Angs^3)'],
                 'plotType': 'line'}
@@ -564,6 +789,14 @@ class XLayersPDB_XPR:  # Please put the class name same as the function name
                 'x': z[:-1], 'y': np.diff(edp) / np.diff(z),
                 'names': ['z (Angs)', 'drho/dz (el/Angs^4)'], 'plotType': 'line'}
             self.output_params['scaler_parameters']['Nboxes'] = num_boxes
+            # Both are load-time constants; eval_smeared! is O(B^2), so this is what
+            # the protins/sig BOUNDS are costing. Tighten them if slabs is large.
+            _M, _B = xb.slab_count()
+            if _B is not None:
+                self.output_params['scaler_parameters']['slabs'] = _B
+                self.output_params['scaler_parameters']['mesh_box_Angs'] = float(
+                    np.max(self.__d__[mkey][1:-1]) * self.spacez
+                    / max(self.box_ref_length, 1e-9))
             self.output_params['scaler_parameters']['protein'] = int(include_protein)
             if include_protein:
                 # Downstream diagnostics only -- computed here, never fed back into
@@ -575,6 +808,14 @@ class XLayersPDB_XPR:  # Please put the class name same as the function name
                     pg.projected_area(self.fname, self.theta, self.phi, self.fslice))
                 self.output_params['scaler_parameters']['prot_volume_Angs3'] = (
                     pg.union_volume(self.fname, self.fslice))
+                # The insertion in the OLD (top-of-protein) convention. Julia hands
+                # it back from the rotation it just did, so it is free and cannot
+                # drift from what the model actually evaluated; the Python
+                # com_extent path reproduces it and is what carries the error bar
+                # and converts a chain. Cross-checked in validate_xpr.py.
+                self.output_params['scaler_parameters']['protins_top'] = prot_top
+                self.output_params['scaler_parameters']['maxh'] = (
+                    prot_top - self.protins)
         return R
 
 

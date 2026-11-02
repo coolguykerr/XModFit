@@ -35,7 +35,12 @@ def load(vol_calc):
                  coordinates_py=A(coord), electrons_py=A(el), radii_py=A(rad),
                  vol_calc=vol_calc, rho_top=0.0, rho_bottom=0.0,   # <- everything zero
                  xray_energy=10.0, fres=False,                     # no Fresnel 0/0
-                 max_box_length=30.0, max_sig=6.0, slab_headroom=10.0)
+                 masses_py=A(_m),
+                 # 2026-09-10 sizing API: max_sig -> sig_max, and slab_headroom is
+                 # gone (the slab count no longer depends on the parameters).
+                 # spacez/min_box_length_sum/d_protein_bounds keep upstream defaults,
+                 # which is what this ratio test ran with before.
+                 max_box_length=30.0, sig_max=6.0)
 
 
 def edp(th, ph):

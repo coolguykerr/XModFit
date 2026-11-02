@@ -16,6 +16,7 @@ sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, 'Functions'))
 
 from Functions import xpr_backend as xb          # noqa: E402
+from Functions import pdb_geometry as pg         # noqa: E402
 from Functions.XRR.XLayersPDB_XPR import XLayersPDB_XPR   # noqa: E402
 
 FAIL = []
@@ -37,6 +38,9 @@ def rrf(fname):
 
 def model_logL(x, y, e, mpar_d, mpar_rho, **kw):
     """Run the XModFit model class and score it the way XPR does."""
+    # The published references come from upstream XPRsim, which applies no
+    # protvol normalisation, so score against cov_norm='xpr' unless told otherwise.
+    kw.setdefault('cov_norm', 'xpr')
     f = XLayersPDB_XPR(x=x, **kw)
     f.__mpar__['Model']['Layers'] = ['top'] + ['b%d' % i for i in range(len(mpar_d) - 2)] + ['bottom']
     f.__mpar__['Model']['d'] = list(mpar_d)
@@ -64,7 +68,7 @@ f2, R2, l2 = model_logL(x, y, e,
                         fname=None, use_protein=False, qoff=p2[0], sig=3.4,
                         yscale=1.0, bkg=0.0)
 print('first eval %.1f s (includes Julia JIT)' % (time.time() - t0))
-check('2box logL (via XLayersPDB_XPR)', l2, -1214.2981, 1e-3)
+check('2box logL (via XLayersPDB_XPR)', l2, -1212.2127, 1e-3)
 
 t0 = time.time()
 for _ in range(10):
@@ -81,14 +85,17 @@ f3, R3, l3 = model_logL(x3, y3, e3,
                         [0.0, p3[2], p3[3], p3[4], 1.0],
                         [0.2574, p3[5], p3[6], p3[7], 0.334],
                         fname=None, use_protein=False, qoff=p3[0], sig=p3[1])
-check('3box logL (via XLayersPDB_XPR)', l3, -600.6506, 1e-3)
+check('3box logL (via XLayersPDB_XPR)', l3, -600.1768, 1e-3)
 
 # ------------------------------------------------------------------- protein + 2box
 print('\n=== 4. protein + 2-box ===')
 xp, yp, ep = rrf(os.path.join(XPRMAIN, 'test_data', 'protein_2box.rrf'))
 pdb = os.path.join(XPRMAIN, 'test_data', 'protein.pdb')
+# protins is CENTROID-referenced since XPR's 2026-09-08 revision; upstream's demo
+# now quotes the corresponding pose directly as -13.717. See handoff/05-xpr-julia.md.
 pp = [0.0002054238403330481, 32.92088491028436, 112.59475254401123,
-      13.358030329245691, 2.20516005726808,
+      -13.717,
+      2.20516005726808,
       11.66753477743085, 9.643473851409357,
       0.21702095531305382, 0.4470646192673328]
 t0 = time.time()
@@ -97,7 +104,7 @@ fp, Rp, lp = model_logL(xp, yp, ep,
                         fname=pdb, use_protein=True, vol_calc='approx',
                         qoff=pp[0], theta=pp[1], phi=pp[2], protins=pp[3], cov=pp[4])
 print('first protein eval %.1f s' % (time.time() - t0))
-check('protein logL (via XLayersPDB_XPR)', lp, -466.4557, 1e-3)
+check('protein logL (via XLayersPDB_XPR)', lp, -464.6397, 1e-3)
 t0 = time.time()
 for _ in range(5):
     fp.y()
@@ -115,10 +122,11 @@ if not (len(z) > 10 and np.isfinite(rho).all()):
 full = fp._full_params(fp.__d__['Model'], fp.__rho__['Model'], 2)
 # grad/hess are only meaningful against the real data, so reload with it
 xb.load(xp, 2, pdbfile=pdb, vol_calc='approx', rho_top=0.0, rho_bottom=0.334,
-        E=10.0, rrf=True, max_box_length=30.0, max_sig=5.0, slab_headroom=10.0,
+        E=10.0, rrf=True, max_box_length=30.0, sig_max=5.0,
+        d_protein_bounds=(-40.0, 20.0),
         data_R=yp, data_err=ep, force=True)
 lg, _ = xb.sim(full)
-check('protein logL (backend, real data)', lg, -466.4557, 1e-3)
+check('protein logL (backend, real data)', lg, -464.6397, 1e-3)
 t0 = time.time()
 g = xb.grad(full)
 print('grad (%.1f s): %s' % (time.time() - t0, np.array2string(g, precision=4)))

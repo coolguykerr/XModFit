@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import QApplication          # noqa: E402
 _app = QApplication.instance() or QApplication([])
 
 from Fit_Routines import Fit                       # noqa: E402
+from Functions import pdb_geometry as pg                  # noqa: E402
 from Functions.XRR.XLayersPDB_XPR import XLayersPDB_XPR   # noqa: E402
 
 FAIL = []
@@ -63,7 +64,7 @@ print('leastsq: %d nfev in %.1f s, chi2 %.1f -> %.1f  (%s)'
 for k in ('qoff', '__Model_d_001', '__Model_d_002', '__Model_rho_001', '__Model_rho_002'):
     print('   %-18s %12.6f' % (k, fit.result.params[k].value))
 
-ref_chi2 = 2 * 1214.2981
+ref_chi2 = 2 * 1212.2127
 print('reference chi2 at the published best fit: %.1f' % ref_chi2)
 if not (chi2 < start and chi2 < ref_chi2 * 1.02):
     FAIL.append('leastsq did not reach the published optimum')
@@ -105,7 +106,8 @@ fit2.params = g.__dict__
 fit2.fit_params['qoff'].value = 0.0002054238403330481
 fit2.fit_params['theta'].value = 32.92088491028436
 fit2.fit_params['phi'].value = 112.59475254401123
-fit2.fit_params['protins'].value = 13.358030329245691
+# centroid-referenced protins; upstream's demo pose (handoff/05-xpr-julia.md)
+fit2.fit_params['protins'].value = -13.717
 fit2.fit_params['cov'].value = 2.20516005726808
 for k in ('theta', 'phi', 'protins', 'cov'):
     fit2.fit_params[k].vary = 1
@@ -115,7 +117,7 @@ r3, m3 = fit2.perform_fit(xp.min(), xp.max(), fit_scale='Linear',
                           fit_method='leastsq', maxiter=200)
 chi2p = np.sum(fit2.result.residual ** 2)
 print('protein leastsq: %d nfev in %.1f s, chi2 = %.1f (published %.1f)'
-      % (fit2.result.nfev, time.time() - t0, chi2p, 2 * 466.4557))
+      % (fit2.result.nfev, time.time() - t0, chi2p, 2 * 464.6397))
 if not np.isfinite(chi2p):
     FAIL.append('protein leastsq chi2 not finite')
 

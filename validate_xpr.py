@@ -2,8 +2,28 @@
 
 Reference log-likelihoods are the stored outputs of ``XPR-main/demo.ipynb``, i.e.
 the upstream author's own run of the same Julia model through ``XPRsim.py``. If
-these three numbers still match, the XModFit wrapper -- layer-table mapping,
-parameter vector order, q handling, Fresnel normalisation -- is faithful to it.
+these numbers still match, the XModFit wrapper -- layer-table mapping, parameter
+vector order, q handling, Fresnel normalisation -- is faithful to it.
+
+Baselined on the **2026-09-10** upstream revision. Recent upstream history:
+
+* 2026-09-08 redefined ``protins`` from the top of the protein to its MASS CENTROID
+  and rebuilt the smearing lattice, both for smoothness.
+* 2026-09-09 replaced the fixed 0.5 A lattice with a fixed slab COUNT and
+  parameter-dependent spacing (``d_b/cells_per_box`` in box b, rigid ``spacez``
+  outside). This removed the last kink AND the segfault class.
+* 2026-09-10 exposed ``spacez`` and ``min_box_length_sum``, and made an
+  out-of-window protein a hard ``error()`` instead of silent clipping.
+
+All four reference log-likelihoods below are upstream's own ``demo.ipynb`` outputs
+for the 2026-09-10 code and reproduce to every printed digit. Note the protein cell
+now sits at ``protins = -13.717``, the physically-corresponding pose under the
+centroid convention, so it can be compared directly.
+
+**The mesh is now part of the model.** ``spacez`` and ``box_ref_length`` set the
+discretization and therefore the absolute chi2; ``d_protein_bounds``/``sig_max``
+change only the cost. The mesh-convergence and mesh-invariance checks below pin
+that split, because getting it wrong is silent.
 
     python validate_xpr.py [path/to/XPR-main/test_data]
 
@@ -81,23 +101,161 @@ x, y, e = rrf('2box.rrf')
 f2 = build(x, [0.0, 12.870861541436838, 9.400266410116624, 1.0],
            [0.0, 0.21726162435306018, 0.4564847693916873, 0.334],
            fname=None, use_protein=False, qoff=-0.0005197557108984115, sig=3.4)
-check('2-box lipid', logL(f2, y, e), -1214.2981, 1e-3)
+check('2-box lipid', logL(f2, y, e), -1212.2127, 1e-3)
 
 x3, y3, e3 = rrf('3box.rrf')
 f3 = build(x3, [0.0, 26.886814178891647, 18.579820992512868, 11.532122447496487, 1.0],
            [0.2574, 0.30077908545466, 0.25596604523845007, 0.31662370213285806, 0.334],
            fname=None, use_protein=False, qoff=0.0008998796447718044,
            sig=2.511818916572768)
-check('3-box lipid (rho_top, fitted sigma)', logL(f3, y3, e3), -600.6506, 1e-3)
+check('3-box lipid (rho_top, fitted sigma)', logL(f3, y3, e3), -600.1768, 1e-3)
+
+x4, y4, e4 = rrf('4box.rrf')
+f4 = build(x4, [0.0, 8.0, 8.0, 8.0, 8.0, 1.0],
+           [0.0, 0.1, 0.2, 0.3, 0.4, 0.334],
+           fname=None, use_protein=False, qoff=0.0, yscale=1.05, bkg=1e-6)
+check('4-box (fitted yscl + bkg)', logL(f4, y4, e4), -62404.0635, 1e-2)
 
 xp, yp, ep = rrf('protein_2box.rrf')
 pdb = os.path.join(DATA, 'protein.pdb')
+# THE INSERTION CONVENTION. protins is centroid-referenced; upstream's demo now
+# quotes the physically-corresponding pose directly, so this is a like-for-like
+# comparison. The old top-referenced value was 13.358030329245691, and
+# maxh(theta, phi) converts between the two.
+PROTINS_REF = -13.717
+MAXH_REF = pg.com_extent(pdb, 32.92088491028436, 112.59475254401123)[0]
 prot = dict(fname=pdb, use_protein=True, vol_calc='approx',
             qoff=0.0002054238403330481, theta=32.92088491028436,
-            phi=112.59475254401123, protins=13.358030329245691, cov=2.20516005726808)
+            phi=112.59475254401123, protins=PROTINS_REF,
+            cov=2.20516005726808)
 fp = build(xp, [0.0, 11.66753477743085, 9.643473851409357, 1.0],
            [0.0, 0.21702095531305382, 0.4470646192673328, 0.334], **prot)
-check('protein + 2-box', logL(fp, yp, ep), -466.4557, 1e-3)
+check('protein + 2-box', logL(fp, yp, ep), -464.6397, 1e-3)
+check('  and maxh itself', MAXH_REF, 27.0751317, 1e-5)
+check('  protins_top reported back', fp.protins_top(), PROTINS_REF + MAXH_REF, 1e-9)
+check('  scaler output protins_top',
+      fp.output_params['scaler_parameters']['protins_top'],
+      PROTINS_REF + MAXH_REF, 1e-6)
+# the old top-referenced value must still round-trip through the converters
+check('  protins_from_top(13.358030329)', fp.protins_from_top(13.358030329245691),
+      13.358030329245691 - MAXH_REF, 1e-9)
+
+# --- the two insertion conventions, end to end -----------------------------------
+print('\n--- insertion convention: centroid-referenced protins vs top-referenced ---')
+# Julia computes protins_top as a by-product of the rotation; Python recomputes it
+# from the structure so a chain can be converted without re-running the model. They
+# must agree bit for bit, or the reported number and the fitted one drift apart.
+_ins = PROTINS_REF          # already centroid-referenced
+_full0 = fp._full_params(fp.__d__['Model'], fp.__rho__['Model'], 2)
+xb.load(xp, 2, pdbfile=pdb, vol_calc='approx', rho_top=0.0, rho_bottom=0.334,
+        max_box_length=30.0, sig_max=5.0, d_protein_bounds=(-40.0, 20.0),
+        data_R=yp, data_err=ep, force=True)
+_lj, _Rj, _phj = xb.sim_ref(_full0)
+_hj, _dnj, _kj = xb.maxh(prot['theta'], prot['phi'])
+_hp, _dnp, _kp = pg.com_extent(pdb, prot['theta'], prot['phi'])
+print('  maxh    julia %.12f   python %.12f' % (_hj, _hp))
+print('  mindepth julia %.12f  python %.12f' % (_dnj, _dnp))
+print('  protein_height from julia %.12f   protins + maxh %.12f'
+      % (_phj, _ins + _hp))
+if abs(_hj - _hp) > 1e-12 or abs(_dnj - _dnp) > 1e-12 or _kj != _kp + 1:
+    FAIL.append('python com_extent disagrees with XPR_maxh')
+if abs(_phj - (_ins + _hp)) > 1e-9:
+    FAIL.append("julia's protein_height != protins + maxh")
+if abs(fp.protins_from_top(fp.protins_top()) - fp.protins) > 1e-9:
+    FAIL.append('protins_top / protins_from_top do not round-trip')
+
+# d(maxh)/d(theta,phi) drives the propagated error on protins_top. Exact wherever
+# the topmost atom is unique; check it against central differences at poses well
+# away from a tie, and confirm the ties ARE detected where they occur.
+_worst_h = 0.0
+for _th, _ph in [(32.92088491028436, 112.59475254401123), (7.0, 33.0),
+                 (61.0, 217.0), (128.0, 301.0), (171.0, 88.0)]:
+    _h, _dt, _dp, _k, _nt = pg.com_extent_grad(pdb, _th, _ph)
+    _d = 1e-4
+    _ft = (pg.com_extent(pdb, _th + _d, _ph)[0]
+           - pg.com_extent(pdb, _th - _d, _ph)[0]) / (2 * _d)
+    _fp2 = (pg.com_extent(pdb, _th, _ph + _d)[0]
+            - pg.com_extent(pdb, _th, _ph - _d)[0]) / (2 * _d)
+    _worst_h = max(_worst_h, abs(_dt - _ft) / max(abs(_ft), 1e-6),
+                   abs(_dp - _fp2) / max(abs(_fp2), 1e-6))
+print('  d(maxh)/d(angle): worst relative error vs central differences %.2e'
+      % _worst_h)
+if _worst_h > 1e-5:
+    FAIL.append('com_extent_grad disagrees with finite differences: %.2e' % _worst_h)
+
+# The smoothness claim itself: the forward model must be smooth THROUGH the angles
+# where the topmost atom changes, because maxh no longer enters it. Under the old
+# convention the protein was translated by maxh, so dlogL/dtheta jumped there.
+_ths = np.arange(1.0, 179.0, 0.25)
+_atoms = [pg.com_extent(pdb, _t, prot['phi'])[2] for _t in _ths]
+_switch = [(_ths[i - 1] + _ths[i]) / 2 for i in range(1, len(_ths))
+           if _atoms[i] != _atoms[i - 1]]
+print('  topmost atom changes at %d angles along phi=%.2f; AD gradient vs one-sided'
+      ' differences there:' % (len(_switch), prot['phi']))
+_worst_k = 0.0
+for _t0 in _switch:
+    _q = _full0.copy(); _q[xb.IDX_THETA] = _t0
+    _g = xb.grad(_q)[xb.IDX_THETA]
+    _qm = _q.copy(); _qm[xb.IDX_THETA] -= 1e-4
+    _qp = _q.copy(); _qp[xb.IDX_THETA] += 1e-4
+    _l0 = xb.sim(_q)[0]
+    _dl = (xb.sim(_qm)[0] - _l0) / -1e-4
+    _dr = (xb.sim(_qp)[0] - _l0) / 1e-4
+    _worst_k = max(_worst_k, abs(_dr - _dl) / max(abs(_g), 1e-9))
+    _hl = pg.com_extent_grad(pdb, _t0 - 0.05, prot['phi'])[1]
+    _hr = pg.com_extent_grad(pdb, _t0 + 0.05, prot['phi'])[1]
+    print('    theta %7.3f : d(maxh)/dth kinks by %.1e | dlogL/dth L %+.4f R %+.4f'
+          ' AD %+.4f' % (_t0, abs(_hr - _hl), _dl, _dr, _g))
+print('  worst left/right disagreement in dlogL/dtheta at an atom switch: %.2e'
+      ' (relative)' % _worst_k)
+if _worst_k > 1e-3:
+    FAIL.append('logL is kinked at an atom-switch angle: %.2e -- the insertion '
+                'offset has leaked back into the forward model' % _worst_k)
+
+# --- upstream demo parity: the CAL-mass divergence is GONE ----------------------
+# Until 2026-09-10 `XPRsim._import_pdb` overrode the CAL atom's name to calcium for
+# the electron count and the radius but took its MASS from `atom.element`, which
+# Bio.PDB guesses as 'C' when the element columns are blank. Once `prealloc` started
+# mass-centring the coordinates that shifted the zero of protins by 0.0345 A on
+# `protein.pdb` -- worth 60 in logL at the demo point, and the whole reason our
+# numbers used to disagree with the notebook. Upstream now uses `element_key` for
+# all three and applies `.capitalize()`, so our reader and theirs must agree
+# exactly. Assert that, rather than the old correction.
+print('\n--- upstream demo parity: mass table agreement ---')
+import Bio.PDB as _BP                                             # noqa: E402
+from pdb_cache import _element_table as _et, pdbread as _pr        # noqa: E402
+_atoms_bp = list(_BP.PDBParser(QUIET=True).get_structure('s', pdb).get_atoms())
+_ai = _et()
+
+
+def _xprsim_row(atom):
+    """XPRsim._import_pdb as of 2026-09-10."""
+    key = 'Ca' if atom.name == 'CAL' else atom.element.capitalize()
+    return _ai[key]
+
+
+_m_xprsim = np.array([_xprsim_row(a)[2] for a in _atoms_bp])
+_e_xprsim = np.array([_xprsim_row(a)[0] for a in _atoms_bp])
+_r_xprsim = np.array([_xprsim_row(a)[1] / 100.0 for a in _atoms_bp])
+_xc, _yc, _zc, _e_ours, _r_ours, _m_ours = _pr(pdb)
+print('  %d atoms; mass/electron/radius mismatches vs XPRsim: %d / %d / %d'
+      % (len(_m_ours), int(np.count_nonzero(_m_xprsim != _m_ours)),
+         int(np.count_nonzero(_e_xprsim != _e_ours)),
+         int(np.count_nonzero(np.abs(_r_xprsim - _r_ours) > 1e-12))))
+if np.count_nonzero(_m_xprsim != _m_ours):
+    FAIL.append('our per-atom masses no longer match XPRsim -- the centroid, and '
+                'therefore the zero of protins, will differ from upstream')
+if (np.count_nonzero(_e_xprsim != _e_ours)
+        or np.count_nonzero(np.abs(_r_xprsim - _r_ours) > 1e-12)):
+    FAIL.append('our electrons/radii no longer match XPRsim')
+_c = np.transpose(np.array([_xc, _yc, _zc]))
+_com_shift = ((_c * _m_xprsim[:, None]).sum(0) / _m_xprsim.sum()
+              - (_c * _m_ours[:, None]).sum(0) / _m_ours.sum())
+print('  mass centroid offset vs XPRsim: %.3e A  (was 0.0345 A before the fix)'
+      % float(np.linalg.norm(_com_shift)))
+if float(np.linalg.norm(_com_shift)) > 1e-12:
+    FAIL.append('mass centroid still differs from XPRsim by %.3g A'
+                % float(np.linalg.norm(_com_shift)))
 
 # --- the grid footprint must equal the one XPR computes internally ---------------
 # XPR never exposes tempvars.A, but it can be extracted exactly: zero every rho, so
@@ -112,8 +270,9 @@ def _xpr_internal_area(theta, phi):
     out = {}
     for vc in ('exact', 'approx'):
         xb.load(xp, 2, pdbfile=pdb, vol_calc=vc, rho_top=0.0, rho_bottom=0.0,
-                rrf=False, max_box_length=30.0, max_sig=6.0, slab_headroom=10.0)
-        out[vc] = xb.edp(np.array([0.0, theta, phi, 13.0, 1.0, 3.4, 1.0, 0.0,
+                rrf=False, max_box_length=30.0, sig_max=6.0,
+                d_protein_bounds=(-40.0, 20.0))
+        out[vc] = xb.edp(np.array([0.0, theta, phi, -13.0, 1.0, 3.4, 1.0, 0.0,
                                    12.0, 10.0, 0.0, 0.0]))[1]
     m = (out['exact'] > 1e-6) & (out['approx'] > 1e-6)
     return a_xpr * float(np.median(out['approx'][m] / out['exact'][m]))
@@ -177,9 +336,9 @@ if not (len(z) > 10 and np.isfinite(rho).all()):
 
 full = fp._full_params(fp.__d__['Model'], fp.__rho__['Model'], 2)
 xb.load(xp, 2, pdbfile=pdb, vol_calc='approx', rho_top=0.0, rho_bottom=0.334,
-        max_box_length=30.0, max_sig=5.0, slab_headroom=10.0,
+        max_box_length=30.0, sig_max=5.0, d_protein_bounds=(-40.0, 20.0),
         data_R=yp, data_err=ep, force=True)
-check('protein logL from the backend', xb.sim(full)[0], -466.4557, 1e-3)
+check('protein logL from the backend', xb.sim(full)[0], -464.6397, 1e-3)
 g, H = xb.grad(full), xb.hess(full)
 print('grad: %d entries, all finite = %s' % (len(g), bool(np.isfinite(g).all())))
 print('hess: %s, symmetric = %s, all finite = %s'
@@ -204,8 +363,22 @@ for k in ('qoff', '__Model_d_001', '__Model_d_002',
     fit.fit_params[k].vary = 1
 fit.perform_fit(x.min(), x.max(), fit_scale='Linear', fit_method='leastsq',
                 maxiter=1000)
-check('leastsq chi2 vs published optimum',
-      float(np.sum(fit.result.residual ** 2)), 2 * 1214.2981, 1.0)
+# The published parameter point was fitted on an older mesh, so on this one the
+# optimum sits slightly BELOW 2*|published logL|. Assert the fit gets at least that
+# good rather than equalling it -- equality would be the wrong assertion, and a
+# large overshoot would mean the published point is not the optimum any more.
+_chi2_fit = float(np.sum(fit.result.residual ** 2))
+_chi2_pub = 2 * 1212.2127
+print('%-42s got %13.4f  vs published %13.4f  (%+.4f)'
+      % ('leastsq chi2 reaches the published optimum', _chi2_fit, _chi2_pub,
+         _chi2_fit - _chi2_pub))
+if not (_chi2_fit <= _chi2_pub + 1.0):
+    FAIL.append('leastsq did not reach the published optimum: %.4f vs %.4f'
+                % (_chi2_fit, _chi2_pub))
+if _chi2_fit < _chi2_pub - 10.0:
+    FAIL.append('leastsq beat the published optimum by %.1f in chi2 -- the '
+                'published point may no longer be the optimum on this mesh'
+                % (_chi2_pub - _chi2_fit))
 for k, ref in (('qoff', -0.0005197557108984115), ('__Model_d_001', 12.870861541436838),
                ('__Model_d_002', 9.400266410116624),
                ('__Model_rho_001', 0.21726162435306018),
@@ -262,7 +435,8 @@ ga.__mpar__['Model']['d'] = [0.0, 11.13, 9.07, 1.0]
 ga.__mpar__['Model']['rho'] = [0.0, 0.21, 0.44, 0.334]
 ga.init_params()
 fa.fit_params, fa.params = ga.params, ga.__dict__
-for k, v in dict(qoff=0.0, theta=185.0, phi=-10.0, protins=13.137, cov=2.0).items():
+for k, v in dict(qoff=0.0, theta=185.0, phi=-10.0, protins=-13.137,
+                 cov=2.0).items():
     fa.fit_params[k].value = v; ga.__dict__[k] = v
 for k in ('theta', 'phi', 'protins', 'cov'):
     fa.fit_params[k].vary = 1
@@ -280,14 +454,15 @@ if abs(at - ga.theta) > 1e-9 or abs(ap - ga.phi) > 1e-9:
 # search sees a well-scaled problem. The mapping lives inside XPR!, hence inside the
 # AD tape: derivatives must come back already chain-ruled.
 print('\n--- normalised unit-cube load ---')
-NLO = np.array([-1e-3,  0.,   0.,  0.,  0., 1.0, 0.0, -1.0,  0.,  0.,  0.,  0.])
-NHI = np.array([ 1e-3,180., 360., 20., 10., 6.0, 2.0,  1.0, 30., 30., 1.0, 2.0])
-NP  = np.array([2.054e-4, 32.92, 112.59, 13.137, 2.205, 3.37, 1.0, 0.0,
+# protins is centroid-referenced now, so its bounds straddle zero
+NLO = np.array([-1e-3,  0.,   0.,-40.,  0., 1.0, 0.0, -1.0,  0.,  0.,  0.,  0.])
+NHI = np.array([ 1e-3,180., 360., 10., 10., 6.0, 2.0,  1.0, 30., 30., 1.0, 2.0])
+NP  = np.array([2.054e-4, 32.92, 112.59, -13.137, 2.205, 3.37, 1.0, 0.0,
                 11.13, 9.07, 0.21, 0.44])
 NU = (NP - NLO) / (NHI - NLO)
 nkw = dict(pdbfile=pdb, vol_calc='approx', rho_top=0.0, rho_bottom=0.334,
-           data_R=yp, data_err=ep, max_box_length=40.0, max_sig=8.0,
-           slab_headroom=20.0)
+           data_R=yp, data_err=ep, max_box_length=40.0, sig_max=8.0,
+           d_protein_bounds=(-40.0, 10.0))
 xb.load(xp, 2, force=True, **nkw)
 _lp, _Rp = xb.sim(NP); _gp = xb.grad(NP); _Jp = xb.jac(NP, np.arange(12))
 xb.load(xp, 2, param_lower=NLO, param_upper=NHI, force=True, **nkw)
@@ -317,7 +492,7 @@ JN = ['qoff', 'theta', 'phi', 'protins', 'cov', 'sig', 'yscale', 'bkg',
       '__Model_d_001', '__Model_d_002', '__Model_rho_001', '__Model_rho_002']
 fj = build(xp, [0.0, 11.13, 9.07, 1.0], [0.0, 0.21, 0.44, 0.334],
            fname=pdb, use_protein=True, vol_calc='approx', qoff=0.0, theta=30.0,
-           phi=110.0, protins=13.137, cov=2.0, sig=3.37)
+           phi=110.0, protins=-13.137, cov=2.0, sig=3.37)
 fj.__fit__ = True
 fj.y()
 Jac = fj.dydp(JN)
@@ -360,7 +535,8 @@ for use in (False, True):
     gk.__mpar__['Model']['rho'] = [0.0, 0.21, 0.44, 0.334]
     gk.init_params()
     fk.fit_params, fk.params = gk.params, gk.__dict__
-    for k, v in dict(qoff=0.0, theta=30.0, phi=110.0, protins=13.137, cov=2.0).items():
+    for k, v in dict(qoff=0.0, theta=30.0, phi=110.0, protins=-13.137,
+                     cov=2.0).items():
         fk.fit_params[k].value = v; gk.__dict__[k] = v
     for k in ('qoff', '__Model_d_001', '__Model_d_002',
               '__Model_rho_001', '__Model_rho_002'):
@@ -377,6 +553,157 @@ if abs(res_j[True][1] - res_j[False][1]) > 1e-4 * max(res_j[False][1], 1.0):
     FAIL.append('Jacobian changed the optimum')
 if res_j[True][0] >= res_j[False][0]:
     FAIL.append('Jacobian did not reduce the model-call count')
+
+# --- protins_top's propagated error and covariance -------------------------------
+# derived_params linearises protins_top = protins + maxh(theta, phi) through the fit
+# covariance. Two separate things to check, and conflating them is a trap:
+#
+#   1. Is the LINEARISATION right? Draw from the same covariance shrunk by 1e-4, so
+#      the draws stay inside the linear regime, and scale the sampled sigma back up.
+#      That must match to sampling error (~0.5% at 20000 draws) or the Jacobian is
+#      wrong. This is the correctness test.
+#   2. Is the linearisation ADEQUATE at the fitted uncertainty? Draw from the full
+#      covariance. maxh is a max over atoms -- piecewise smooth, and curving -- so
+#      over several degrees of angular uncertainty it need not agree, and on this
+#      test problem it does not (~30%). That is physics, not a bug; it is why
+#      derived_params documents protins_top() over an MCMC chain as the honest
+#      interval, and why derived_report prints the tie count. Bounded loosely here
+#      only so a real breakage still trips it.
+print('\n--- derived protins_top: propagated error vs Monte Carlo ---')
+fd_ = Fit(XLayersPDB_XPR, xp, y=yp, yerr=ep)
+gd = fd_.func
+gd.fname = pdb; gd.use_protein = True; gd.sig = 3.37
+gd.__mpar__['Model']['Layers'] = ['top', 'b1', 'b2', 'bottom']
+gd.__mpar__['Model']['d'] = [0.0, 11.13, 9.07, 1.0]
+gd.__mpar__['Model']['rho'] = [0.0, 0.21, 0.44, 0.334]
+gd.init_params()
+fd_.fit_params, fd_.params = gd.params, gd.__dict__
+for k, v in dict(qoff=0.0, theta=30.0, phi=110.0, protins=-13.137, cov=2.0).items():
+    fd_.fit_params[k].value = v; gd.__dict__[k] = v
+for k in ('theta', 'phi', 'protins', 'cov', '__Model_d_001', '__Model_d_002'):
+    fd_.fit_params[k].vary = 1
+rep, _msg = fd_.perform_fit(xp.min(), xp.max(), fit_scale='Linear',
+                            fit_method='leastsq', maxiter=800)
+info = gd.derived_params(fd_.result)
+print(gd.derived_report(fd_.result))
+if info is None or info['protins_top_err'] is None:
+    FAIL.append('derived_params produced no error for protins_top')
+else:
+    if '[[Derived]]' not in rep or 'protins_top' not in rep:
+        FAIL.append('the derived block did not reach the fit report')
+    cv = np.asarray(fd_.result.covar, dtype=float)
+    nm = list(fd_.result.var_names)
+    mu = np.array([fd_.result.params[k].value for k in nm])
+    it, ith, iph = nm.index('protins'), nm.index('theta'), nm.index('phi')
+    print('  fitted sigma: protins %.4f  theta %.4f deg  phi %.4f deg'
+          % (np.sqrt(cv[it, it]), np.sqrt(cv[ith, ith]), np.sqrt(cv[iph, iph])))
+
+    def _mc(scale, seed):
+        rng = np.random.default_rng(seed)
+        dr = rng.multivariate_normal(mu, cv * scale ** 2, size=20000)
+        return float(np.std(gd.protins_top(dr[:, it], dr[:, ith],
+                                           dr[:, iph]))) / scale
+
+    mc_lin = _mc(1e-2, 11)          # inside the linear regime
+    mc_full = _mc(1.0, 11)          # at the fitted uncertainty
+    print('  linearised %.6f   MC at 1%% of sigma (rescaled) %.6f   ratio %.4f'
+          % (info['protins_top_err'], mc_lin, info['protins_top_err'] / mc_lin))
+    print('  MC at the FULL fitted sigma %.6f   ratio %.4f  <- maxh is nonlinear'
+          ' over this much angular uncertainty' % (mc_full,
+                                                   info['protins_top_err'] / mc_full))
+    if not (0.98 < info['protins_top_err'] / mc_lin < 1.02):
+        FAIL.append('the linearised error on protins_top is %.4g but the '
+                    'small-step Monte Carlo says %.4g -- the Jacobian is wrong'
+                    % (info['protins_top_err'], mc_lin))
+    if not (0.25 < info['protins_top_err'] / mc_full < 4.0):
+        FAIL.append('propagated error on protins_top (%.4g) is nowhere near the '
+                    'full Monte Carlo (%.4g)' % (info['protins_top_err'], mc_full))
+    # the value must equal what the model actually evaluated
+    if abs(info['protins_top'] - gd.protins_top()) > 1e-9:
+        FAIL.append('derived protins_top disagrees with the model')
+    # cov(protins_top, protins) must exceed var(protins): the maxh term adds to it
+    if abs(info['cov']['protins'] - cv[it, it]) < 1e-30:
+        FAIL.append('cov(protins_top, .) looks like it ignored the maxh term')
+
+# --- the mesh is part of the model: pin which knobs move the answer -------------
+# Since 2026-09-09 the slab COUNT is a load-time constant and the SPACING varies
+# with the parameters. That splits the sizing arguments in two, and confusing them
+# is silent: max_box_length/spacez change chi2, d_protein_bounds/sig_max do not.
+print('\n--- mesh: which sizing arguments change the answer? ---')
+_MK = dict(pdbfile=pdb, vol_calc='approx', rho_top=0.0, rho_bottom=0.334,
+           data_R=yp, data_err=ep)
+_pf = fp._full_params(fp.__d__['Model'], fp.__rho__['Model'], 2)
+
+
+def _L(**kw):
+    kk = dict(max_box_length=30.0, sig_max=5.0, spacez=0.5,
+              d_protein_bounds=(-40.0, 20.0))
+    kk.update(kw)
+    xb.load(xp, 2, force=True, **dict(_MK, **kk))
+    return xb.sim(_pf)[0]
+
+
+_base = _L()
+print('  reference logL %.6f' % _base)
+for lbl, kw in [('d_protein_bounds (-40,20) -> (-80,60)',
+                 dict(d_protein_bounds=(-80.0, 60.0))),
+                ('sig_max 5 -> 12', dict(sig_max=12.0)),
+                ('min_box_length_sum 0 -> 5', dict(min_box_length_sum=5.0))]:
+    _d = abs(_L(**kw) - _base)
+    print('    %-38s dlogL %.2e  (must be ~0)' % (lbl, _d))
+    if _d > 1e-6 * max(abs(_base), 1.0):
+        FAIL.append('%s changed the answer by %.3g -- it should only change cost'
+                    % (lbl, _d))
+for lbl, kw in [('spacez 0.5 -> 0.25', dict(spacez=0.25, max_box_length=15.0)),
+                ('box_ref_length 30 -> 120', dict(max_box_length=120.0))]:
+    _d = abs(_L(**kw) - _base)
+    print('    %-38s dlogL %.3f  (must be nonzero)' % (lbl, _d))
+    if _d < 1e-3:
+        FAIL.append('%s did NOT change the answer -- the mesh knob is not wired'
+                    % lbl)
+
+# mesh convergence: refining spacez and the box mesh together must converge, and
+# O(h^2)-ish. This is the check that would catch a discretization regression.
+print('\n--- mesh convergence in spacez (box mesh held at d/60) ---')
+_seq = []
+for _sp in (0.5, 0.25, 0.125):
+    _seq.append(_L(spacez=_sp, max_box_length=30.0 * _sp / 0.5))
+    print('    spacez %.3f  logL %.6f' % (_sp, _seq[-1]))
+_d1, _d2 = _seq[1] - _seq[0], _seq[2] - _seq[1]
+print('    successive changes %.4f then %.4f  -> ratio %.2f (O(h^2) gives ~4)'
+      % (_d1, _d2, _d1 / _d2 if _d2 else float('inf')))
+if not (_d1 * _d2 > 0 and 1.5 < abs(_d1 / _d2) < 8.0):
+    FAIL.append('spacez refinement is not converging monotonically at a sane rate: '
+                '%.4f then %.4f' % (_d1, _d2))
+
+# --- upstream's out-of-bounds error, caught in Python first ----------------------
+# Upstream raises error("protein out of bounds") when the protein leaves the grid.
+# That is the right call, but a Julia exception unwinding mid-fit aborts the run, so
+# check_headroom must catch it first with a message naming the numbers.
+print('\n--- out-of-window protein: Python raises before Julia does ---')
+xb.load(xp, 2, force=True, **dict(_MK, max_box_length=30.0, sig_max=5.0,
+                                  spacez=0.5, d_protein_bounds=(-40.0, 20.0)))
+_ok = True
+_pin = _pf.copy()
+_pin[xb.IDX_PROTINS] = 10.0
+try:
+    xb.check_headroom(_pin, 2, True)
+    print('    protins=10, window (-40,20): accepted (correct)')
+except ValueError as _e:
+    _ok = False
+    FAIL.append('check_headroom rejected an in-window protins: %s' % _e)
+_pin[xb.IDX_PROTINS] = 100.0
+try:
+    xb.check_headroom(_pin, 2, True)
+    FAIL.append('check_headroom accepted protins=100, outside the declared window')
+except ValueError as _e:
+    print('    protins=100: ValueError -> %s' % str(_e)[:96])
+# and Julia really would have raised, i.e. we are mirroring a real constraint
+try:
+    xb.sim(_pin)
+    FAIL.append('Julia accepted an out-of-window protins -- the mirror is now wrong')
+except Exception as _e:
+    print('    Julia on the same vector: %s (mirror confirmed)' % type(_e).__name__)
 
 print('\n' + ('ALL CHECKS PASSED' if not FAIL else 'FAILURES:\n  ' + '\n  '.join(FAIL)))
 sys.exit(1 if FAIL else 0)

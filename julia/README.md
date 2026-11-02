@@ -88,9 +88,85 @@ version bump) from an environment whose SSL works.
 So set `XPR_JULIA_PROJECT` to develop against your own checkout without editing
 anything.
 
+### Upstream baseline, and how to take a new drop
+
+The vendored copy tracks **the 2026-09-10 revision of `XPR-main/XPR`**.
+
+**2026-09-10** took all four items we sent upstream: `spacez` and `min_box_length_sum`
+are keyword arguments, an out-of-window protein is a hard
+`error("protein out of bounds")` instead of silent clipping, and
+`XPRsim._import_pdb` gives the CAL ion calcium's mass (plus `.capitalize()` on the
+element lookup, fixing a `KeyError` on any two-letter element). **Two of our
+divergences became upstream features and are retired**: the
+`max_box_length`/`max_sig` sizing keywords, and `slab_headroom` (obsolete -- the
+fixed-slab-count design cannot overrun a buffer).
+
+**2026-09-09** replaced the fixed 0.5 A lattice with a fixed slab COUNT and
+parameter-dependent spacing: `box_cells[b] = ceil(max_box_length/spacez)` cells per
+box at spacing `d_b/box_cells[b]`, and a rigid `spacez` above z=0, below the stack
+and in the Gaussian tails. That removed the last kink (a cumulative box length
+landing on a lattice node) and the entire segfault class -- every loop bound is now a
+load-time constant, so no proposal can overrun an array.
+
+**2026-09-08** changed two things in the physics layer:
+
+* **`d_protein` (XModFit's `protins`) is measured from the protein's MASS CENTROID**,
+  where it used to be measured from the top of the protein. Deliberate, and the
+  reason is smoothness: the top is `max_i (r3(theta,phi).c_i + rad_i)`, a maximum
+  over atoms, so anchoring the translation on it put a slope discontinuity into the
+  forward model at every orientation where the topmost atom changes — the one thing
+  a differentiable backend cannot afford. `load_data` now also takes `masses_py`,
+  since the centroid is mass-weighted. `rotate_protein!` returns the old
+  top-referenced value as `protein_height`, and `XPR_sim_ref` passes it back as a
+  third return value.
+* **`smear_xy_interface!` was rebuilt onto one rigid lattice** — a `spacez` grid
+  spanning the whole padded profile with the box interfaces injected into it, in
+  ascending z, `reflectivity!` reversing the views. Previously the smearing lattice
+  and the reflectivity lattice were assembled separately from parameter-dependent
+  `collect(a:step:b)` ranges, so their length moved with the parameters.
+
+Neither is a change of physics: `validate_xpr.py` reproduces the stored protein
+reference `-466.4557` **exactly**, at `protins = 13.358030329245691 - maxh`. The two
+box-model references moved in the fourth decimal from the new lattice
+(`-1214.2981 -> -1214.1600`, `-600.6506 -> -600.6398`), and those are upstream's own
+new numbers from `demo.ipynb`.
+
+### The mesh is part of the model
+
+Since 2026-09-09 the sizing arguments are not just allocation hints. Measured on real
+data (`julia/resolution_study.py`):
+
+| argument | changes the answer? |
+|---|---|
+| `spacez` | **yes** -- mesh outside the boxes, and `cells_per_box = ceil(box_ref/spacez)` |
+| `max_box_length` (`box_ref_length` on the model) | **yes** -- in-box mesh `d_b*spacez/box_ref` |
+| `d_protein_bounds` | no (4e-11) -- but Julia ERRORS outside it |
+| `sig_max` | no (6e-11) |
+| `min_box_length_sum` | no (4e-13) |
+
+`XLayersPDB_XPR` therefore takes the *fatal* window (`d_protein_bounds`, `sig_max`)
+from the lmfit parameter bounds and the *answer-bearing* mesh from its own `spacez`
+and `box_ref_length` attributes -- deliberately NOT from the bounds, so that widening
+a bound does not silently change chi2. **Never compare absolute chi2 across different
+`spacez`/`box_ref_length`, or across code versions.** Halve `spacez` once at the end
+to confirm a result is mesh-converged; `julia/resolution_study_report.txt` is the
+worked example.
+
+To take a new upstream drop, do **not** hand-merge:
+
+```bash
+python julia/merge_upstream.py [path/to/XPR-main/XPR/src/XPR.jl]
+python validate_xpr.py
+```
+
+`merge_upstream.py` re-applies the divergences below, each anchored on exact
+upstream text and asserted to fire exactly once, so an upstream edit that moves an
+anchor fails loudly rather than silently dropping a patch. It is idempotent.
+
 ### Divergence from upstream `XPR.jl`
 
-Two changes, both marked in the source:
+Four changes, all marked in the source (down from five -- upstream absorbed the
+slab-sizing keywords on 2026-09-10):
 
 1. **Optional keywords on `load_data`/`prealloc`**, every one defaulting to the
    upstream hard-coded value: `xray_energy` (was a literal 10.0 keV),
@@ -121,6 +197,22 @@ Two changes, both marked in the source:
    recompile the whole model (~3 s) every time the set of varying parameters
    changes.
 
+   **`XPR_maxh(theta, phi)`** returns `(maxh, mindepth, atom)`: the protein's reach
+   above and below its centroid along the rotated z axis, and which atom attains
+   the maximum. `maxh` is the offset between the two definitions of the insertion
+   parameter, so this is what lets XModFit report the old top-referenced insertion
+   without running the model. `Functions/pdb_geometry.com_extent` reproduces it in
+   numpy (checked bit-for-bit in `validate_xpr.py`) so a whole MCMC chain converts
+   in one pass, and `com_extent_grad` adds the analytic `d(maxh)/d(theta, phi)` for
+   propagating its error.
+
+4. **Unit-cube reparameterisation** and **the `vol_calc="exact"` workspace sizing** —
+   see the file header. `load_data(...; param_lower, param_upper)` maps `[0,1]^n` to
+   physical units *inside* `XPR!`, so the AD derivatives come back already
+   chain-ruled; and the O(N^2) union-of-circles arrays are sized to 1 unless the
+   exact path is actually selected, because `TempVars` is parameterised by `T` and
+   under nested Hessian duals one of them reached ~9 GB.
+
 ### Analytic Jacobian
 
 `Fit_Routines` hands it to `leastsq` automatically when the model can supply one and
@@ -140,15 +232,48 @@ Two things it is deliberately NOT used for:
   Measured: 30 s -> 34 s serial, 51 s -> 74 s at 16 workers. Hence the `nvarys >= 4`
   gate in `Fit.can_jac`.
 
-### Grid-alignment kinks
+### Grid-alignment kinks — now only in `d`
 
-XPR lays its profile on a fixed `spacez = 0.5 A` lattice, so R has a small slope
-discontinuity wherever a layer boundary or the smearing extent lands exactly on a
-node — `sum(d)` a multiple of 0.5, or `10*sig` likewise. The AD derivative is the
-correct one-sided one; central differences straddle the kink and disagree by ~1e-2.
-Round-number defaults (`d = [11.0, 9.0]`, `sig = 3.4`) sit exactly on them, which is
-worth knowing before trusting a finite-difference cross-check — or before running
-gradient-based MCMC in stage 3.
+XPR lays its profile on a fixed `spacez = 0.5 A` lattice. Where a *box interface*
+lands exactly on a node (a cumulative sum of `d` at a multiple of 0.5), R still has
+a small slope discontinuity: `smear_xy_interface!` builds its lattice as
+`sort(unique([gridz; 0.0; -cumsum(box_lengths)]))`, and at exact coincidence the
+interface point merges with the grid point. Measured on the test protein at
+`d = [11.0, 9.0]` (so `sum(d) = 20.0`), one-sided `dlogL/dd1` slopes are `+39549.0`
+and `+39553.3` and stay ~4.3 apart as `h -> 0`; AD returns the **right-hand** one,
+`+39553.30`. Off the lattice (`d = [11.13, 9.07]`) the left/right gap falls linearly
+with `h` — pure truncation — and AD agrees with central differences to 2e-8. In
+`dR/dd` the effect is ~9e-3 relative at the worst q point.
+
+The `10*sig` half of this is **gone** since the 2026-09-08 rewrite: the smearing
+extent is now put through `floor`/`ceil` onto the grid, which carries no derivative,
+so `sig = 3.4` (i.e. `10*sig = 34.0`, exactly on a node) gives AD-vs-central-
+difference agreement of 1.4e-8, where it used to disagree by ~1e-2.
+
+Still worth knowing before trusting a finite-difference cross-check, or before
+gradient-based MCMC in stage 3 — but only round-number *thicknesses* now matter, and
+the set is measure zero. `validate_xpr.py` deliberately runs its Jacobian check at
+generic parameters for this reason.
+
+### Smoothness of the pose parameters
+
+The point of the 2026-09-08 upstream change, measured on the 1697-atom test protein:
+
+* Along `phi = 112.59`, the topmost atom changes at 10 values of `theta` in
+  `[1, 179]`. `d(maxh)/d(theta)` genuinely jumps at each (4e-4 to 1.2e-1). Under the
+  old top-anchored convention the protein was translated by `maxh`, so `dlogL/dtheta`
+  jumped there too. It now does not: the worst left/right disagreement over those 10
+  angles is **3.5e-5 relative**, and the AD gradient sits between the two one-sided
+  differences, which is what a smooth function does. `validate_xpr.py` asserts this.
+* AD vs central differences for `(theta, phi, protins)` over 24 random orientations:
+  worst 7.4e-6 relative, and it does not keep falling with `h` — it is at the
+  round-off floor, i.e. the derivatives are exact.
+* Crossing a lattice node in `protins` (which shifts the padded grid ends by 0.5 A
+  and changes the slab count by one) leaves the derivative stable to six digits; the
+  curvature residual falls to the 1e-9 round-off floor as `h -> 0`, so there is no
+  jump.
+* `Hessian`: symmetric to 2.3e-10, and its `theta`/`phi`/`protins` rows agree with
+  finite differences of the AD gradient to 1.3e-8 / 1.2e-6 / 5.3e-7.
 
 ### Why the first MCMC step is slow
 

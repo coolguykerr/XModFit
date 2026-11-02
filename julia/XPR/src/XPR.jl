@@ -7,28 +7,41 @@ Implementation is optimized for memory and speed while maintaining compatibility
 --------------------------------------------------------------------------------
 XModFit vendored copy. Upstream: XPR-main/XPR (Elias Boshara).
 
-Divergence 1 of 2: optional keyword arguments on `load_data`/`prealloc`, all
-defaulting to the upstream hard-coded values, so behaviour is unchanged unless a
-caller opts in:
+Baseline: the 2026-09-10 upstream revision. Recent upstream history that matters
+when reading this file:
+
+  2026-09-08  `d_protein` redefined from the TOP of the protein to its MASS
+              CENTROID, and `smear_xy_interface!` rebuilt onto one lattice, both
+              for smoothness. `load_data` gained `masses_py`; `rotate_protein!`
+              returns `protein_height`, the old top-referenced insertion.
+  2026-09-09  Fixed slab COUNT with parameter-dependent spacing: `box_cells[b]`
+              cells per box at spacing `d_b/box_cells[b]`, rigid `spacez` above
+              z=0 / below the stack / in the Gaussian tails. Removed the last
+              non-smoothness (a kink when a cumulative box length landed on a
+              lattice node) and, as a side effect, the segfault class -- every
+              loop bound is now a load-time constant.
+  2026-09-10  `spacez` and `min_box_length_sum` exposed as keyword arguments; the
+              protein is bounds-checked in `XPR!` with a hard `error()`.
+
+Divergence 1: two optional keyword arguments on `load_data`/`prealloc` that
+upstream still hard-codes, each defaulting to the upstream literal so behaviour is
+unchanged unless a caller opts in:
 
     xray_energy     10.0    keV; upstream hard-codes 10.0 inside prealloc
     fres            true    Fresnel normalisation; upstream hard-codes true
-    max_box_length  30.0    per-box length assumed when sizing the slab arrays
-    max_sig         5.0     largest roughness assumed when sizing the slab arrays
-    slab_headroom   0.0     extra Angstroms of slab budget (e.g. for protins<0)
 
-The last three exist because the upstream sizes `max_ed_slabs`/`max_refl_slabs`
-against literal 30 A boxes and 5 A roughness; exceeding either overruns the
-preallocated buffers and SEGFAULTS the host process (which, inside a GUI, takes
-XModFit down with it). Functions/xpr_backend.py sizes them from the lmfit
-parameter bounds and re-loads if a proposal ever outgrows them.
+`xray_energy` is inert today: XPR allocates its absorption array and never writes
+to it, so beta == 0 and the wavelength only ever appears multiplied by beta. It is
+wired up so `E` behaves correctly the day absorption is added.
 
-Divergence 2 of 2: two new exported functions, `XPR_edp(params)` returning the
-smeared electron-density profile so XModFit can plot an EDP like its other XRR
-models, and `XPR_sim_edp(params)` returning the reflectivity and that profile from a
-single `XPR!` call (asking for both separately would evaluate the model twice), and
-`XPR_jac(params, active)` giving dR_i/dp_j by forward-mode AD over a chosen subset
-of the parameters, so least-squares fitting need not finite-difference it.
+Divergence 2: four new exported functions. `XPR_edp(params)` returns the smeared
+electron-density profile so XModFit can plot an EDP like its other XRR models;
+`XPR_sim_edp(params)` returns the reflectivity, the protein height and that profile
+from a single `XPR!` call (asking for them separately would evaluate the model
+twice); `XPR_jac(params, active)` gives dR_i/dp_j by forward-mode AD over a chosen
+subset of the parameters, so least-squares fitting need not finite-difference it;
+and `XPR_maxh(theta, phi)` returns the centroid-to-top offset alone, so the
+old-style insertion can be reported without running the model.
 
 Divergence 3: `load_data(...; param_lower, param_upper)` optionally reparameterises
 the model onto the unit cube [0,1]^(8+2n). The mapping happens inside `XPR!`, so it
@@ -36,6 +49,15 @@ is part of the differentiated computation and XPR_grad/XPR_hess/XPR_jac come bac
 NORMALISED coordinates with no chain rule on the caller's side -- which is what a
 bounded global search wants, and what keeps a ~1e13 condition number tractable. Omit
 the bounds and everything behaves exactly as before, in physical units.
+
+Divergence 4: the O(N^2) union-of-circles workspace is sized to 1 unless
+`vol_calc="exact"` actually selects the code that reads it (see prealloc).
+
+RETIRED divergences, now upstream features -- do not re-add:
+  * `max_box_length` / `max_sig` slab-sizing keywords -> upstream `max_box_length`,
+    `sig_max`, `spacez`, `d_protein_bounds`, `min_box_length_sum`.
+  * `slab_headroom` -> obsolete. The slab count no longer depends on the
+    parameters, so no proposal can overrun a preallocated array.
 --------------------------------------------------------------------------------
 """
 
@@ -55,6 +77,7 @@ struct SimData
     coordinates::Matrix{Float64}
     electrons::Vector{Float64}
     radii::Vector{Float64}
+    prot_extent::Float64
     ρ_top::Float64
     ρ_bottom::Float64
     xray_energy::Float64
@@ -67,6 +90,10 @@ struct SimData
     max_ed_slabs::Int
     max_refl_slabs::Int
     spacez::Float64
+    box_cells::Vector{Int}
+    top_cells::Int
+    bottom_cells::Int
+    tail_cells::Int
     include_protein::Bool
     fit_sig::Bool
     fit_yscl::Bool
@@ -165,7 +192,7 @@ function get_tempvars(T, simdata, areavars_template)
         tv =  TempVars(
             zeros(T,simdata.N, 3),                                          # rot_coordinates
             zeros(T, simdata.N),                                            # r_radii
-            zeros(T, simdata.max_ed_slabs + 1),                             # z_slab                    
+            zeros(T, simdata.max_ed_slabs + 1),                             # z_slab
             zeros(T, simdata.max_ed_slabs - 2),                             # α
             one(T),                                                         # A
             zeros(T, 2 * simdata.N + 2),                                    # events
@@ -178,9 +205,9 @@ function get_tempvars(T, simdata, areavars_template)
             zeros(T, simdata.N, 2),                                         # cand_locs
             zeros(T, simdata.N),                                            # cand_rads
             zeros(T, simdata.max_ed_slabs),                                 # ρ_protein
-            zeros(T, simdata.max_ed_slabs + 4),                             # smear_lattice
-            zeros(T, simdata.max_ed_slabs + 3),                             # ρ_hard_z
-            zeros(T, simdata.max_ed_slabs + 3),                             # μ: absorption coefficients at each slab, in descending order
+            zeros(T, simdata.max_refl_slabs),                               # smear_lattice
+            zeros(T, simdata.max_refl_slabs),                               # ρ_hard_z
+            zeros(T, simdata.max_refl_slabs),                               # μ: absorption coefficients
             zeros(T, simdata.max_refl_slabs),                               # w
             zeros(T, simdata.max_refl_slabs - 1),                           # w_mid
             zeros(T, simdata.max_refl_slabs - 1),                           # d
@@ -188,12 +215,12 @@ function get_tempvars(T, simdata, areavars_template)
             zeros(T, simdata.max_refl_slabs - 1),                           # β
             zeros(T, simdata.L),                                            # R
             zero(T),                                                        # χ_sq
-            zero(T)                                                         # logL                                                        
+            zero(T)                                                         # logL
         )
         GLOBAL_TV[T] = tv
     end
 
-    copyto!(GLOBAL_TV[T].r_radii, simdata.radii) # store radii directly 
+    copyto!(GLOBAL_TV[T].r_radii, simdata.radii) # store radii directly
 
     return GLOBAL_TV[T]::TempVars{T}
 end
@@ -208,13 +235,14 @@ end
 
 # called once from python at beginning of simulations to import data and load into global data structures
 function load_data(data_Q_py, data_R_py, data_err_py, num_boxes, include_protein, fit_sig, fit_yscl, fit_bkg;
-    coordinates_py=nothing, electrons_py=nothing, radii_py=nothing, vol_calc = "approx", rho_top=0.0, rho_bottom=0.334,
-    xray_energy=10.0, fres=true, max_box_length=30.0, max_sig=5.0, slab_headroom=0.0,
-    param_lower=nothing, param_upper=nothing)
+    coordinates_py=nothing, electrons_py=nothing, radii_py=nothing, masses_py=nothing,
+    vol_calc = "approx", rho_top=0.0, rho_bottom=0.334, max_box_length=30.0, d_protein_bounds=(-30.0, 30.0),
+    sig_max=5.0, spacez=0.5, min_box_length_sum=0.0,
+    xray_energy=10.0, fres=true, param_lower=nothing, param_upper=nothing)
 
     # reset as needed
     reset_data()
-    
+
     # Convert PyArrays to Julia Arrays
     data_Q = Array(data_Q_py)
     data_R = Array(data_R_py)
@@ -225,17 +253,20 @@ function load_data(data_Q_py, data_R_py, data_err_py, num_boxes, include_protein
         coordinates = Array(coordinates_py)
         electrons = Array(electrons_py)
         radii = Array(radii_py)
+        masses = Array(masses_py)
     else
         coordinates = [0.0 0.0 0.0]
         electrons = [1.0]
         radii = [1.0]
+        masses = [1.0]
     end
- 
-    # preallocate 
+
     simdata, areavars = prealloc(data_Q, data_R, data_err, num_boxes, include_protein,
-    fit_sig, fit_yscl, fit_bkg, coordinates, electrons, radii, vol_calc, rho_top, rho_bottom;
-    xray_energy=xray_energy, fres=fres, max_box_length=max_box_length, max_sig=max_sig,
-    slab_headroom=slab_headroom, param_lower=param_lower, param_upper=param_upper)
+                                    fit_sig, fit_yscl, fit_bkg, coordinates, electrons, radii, masses,
+                                    vol_calc, rho_top, rho_bottom, max_box_length, d_protein_bounds,
+                                    sig_max, spacez, min_box_length_sum;
+                                    xray_energy=xray_energy, fres=fres,
+                                    param_lower=param_lower, param_upper=param_upper)
     GLOBAL_SD[] = simdata
     GLOBAL_AV[] = areavars
 
@@ -244,9 +275,11 @@ end
 
 # preallocate memory for simulation data and area computation
 function prealloc(data_Q, data_R, data_err, num_boxes, include_protein,
-   fit_sig, fit_yscl, fit_bkg,  coordinates, electrons, radii, vol_calc, rho_top, rho_bottom;
-   xray_energy=10.0, fres=true, max_box_length=30.0, max_sig=5.0, slab_headroom=0.0,
-   param_lower=nothing, param_upper=nothing)
+                    fit_sig, fit_yscl, fit_bkg,  coordinates, electrons, radii, masses,
+                    vol_calc, rho_top, rho_bottom, max_box_length, d_protein_bounds,
+                    sig_max, spacez, min_box_length_sum;
+                    xray_energy=10.0, fres=true,
+                    param_lower=nothing, param_upper=nothing)
 
     # normalisation bounds, if the caller supplied them
     nparam = 8 + 2 * num_boxes
@@ -265,9 +298,7 @@ function prealloc(data_Q, data_R, data_err, num_boxes, include_protein,
     end
 
     N = include_protein ? length(radii) : 1                                                  # number of atoms in protein
-    L = length(data_Q)                                                                       # length of data set
-
-    spacez = 0.5                                                                             # vertical spacing of grid (Angstroms)
+    L = length(data_Q)                                                                       # length of data set                                                                           # vertical spacing of grid (Angstroms)
 
     # given data
     ρ_top        = rho_top                                                                   # electron density of the air
@@ -281,6 +312,10 @@ function prealloc(data_Q, data_R, data_err, num_boxes, include_protein,
     max_sd_away = 10        # how many standard deviations away from interface we extend smearing
 
     if include_protein
+        # calculate total mass and center of mass
+        total_mass = sum(masses)
+        com = sum(coordinates .* masses, dims=1) ./ total_mass
+
         # compute largest possible grid discretization [max diagonal of bounding box of protein]
         x_min, x_max = extrema(view(coordinates, :, 1))
         y_min, y_max = extrema(view(coordinates, :, 2))
@@ -290,18 +325,39 @@ function prealloc(data_Q, data_R, data_err, num_boxes, include_protein,
         cell_size = 2.0 * max_r
         max_b = (vol_calc == "exact") ? trunc(Int, (sq_max_l / cell_size) + 1) : 1
 
-        # *** decreasing  this runs the risk of seg fault *** #
-        # maximum possible phase I slab amount : max protein length + 2 * maximum radius + maximum tail length + maximum head length + 2 buffers
-        max_ed_slabs = ceil((sq_max_l + 2*max_r + max_box_length*num_boxes + slab_headroom) / spacez) + 2
+        # center the coordinate system
+        coordinates .-= com
+
+        # largest vertical extent
+        prot_extent = maximum(
+            sqrt(sum(abs2, view(coordinates, i, :))) + radii[i] for i in 1:N
+        )
+
+        # relevant cell counts
+        dmin, dmax = d_protein_bounds
+        top_cells = ceil(Int, max(0.0, dmax + prot_extent - min_box_length_sum) / spacez)
+        bottom_cells = ceil(Int, max(0.0, prot_extent - dmin) / spacez)
+
     else
-        max_ed_slabs = ceil((max_box_length*num_boxes + slab_headroom) / spacez) + 2
         max_b = 1
         cell_size = 1.0
+        top_cells = 0
+        bottom_cells = 0
+        prot_extent = 0.0
     end
 
-    # *** decreasing  this runs the risk of seg fault *** #
-    # maximum possible phase II slab amount : max phase I + 2 * (added slabs on one end)
-    max_refl_slabs = max_ed_slabs + 2 * ceil((max_sd_away * max_sig) / spacez)
+    cells_per_box = ceil(Int, max_box_length / spacez)
+    box_cells = fill(cells_per_box, num_boxes)
+
+    physical_cells = top_cells + sum(box_cells) + bottom_cells
+
+    # number of boundaries for boxes in SLD computation
+    max_ed_slabs = physical_cells + 2
+
+    tail_cells = ceil(Int, max_sd_away * sig_max / spacez)
+
+    # number of boundaries in the final smearing lattice
+    max_refl_slabs = (max_ed_slabs - 1) + 2 * tail_cells
 
     # create instance of simulation data
     simdata = SimData(
@@ -311,6 +367,7 @@ function prealloc(data_Q, data_R, data_err, num_boxes, include_protein,
         coordinates,
         electrons,
         radii,
+        prot_extent,
         ρ_top,
         ρ_bottom,
         xray_energy,
@@ -323,6 +380,10 @@ function prealloc(data_Q, data_R, data_err, num_boxes, include_protein,
         max_ed_slabs,
         max_refl_slabs,
         spacez,
+        box_cells,
+        top_cells,
+        bottom_cells,
+        tail_cells,
         include_protein,
         fit_sig,
         fit_yscl,
@@ -348,7 +409,7 @@ function prealloc(data_Q, data_R, data_err, num_boxes, include_protein,
     cell_max = exact_path ? simdata.N : 1                       # circles per mesh cell [worst case = N]
     max_intersect = exact_path ? Int(simdata.N * (simdata.N - 1) / 2) : 1   # [worst case = N(N-1)/2]
     max_neighbor = exact_path ? simdata.N : 1                   # atoms intersecting a given atom [worst case = N]
-    
+
     tol = 1e-8                                                  # threshold to be an interior point
     intersecting_pairs = -ones(Int, max_intersect, 2)           # stores all pairs of circles which intersect
     intersect_count = 0                                         # total interesection count
@@ -370,13 +431,13 @@ function prealloc(data_Q, data_R, data_err, num_boxes, include_protein,
 
     # instance of areavars
     areavars = AreaVars(
-        tol, 
-        cell_max, 
+        tol,
+        cell_max,
         max_neighbor,
         max_intersect,
-        intersecting_pairs, 
+        intersecting_pairs,
         intersect_count,
-        adjacency, 
+        adjacency,
         adjacency_count,
         intersects,
         contained,
@@ -399,8 +460,8 @@ end
 
 # rotate and translate protein
 function rotate_protein!(simdata, tempvars, θ, ϕ, d_protein, box_lengths)
-    
-    # NOTE: omit translating protein to center of mass
+
+    # protein already moved to center of mass
 
     # rows of the rotation matrix
     r1 = [cos(ϕ), -sin(ϕ), 0.0]
@@ -408,48 +469,67 @@ function rotate_protein!(simdata, tempvars, θ, ϕ, d_protein, box_lengths)
     r3 = [sin(θ)*sin(ϕ), sin(θ)*cos(ϕ), cos(θ)]
     rotation_matrix = hcat(r1, r2, r3)'
 
-    # align with bottom of boxes
-    maxh = maximum(vec(r3' * simdata.coordinates') + simdata.radii)
-    z_top = d_protein - sum(box_lengths) - maxh
+    # align based on center of mass
+    z_offset = d_protein - sum(box_lengths)
 
     # rotate and translate
-    tempvars.rot_coordinates .= (rotation_matrix * simdata.coordinates' .+ [0.0; 0.0; z_top])'
+    tempvars.rot_coordinates .= (rotation_matrix * simdata.coordinates' .+ [0.0; 0.0; z_offset])'
 
-    return nothing
+    ## compute distance of top of protein to bottom box
+
+    # compute maximum vertical extent of the rotated centered coordinates
+    maxh = maximum(vec(r3' * simdata.coordinates') + simdata.radii)
+    protein_height = d_protein + maxh
+
+    return protein_height
 end
 
-# compute the M+1 slab boundaries, in descending order [assume top slab has thickness zero, final slab is buffer]
+# compute the slab boundaries, fixed # during optimization
 function get_slab_boundaries!(simdata, tempvars, box_lengths)
 
-    # top and bottom values of the system
-    bot = argmin(tempvars.rot_coordinates[:,3] - simdata.radii)
-    bot_val = minimum([tempvars.rot_coordinates[bot,3] - simdata.radii[bot], -sum(box_lengths)])
-    top = argmax(tempvars.rot_coordinates[:,3] + simdata.radii)
-    top_val = maximum([tempvars.rot_coordinates[top,3] + simdata.radii[top], 0.0])
+    T = eltype(box_lengths)
+    h = simdata.spacez
 
-    # fixed discretization grid
-    lo = round(floor(bot_val / simdata.spacez) * simdata.spacez; digits=10)
-    hi = round(ceil(top_val / simdata.spacez) * simdata.spacez; digits=10)
-    gridz = collect(lo:simdata.spacez:hi)
-    M = length(gridz) + 1
+    top_z = zero(T) + simdata.top_cells * h
 
-    # build grid
-    z_slab = zeros(eltype(gridz), length(gridz) + 2)
-    z_slab[1] = lo
-    z_slab[2:end-1] = gridz
-    z_slab[end] = hi
+    tempvars.z_slab[1] = top_z
+    tempvars.z_slab[2] = top_z
 
-    reverse!(z_slab)
+    idx = 2
 
-    # store data into tempvars
-    for i = eachindex(z_slab)
-        tempvars.z_slab[i] = z_slab[i]
+    # region above the box model: fixed h-spacing
+    for k in 1:simdata.top_cells
+        idx += 1
+        tempvars.z_slab[idx] = zero(T) + (simdata.top_cells - k) * h
     end
+
+    # box model
+    box_top = zero(T)
+    for b in 1:simdata.num_boxes
+        K = simdata.box_cells[b]
+        box_bottom = box_top - box_lengths[b]
+        for k in 1:K
+            τ = k / K
+            idx += 1
+            tempvars.z_slab[idx] = box_top + τ * (box_bottom - box_top)
+        end
+        box_top = box_bottom
+    end
+
+    bottom_interface = box_top
+
+    # region below the bottom box
+    for k in 1:simdata.bottom_cells
+        idx += 1
+        tempvars.z_slab[idx] = bottom_interface - k * h
+    end
+    M = idx
+    tempvars.z_slab[M + 1] = tempvars.z_slab[M]
 
     return M
 end
 
-# area/volume computation helper 1: find all intersections and adjacency data 
+# area/volume computation helper 1: find all intersections and adjacency data
 function find_circle_intersections_grid!(areavars, locations, rad)
 
     offsets = ((0,0), (1,0), (0,1), (1,1), (-1,1)) # need only to check forward neighbors
@@ -477,20 +557,20 @@ function find_circle_intersections_grid!(areavars, locations, rad)
 
                 @inbounds for gb in 1:n_i
                     i = areavars.grid[gx, gy, gb]
-                    if areavars.contained[i] 
-                        continue 
+                    if areavars.contained[i]
+                        continue
                     end
-                    
+
                     xi, yi, ri = locations[i, 1], locations[i, 2], rad[i]
 
                     # if same cell, start gc at gb + 1 to avoid double counting and i==j
                     start_gc = same_cell ? gb + 1 : 1
-                    
+
                     @inbounds for gc in start_gc:n_j
                         j = areavars.grid[nx, ny, gc]
-                        
-                        if areavars.contained[j] 
-                            continue 
+
+                        if areavars.contained[j]
+                            continue
                         end
 
                         xj, yj, rj = locations[j, 1], locations[j, 2], rad[j]
@@ -498,14 +578,14 @@ function find_circle_intersections_grid!(areavars, locations, rad)
                         dx_val = xj - xi
                         dy_val = yj - yi
                         dist2 = dx_val * dx_val + dy_val * dy_val
-                        
+
                         sum_r = ri + rj
                         diff_r = ri - rj
                         sum_r2 = sum_r * sum_r
                         diff_r2 = diff_r * diff_r
 
                         if dist2 >= sum_r2                      # no intersection
-                            continue 
+                            continue
                         elseif dist2 <= diff_r2                 # one inside the other
                             if ri < rj
                                 areavars.contained[i] = true
@@ -516,13 +596,13 @@ function find_circle_intersections_grid!(areavars, locations, rad)
                         else                                    # proper intersection
                             areavars.intersects[i] = true
                             areavars.intersects[j] = true
-                            
+
                             idx_i = (areavars.adjacency_count[i] += 1)
                             areavars.adjacency[i, idx_i] = j
-                            
+
                             idx_j = (areavars.adjacency_count[j] += 1)
                             areavars.adjacency[j, idx_j] = i
-                            
+
                             p_idx = (areavars.intersect_count += 1)
                             areavars.intersecting_pairs[p_idx, 1] = i
                             areavars.intersecting_pairs[p_idx, 2] = j
@@ -537,7 +617,7 @@ end
 
 # area/volume computation helper 2: identify and classify intersection points as boundary or interior
 function compute_ubp!(tempvars, areavars, locations, rad)
-    
+
     areavars.pt_count = 0
 
     # iterate through proper intersections, compute and store intersection points
@@ -573,22 +653,22 @@ function compute_ubp!(tempvars, areavars, locations, rad)
         p2y = y0 + ay
         offx = -h * dy * invd
         offy =  h * dx * invd
-        
+
         # store data
         for s in (-1, 1)
             areavars.pt_count += 1
             idx = areavars.pt_count
             px = p2x + s * offx
             py = p2y + s * offy
-            
+
             tempvars.int_pts[idx, 1] = px
             tempvars.int_pts[idx, 2] = py
-            
+
             areavars.counts[i] += 1
             areavars.counts[j] += 1
             areavars.circ_to_pt_idx[i, areavars.counts[i]] = idx
             areavars.circ_to_pt_idx[j, areavars.counts[j]] = idx
-            
+
             areavars.pt_owner_circle[idx] = areavars.adjacency_count[i] <= areavars.adjacency_count[j] ? i : j
         end
     end
@@ -599,7 +679,7 @@ function compute_ubp!(tempvars, areavars, locations, rad)
         adj_count = areavars.adjacency_count[c]
         px = tempvars.int_pts[p_idx, 1]
         py = tempvars.int_pts[p_idx, 2]
-        
+
         @simd for m = 1:adj_count
             cj = areavars.adjacency[c, m]
             tempvars.cand_locs[m, 1] = locations[cj, 1]
@@ -624,7 +704,7 @@ end
 
 # area/volume computation helper 3: computing line integral on boundary arcs
 function process_arcs!(tempvars, areavars, locations, rad, n)
-    
+
     tol_area = 0.0
     two_pi = 2 * pi
 
@@ -675,34 +755,34 @@ function process_arcs!(tempvars, areavars, locations, rad, n)
         for j = 1:n_out
             idx1 = j
             idx2 = (j % n_out) + 1
-            
+
             p1 = angles_view[idx1]
             p2 = angles_view[idx2]
-            
+
             # handle angular wrap-around before calculating midpoint
             if p2 <= p1
                 p2 += two_pi
             end
-            
+
             # calculate midpoint of the current arc
             amid = (p1 + p2) / 2.0
             mx, my = cx + r * cos(amid), cy + r * sin(amid)
-            
+
             # check if this specific arc midpoint is inside any candidate circle
             is_interior = false
             for k = 1:cand_count
                 dx, dy = tempvars.cand_locs[k, 1] - mx, tempvars.cand_locs[k, 2] - my
                 if dx*dx + dy*dy < tempvars.cand_rads[k]
                     is_interior = true
-                    break 
+                    break
                 end
             end
 
             if !is_interior
                 # ccw line integral
                 r2 = r * r
-                term = (r2 / 2.0) * (p2 - p1) + 
-                       (r2 / 4.0) * (sin(2 * p2) - sin(2 * p1)) + 
+                term = (r2 / 2.0) * (p2 - p1) +
+                       (r2 / 4.0) * (sin(2 * p2) - sin(2 * p1)) +
                        (cx * r)   * (sin(p2) - sin(p1))
                 tol_area += term
             end
@@ -713,12 +793,12 @@ end
 
 # area/volume computation helper 4: computation of a union of spheres using Green's theorem
 function greens!(tempvars, areavars, locations, rad)
-    
+
     n = length(rad)
     if n == 0
         return 0.0
     end
-    
+
     total_area = 0.0
 
     # reset necessary memory only
@@ -733,15 +813,15 @@ function greens!(tempvars, areavars, locations, rad)
     # populate grid
     min_x, min_y = tempvars.mins[1], tempvars.mins[2]
     inv_cell_size = 1.0 / areavars.cell_size
-    
+
     @inbounds for idx = 1:n
         gx = floor(Int, (locations[idx, 1] - min_x) * inv_cell_size) + 1
         gy = floor(Int, (locations[idx, 2] - min_y) * inv_cell_size) + 1
-        
+
         # clamp to ensure no bounds errors due to floating point precision
         gx = clamp(gx, 1, areavars.grid_xmax)
         gy = clamp(gy, 1, areavars.grid_ymax)
-        
+
         c = (areavars.grid_count[gx, gy] += 1)
         areavars.grid[gx, gy, c] = idx
     end
@@ -756,7 +836,7 @@ function greens!(tempvars, areavars, locations, rad)
             total_area += pi * rad[i]^2
         end
     end
-    
+
     total_area += process_arcs!(tempvars, areavars, locations, rad, n)
 
     return total_area
@@ -833,28 +913,28 @@ function area_slices_gl!(tempvars, areavars, simdata, M)
     # z-slices
     for j in 1:(M - 2)
         z_bot = tempvars.z_slab[j + 2]
-        z_top = tempvars.z_slab[j + 1] 
-        
+        z_top = tempvars.z_slab[j + 1]
+
         num_events = 0
-        
+
         # always include slab boundaries as integration limits
-        num_events += 1 
+        num_events += 1
         tempvars.events[num_events] = z_bot
-        num_events += 1 
+        num_events += 1
         tempvars.events[num_events] = z_top
 
         # identify all topological events within the current slab
         @inbounds for i in 1:simdata.N
             zi = coords[i, 3]
             ri = tempvars.r_radii[i]
-            
+
             # bottom of sphere crosses
             z_event_bot = zi - ri
             if z_bot < z_event_bot < z_top
                 num_events += 1
                 tempvars.events[num_events] = z_event_bot
             end
-            
+
             # top of sphere crosses
             z_event_top = zi + ri
             if z_bot < z_event_top < z_top
@@ -873,26 +953,26 @@ function area_slices_gl!(tempvars, areavars, simdata, M)
         @inbounds for e in 1:(num_events - 1)
             e_start = slab_events[e]
             e_end   = slab_events[e + 1]
-            
+
             dz_sub = e_end - e_start
-            
+
             # skip degenerate intervals (where events occur at virtually the same z)
             if dz_sub > 1e-8
                 half_dz = 0.5 * dz_sub
                 mid_z   = 0.5 * (e_start + e_end)
                 sub_volume = zero(T)
-                
+
                 # evaluate the 7-point Gauss-Legendre nodes
                 for q in eachindex(GL_X)
                     z_eval = mid_z + half_dz * GL_X[q]
                     n_filtered = 0
-                    
+
                     # compute circles in the current slice
                     for i in 1:simdata.N
                         zi = coords[i, 3]
                         ri = tempvars.r_radii[i]
                         dz_dist = z_eval - zi
-                        
+
                         if abs(dz_dist) < ri
                             rxy_sq = ri^2 - dz_dist^2
                             if rxy_sq > 0
@@ -908,7 +988,7 @@ function area_slices_gl!(tempvars, areavars, simdata, M)
                         locs_view = view(tempvars.slice_coords, 1:n_filtered, :)
                         rads_view = view(tempvars.slice_radii, 1:n_filtered)
                         area_q = greens!(tempvars, areavars, locs_view, rads_view)
-                        
+
                         sub_volume += GL_W[q] * area_q
                     end
                 end
@@ -916,9 +996,9 @@ function area_slices_gl!(tempvars, areavars, simdata, M)
                 slab_volume_approx += half_dz * sub_volume
             end
         end
-        tempvars.α[j] = slab_volume_approx
+        slab_width = z_top - z_bot
+        tempvars.α[j] = slab_volume_approx / (tempvars.A * slab_width)
     end
-    tempvars.α ./= (tempvars.A * simdata.spacez)
     return nothing
 end
 
@@ -937,16 +1017,16 @@ function area_slices_sphere_seg!(tempvars, simdata, M)
     @inbounds for j = 3:M # iterate through non-boundary slabs
         top_bound = tempvars.z_slab[j-1]
         bot_bound = tempvars.z_slab[j]
-        
-        d_acc = 0.0 
+
+        d_acc = 0.0
 
         @simd for i = 1:simdata.N # iterate through atoms
             zi = tempvars.rot_coordinates[i,3]
             ri = tempvars.r_radii[i]
-            
+
             zrp = zi + ri
             zrm = zi - ri
-            
+
             z_ij_top = ifelse(zrp < top_bound, zrp, top_bound)
             z_ij_bot = ifelse(zrm > bot_bound, zrm, bot_bound)
 
@@ -956,7 +1036,7 @@ function area_slices_sphere_seg!(tempvars, simdata, M)
             d = z_ij_bot - zi
             num = h_ij * (ri^2 - d^2 - h_ij*d - h_ij^2 / 3)
             denom = (4 / 3) * ri^3
-            
+
             d_acc += num / denom
         end
         tempvars.α[j-2] = (d_acc) / (tempvars.A * (top_bound - bot_bound))
@@ -970,16 +1050,16 @@ function electron_densities!(simdata, tempvars, M)
     @inbounds for j = 3:M # iterate through non-boundary slabs
         top_bound = tempvars.z_slab[j-1]
         bot_bound = tempvars.z_slab[j]
-        
-        ρ_acc = 0.0 
+
+        ρ_acc = 0.0
 
         @simd for i = 1:simdata.N # iterate through atoms
             zi = tempvars.rot_coordinates[i,3]
             ri = simdata.radii[i]
-            
+
             zrp = zi + ri
             zrm = zi - ri
-            
+
             z_ij_top = ifelse(zrp < top_bound, zrp, top_bound)
             z_ij_bot = ifelse(zrm > bot_bound, zrm, bot_bound)
 
@@ -989,7 +1069,7 @@ function electron_densities!(simdata, tempvars, M)
             d = z_ij_bot - zi
             num = h_ij * (ri^2 - d^2 - h_ij*d - h_ij^2 / 3)
             denom = (4 / 3) * ri^3
-            
+
             ρ_acc += simdata.electrons[i] * num / denom
         end
         tempvars.ρ_protein[j-1] = ρ_acc / (tempvars.A * (top_bound - bot_bound))
@@ -997,106 +1077,118 @@ function electron_densities!(simdata, tempvars, M)
     return nothing
 end
 
-# arbitrary step function, size(x_int) = size(yvals) + 1, x_int should be in decreasing order
-function step_function(x, x_int, yvals)
+# computes the relevant values of ρ_hard (i.e. all unique values), intervals, and combined interface
+function smear_xy_interface!(simdata, tempvars, box_densities, C, M)
 
-    nv = length(yvals)
+    h = simdata.spacez
+    ntail = simdata.tail_cells
 
-    T = promote_type(eltype(x), eltype(x_int), eltype(yvals))
-    result = zeros(T, length(x))
+    K = M - 2 # two buffer slabs
+    B = (M - 1) + 2 * ntail
 
-    @inbounds for (i, xi) in enumerate(x)
-        val = zero(T)
-        if xi <= x_int[1] && xi >= x_int[end]
-            val = yvals[end]
-            @inbounds for ii in 1:nv
-                if xi <= x_int[ii] && xi > x_int[ii+1]
-                    val = yvals[ii]
-                    break
-                end
+    bottom_z = tempvars.z_slab[M]
+    top_z    = tempvars.z_slab[2]
+
+    ## construct the final lattice in ascending z order
+
+    idx = 1
+
+    # bottom Gaussian tail
+    z = bottom_z - ntail * h
+    tempvars.smear_lattice[idx] = z
+    tempvars.w[idx] = z
+    for k in 1:ntail
+        idx += 1
+        z = bottom_z - (ntail - k) * h
+        tempvars.smear_lattice[idx] = z
+        tempvars.w[idx] = z
+    end
+
+    # physical mesh
+    for j in (M - 1):-1:2
+        idx += 1
+        z = tempvars.z_slab[j]
+        tempvars.smear_lattice[idx] = z
+        tempvars.w[idx] = z
+    end
+
+    # top Gaussian tail
+    for k in 1:ntail
+        idx += 1
+        z = top_z + k * h
+        tempvars.smear_lattice[idx] = z
+        tempvars.w[idx] = z
+    end
+
+
+    @inbounds for i in 1:(B - 1)
+        tempvars.w_mid[i] = 0.5 * (tempvars.w[i] + tempvars.w[i+1])
+        tempvars.d[i] = tempvars.w[i+1] - tempvars.w[i]
+    end
+
+    ## hard density
+
+    T = eltype(tempvars.ρ_hard_z)
+    fill!(view(tempvars.μ, 1:(B - 1)), zero(T)) #absorption 0 for now
+
+    # bottom bulk tail
+    @inbounds for i in 1:ntail
+        tempvars.ρ_hard_z[i] = simdata.ρ_bottom
+    end
+
+    # top bulk tail
+    top_tail_start = ntail + K + 1
+    @inbounds for i in top_tail_start:(B - 1)
+        tempvars.ρ_hard_z[i] = simdata.ρ_top
+    end
+
+    jcell = 0
+
+    # above z = 0
+    @inbounds for k in 1:simdata.top_cells
+        jcell += 1
+        out_idx = ntail + (K - jcell + 1)
+        ρ_box = simdata.ρ_top
+        if simdata.include_protein
+            tempvars.ρ_hard_z[out_idx] = C * tempvars.ρ_protein[jcell + 1] + (one(C) - C * tempvars.α[jcell]) * ρ_box
+        else
+            tempvars.ρ_hard_z[out_idx] = ρ_box
+        end
+    end
+
+    # box cells
+    @inbounds for b in 1:simdata.num_boxes
+        ρ_box = box_densities[b]
+        for k in 1:simdata.box_cells[b]
+            jcell += 1
+            out_idx = ntail + (K - jcell + 1)
+            if simdata.include_protein
+                tempvars.ρ_hard_z[out_idx] = C * tempvars.ρ_protein[jcell + 1] + (one(C) - C * tempvars.α[jcell]) * ρ_box
+            else
+                tempvars.ρ_hard_z[out_idx] = ρ_box
             end
         end
-        result[i] = val
     end
 
-    return result
-end
-
-# computes the relevant values of ρ_hard (i.e. all unique values), intervals, and combined interface
-function smear_xy_interface!(simdata, tempvars, box_lengths, box_densities, C, M, sig)
-
-    # combine and sort all values where interface function changes, pad if needed
-    if simdata.include_protein
-        tv = maximum([0.0, tempvars.z_slab[1]])
-        bv = minimum([-sum(box_lengths), tempvars.z_slab[M + 1]])
-        sl = sort([
-            tempvars.z_slab[2:M];
-            0.0;
-            -cumsum(box_lengths);
-            tv + simdata.max_sd_away * sig;
-            bv - simdata.max_sd_away * sig
-        ])
-    else
-        tv = 0.0
-        bv = -sum(box_lengths)
-        tv_val = tv isa ForwardDiff.Dual ? ForwardDiff.value(tv) : tv
-        bv_val = bv isa ForwardDiff.Dual ? ForwardDiff.value(bv) : bv
-        lo = round(floor(bv_val / simdata.spacez) * simdata.spacez; digits=10)
-        hi = round(ceil(tv_val / simdata.spacez) * simdata.spacez; digits=10)
-        gridz = collect(lo:simdata.spacez:hi)
-        sl = sort([gridz;
-            0.0;
-            -cumsum(box_lengths);
-            tv + simdata.max_sd_away * sig;
-            bv - simdata.max_sd_away * sig
-        ])
-    end
-    
-    for i = eachindex(sl)
-        tempvars.smear_lattice[i] = sl[i]
+    # below the bottom box interface
+    @inbounds for k in 1:simdata.bottom_cells
+        jcell += 1
+        out_idx = ntail + (K - jcell + 1)
+        ρ_box = simdata.ρ_bottom
+        if simdata.include_protein
+            tempvars.ρ_hard_z[out_idx] = C * tempvars.ρ_protein[jcell + 1] + (one(C) - C * tempvars.α[jcell]) * ρ_box
+        else
+            tempvars.ρ_hard_z[out_idx] = ρ_box
+        end
     end
 
-    # step function eval points
-    ns = length(sl)
-    smear_mpt = similar(tempvars.smear_lattice, ns - 1)
-    @simd for i = 1:(ns-1) # necessary loop for reverse diff
-        smear_mpt[i] = (tempvars.smear_lattice[i] + tempvars.smear_lattice[i+1]) * 0.5
-    end
-
-    # build the discretization blocks for smearing and reflectivity, sorted in descending order
-    rend = collect(tempvars.smear_lattice[ns-1]:simdata.spacez:tempvars.smear_lattice[ns])
-    rfront = collect(tempvars.smear_lattice[1]:simdata.spacez:tempvars.smear_lattice[2])
-    rall = reverse(sort([rfront; tempvars.smear_lattice[3:ns-2]; rend]))
-    B = length(rall)
-    for i = eachindex(rall)
-        tempvars.w[i] = rall[i]
-    end
-    for i = 1:(B-1)
-        tempvars.w_mid[i] = (tempvars.w[i] + tempvars.w[i+1]) * 0.5
-        tempvars.d[i] = tempvars.w[i] - tempvars.w[i+1]
-    end
-
-    # step function computation
-    ρ_box_z = step_function(smear_mpt, [Inf; 0.0; -cumsum(box_lengths); -Inf], [simdata.ρ_top; box_densities; simdata.ρ_bottom])
-    if simdata.include_protein
-        ρ_protein_z = step_function(smear_mpt, view(tempvars.z_slab, 1:(M+1)), view(tempvars.ρ_protein, 1:M))
-        α_z = step_function(smear_mpt, view(tempvars.z_slab, 2:M), view(tempvars.α, 1:(M-2)))
-
-        # combined interface function for protein
-        temp_ρhz = C .* ρ_protein_z .+ (1 .- C .* α_z) .* ρ_box_z
-    else
-        temp_ρhz = ρ_box_z
-    end
-    for i in eachindex(temp_ρhz)
-        tempvars.ρ_hard_z[i] = temp_ρhz[i]
-    end
-    return B, ns
+    return B
 end
 
 # evaluated the Gaussian-smeared profile at z (scalar or vector) using hard-interface x and y values, and smearing factor
-function eval_smeared!(tempvars, ns, B, sig)
+function eval_smeared!(tempvars, B, sig)
 
-    μ = view(tempvars.μ, 1:(ns-1))
+    μ = view(tempvars.μ, 1:(B-1))
 
     T = eltype(tempvars.smear_lattice)
     sqrt2sig = sqrt(T(2))*sig
@@ -1106,12 +1198,12 @@ function eval_smeared!(tempvars, ns, B, sig)
         zi = tempvars.w_mid[i]
         ρ1 = zero(T)
         ρ2 = zero(T)
-        @simd for j = 2:(ns-1)
+        @simd for j = 2:(B-1)
             ρ1 += (tempvars.ρ_hard_z[j] - tempvars.ρ_hard_z[j-1]) * erf((zi - tempvars.smear_lattice[j]) / sqrt2sig)
             ρ2 += (μ[j] - μ[j-1]) * erf((zi - tempvars.smear_lattice[j]) / sqrt2sig)
         end
-        ρ1 += (tempvars.ρ_hard_z[1] + tempvars.ρ_hard_z[(ns-1)])
-        ρ2 += (μ[1] + μ[(ns-1)])
+        ρ1 += (tempvars.ρ_hard_z[1] + tempvars.ρ_hard_z[(B-1)])
+        ρ2 += (μ[1] + μ[(B-1)])
         tempvars.ρ[i] = max(ρ1 / 2, zero(T))
         tempvars.β[i] = max(ρ2 / 2, zero(T))
     end
@@ -1122,8 +1214,8 @@ end
 # reflectivity with Fresnel normalization and shift/scaling
 function reflectivity!(simdata, tempvars, q_offset, B, yscl, bkg)
 
-    # compute Parratt reflectivity of interface
-    tempR = parratt_reflectivity(simdata, view(tempvars.ρ, 1:(B-1)), view(tempvars.β, 1:(B-1)), view(tempvars.d, 1:(B-1)), q_offset)
+    # compute Parratt reflectivity of interface using descending views
+    tempR = parratt_reflectivity(simdata, view(tempvars.ρ, (B-1):-1:1), view(tempvars.β, (B-1):-1:1), view(tempvars.d, (B-1):-1:1), q_offset)
     for i in eachindex(tempvars.R)
         tempvars.R[i] = tempR[i]
     end
@@ -1161,7 +1253,7 @@ function parratt_reflectivity(simdata, ρ_f, β_f, d_f, q_offset_f)
             eSd = exp(S_k * d_f[k] * 1im)
             Rc[l] = (r_k + Rc[l] * eSd) / (1.0 + r_k * Rc[l] * eSd)
         end
-        R_f[l] = abs2(Rc[l]) 
+        R_f[l] = abs2(Rc[l])
     end
     return R_f
 end
@@ -1185,7 +1277,7 @@ function XPR!(params)
     θ         = params[2] * π / 180 #convert to radians
     ϕ         = params[3] * π / 180 #convert to radians
     d_protein = params[4]
-    C         = params[5] 
+    C         = params[5]
     sig       = simdata.fit_sig ? params[6] : 3.4 # default roughness parameter
     yscl      = simdata.fit_yscl ? params[7] : 1.0 # default multiplicative scaling parameter of simulated reflectivity
     bkg       = simdata.fit_bkg ? params[8] : 0.0  # default additive scaling parameter of simulated reflectivity
@@ -1194,32 +1286,39 @@ function XPR!(params)
     # boxes order from top to bottom (box one sits nearest to top slab, box n nearest to buffer/bulk slab)
     box_lengths = params[9:nbox+8]
     box_densities = params[nbox+9: 2*nbox+8]
-    
+
     if simdata.include_protein
-        # rotate the protein and align z-height
-        rotate_protein!(simdata, tempvars, θ, ϕ, d_protein, box_lengths)
+        protein_height = rotate_protein!(simdata, tempvars, θ, ϕ, d_protein, box_lengths)
 
-        # get slab boundaries [add redundant slabs on either side of protein-lipid], in descending order
-        M = get_slab_boundaries!(simdata, tempvars, box_lengths)
+        sum_d = sum(box_lengths)
+        z_top = d_protein + simdata.prot_extent - sum_d
+        z_bot = d_protein - simdata.prot_extent - sum_d
 
-        # compute projected area of protein, area slices
+        # test against the true physical grid limits
+        if z_top > simdata.top_cells * simdata.spacez || z_bot < -sum_d - simdata.bottom_cells * simdata.spacez
+            error("protein out of bounds")
+        end
+    else
+        protein_height = 0.0
+    end
+
+    M = get_slab_boundaries!(simdata, tempvars, box_lengths)
+
+    # protein-specific calculations
+    if simdata.include_protein
         if simdata.vol_calc == "exact"
             area_slices_gl!(tempvars, areavars, simdata, M)
         elseif simdata.vol_calc == "approx"
             area_slices_sphere_seg!(tempvars, simdata, M)
         end
-
-        # compute electron densities of protein
         electron_densities!(simdata, tempvars, M)
-    else
-        M = 1
     end
-    
+
     # obtain the values of ρ_hard, along with boundaries, needed for smearing
-    B, ns = smear_xy_interface!(simdata, tempvars, box_lengths, box_densities, C, M, sig)
+    B = smear_xy_interface!(simdata, tempvars, box_densities, C, M)
 
     # evaluate the smeared ρ and μs
-    eval_smeared!(tempvars, ns, B, sig)
+    eval_smeared!(tempvars, B, sig)
 
     # reflectivity computaiton
     reflectivity!(simdata, tempvars, q_offset, B, yscl, bkg)
@@ -1228,7 +1327,7 @@ function XPR!(params)
     tempvars.χ_sq = sum(((simdata.data_R - tempvars.R) ./ simdata.data_err).^2)
     tempvars.logL = -0.5 * tempvars.χ_sq
 
-    return tempvars.logL, tempvars.R
+    return tempvars.logL, tempvars.R, protein_height
 end
 
 # wrapper function to help gradient computation, return logL only
@@ -1242,8 +1341,8 @@ end
 # wrapper, returns all values of XPR
 function XPR_sim_ref(params)
     params = Array(params) # convert PyArray to Julia Array
-    logL, R = XPR!(params)
-    return logL, R
+    logL, R, prot_h = XPR!(params)
+    return logL, R, prot_h
 end
 
 # gradient computed via forward differentiation
@@ -1261,13 +1360,12 @@ function XPR_hess(params)
 end
 
 # XModFit patch: the smeared electron-density profile behind the reflectivity.
-# XPR! leaves ρ in tempvars but not the count B that says how much of it is live,
+# XPR! leaves rho in tempvars but not the count B that says how much of it is live,
 # so the two cheap trailing steps (smearing lattice + erf smear) are re-run to
 # recover it. Everything expensive (protein rotation, slice areas, per-slab
 # electron densities) is already in tempvars from the XPR! call and is reused.
 function XPR_edp(params)
     params = Array(params)
-    T = eltype(params)
     simdata = GLOBAL_SD[]
     areavars = GLOBAL_AV[]
 
@@ -1282,9 +1380,9 @@ function XPR_edp(params)
     box_lengths = params[9:nbox+8]
     box_densities = params[nbox+9:2*nbox+8]
 
-    M = simdata.include_protein ? get_slab_boundaries!(simdata, tempvars, box_lengths) : 1
-    B, ns = smear_xy_interface!(simdata, tempvars, box_lengths, box_densities, C, M, sig)
-    eval_smeared!(tempvars, ns, B, sig)
+    M = get_slab_boundaries!(simdata, tempvars, box_lengths)
+    B = smear_xy_interface!(simdata, tempvars, box_densities, C, M)
+    eval_smeared!(tempvars, B, sig)
 
     return collect(view(tempvars.w_mid, 1:(B-1))), collect(view(tempvars.ρ, 1:(B-1)))
 end
@@ -1296,11 +1394,10 @@ end
 # runs XPR! once and re-runs only the two cheap trailing steps to recover B.
 function XPR_sim_edp(params)
     params = Array(params)
-    T = eltype(params)
     simdata = GLOBAL_SD[]
     areavars = GLOBAL_AV[]
 
-    logL, R = XPR!(params)
+    logL, R, prot_h = XPR!(params)
     Rout = copy(R)
     params = to_physical(simdata, params)          # the same mapping XPR! applied
     T = eltype(params)
@@ -1312,11 +1409,11 @@ function XPR_sim_edp(params)
     box_lengths   = params[9:nbox+8]
     box_densities = params[nbox+9:2*nbox+8]
 
-    M = simdata.include_protein ? get_slab_boundaries!(simdata, tempvars, box_lengths) : 1
-    B, ns = smear_xy_interface!(simdata, tempvars, box_lengths, box_densities, C, M, sig)
-    eval_smeared!(tempvars, ns, B, sig)
+    M = get_slab_boundaries!(simdata, tempvars, box_lengths)
+    B = smear_xy_interface!(simdata, tempvars, box_densities, C, M)
+    eval_smeared!(tempvars, B, sig)
 
-    return logL, Rout, collect(view(tempvars.w_mid, 1:(B-1))),
+    return logL, Rout, prot_h, collect(view(tempvars.w_mid, 1:(B-1))),
            collect(view(tempvars.ρ, 1:(B-1)))
 end
 
@@ -1358,6 +1455,36 @@ function XPR_jac(params, active)
     return _jac_chunked(f, x0, Val(k))
 end
 
+# XModFit patch: the orientation-dependent offset between the two definitions of the
+# insertion parameter, WITHOUT running the forward model.
+#
+# Upstream measures `d_protein` from the centre of mass; the previous convention
+# measured it from the TOP of the protein, and `rotate_protein!` reports the
+# conversion as `protein_height = d_protein + maxh`. `maxh` depends only on
+# (theta, phi) and the structure, so exposing it on its own lets XModFit report the
+# old-style insertion -- and propagate its error, and convert a whole MCMC chain --
+# without one forward evaluation per sample. `mindepth` is the matching extent below
+# the centre of mass. `k` is the index of the atom that attains the maximum: `maxh`
+# is a `maximum`, so it is only piecewise smooth in (theta, phi), and a caller
+# differentiating it needs to know which term is active.
+#
+# NB `prot_extent` in SimData is the rotation-INVARIANT bounding radius, which is
+# what upstream's out-of-bounds check uses; `maxh`/`mindepth` here are the actual
+# oriented extents and are <= it. Python mirrors the check with prot_extent so it
+# agrees with Julia exactly.
+function XPR_maxh(theta_deg, phi_deg)
+    simdata = GLOBAL_SD[]
+    simdata.include_protein || return (0.0, 0.0, 0)
+    theta = theta_deg * pi / 180
+    phi = phi_deg * pi / 180
+    r3 = [sin(theta)*sin(phi), sin(theta)*cos(phi), cos(theta)]
+    proj = vec(r3' * simdata.coordinates')
+    hi = proj .+ simdata.radii
+    lo = proj .- simdata.radii
+    k = argmax(hi)
+    return (hi[k], -minimum(lo), k)
+end
+
 ####### exported functions #######
 
 export load_data
@@ -1367,5 +1494,6 @@ export XPR_hess
 export XPR_edp
 export XPR_sim_edp
 export XPR_jac
+export XPR_maxh
 
 end

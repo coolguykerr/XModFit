@@ -5069,6 +5069,9 @@ class XModFit(QWidget):
                         except:
                             val=val.strip()
                         self.fit.params[key]=val
+                    if hasattr(self.fit.func,
+                               'update_param_set'):  # models whose fit-parameter set depends on fixed choices
+                        self.fit.func.update_param_set()
                     if sfline is not None:
                         for line in lines[sfline:mendnum]:
                             parname,parval,parfit,parmin,parmax,parexpr,parbrute=line.strip().split('\t')
