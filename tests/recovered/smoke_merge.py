@@ -11,19 +11,19 @@ class XrayDB:
 xrd.XrayDB = XrayDB
 sys.modules.setdefault("xraydb", xrd)
 
-sys.path.insert(0, os.path.abspath("."))
-sys.path.insert(0, os.path.abspath("./Functions"))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.chdir(ROOT)
+sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "Functions"))
+from tests.harness import check as _hcheck, finish
 
-results = []
 def check(label, fn):
     try:
         fn()
-        results.append((label, True, ""))
-        print("PASS:", label)
+        _hcheck(label, True)
     except Exception as e:
-        tb = traceback.format_exc()
-        results.append((label, False, tb))
-        print("FAIL:", label, "->", repr(e))
+        print(traceback.format_exc())
+        _hcheck(label, False, repr(e))
 
 # 1. Resolved conflict modules
 def imp_biphasic():
@@ -80,12 +80,4 @@ def run_parratt():
     assert refc.dtype == complex or np.iscomplexobj(refc), "refc should be complex (bugfix intact)"
 check("numeric parratt_numba(q,...) -> (ref, refc)", run_parratt)
 
-print("\n===== SUMMARY =====")
-nfail = 0
-for label, ok, tb in results:
-    print(("PASS " if ok else "FAIL ") + label)
-    if not ok:
-        nfail += 1
-        print(tb)
-print("TOTAL: %d passed, %d failed" % (len(results)-nfail, nfail))
-sys.exit(1 if nfail else 0)
+sys.exit(finish())
