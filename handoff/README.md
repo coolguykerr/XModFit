@@ -110,6 +110,9 @@ recommendation.
 | 10 | `10-fix-list.md` | what to fix before consolidating, and the involved to-dos where a feature is unfinished | — |
 | 11 | `11-audit-plan.md` | the deferred audit: the registry of unverified claims and how to test each | — |
 | 12 | `12-work-package-preaudit.md` | the pre-audit fix package handed to an implementation session: phases, guardrails, progress log | — |
+| 13 | `13-global-search.md` | the per-dataset fast scan / Global Search tool | `fastscan/`, `Tools/GlobalSearch/` |
+| 14 | `14-roadmap.md` | prioritised plan (2026-11-02): open issues, the joint-fit reporting contract, the joint-fit library | — |
+| 15 | `15-plan-ws0-test-safety-net.md` | task-by-task plan for roadmap WS0: shared `check()`, runner, synthetic GLS regression, baseline | `tests/` |
 
 Two research write-ups that `05-xpr-julia.md` summarises — `STAGE2_SEEDING_PLAN.md` and
 `SEEDING_STUDY_TIM1.md` — **moved to `../xpr-seeding-study` on 2026-09-04** along with the
