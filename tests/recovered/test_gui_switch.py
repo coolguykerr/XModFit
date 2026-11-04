@@ -3,7 +3,8 @@ verify per-dataset fit memory. xraydb is stubbed (not installed in cmc-py39; rep
 local ./xraydb has no source) -- it is only used for X-ray calcs, not construction."""
 import os, sys, types
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
-ROOT = r"C:\Users\kerr\Documents\GitHub\XModJointFit"
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SCRATCH = os.path.join(ROOT, 'tests', '_logs'); os.makedirs(SCRATCH, exist_ok=True)
 os.chdir(ROOT)
 
 # --- stub xraydb before anything imports Chemical_Formula ---
@@ -27,8 +28,8 @@ w = xmodfit.XModFit()
 print("constructed OK; dataset_fits present:", hasattr(w, "dataset_fits"))
 
 # write two tiny 3-column data files
-d1 = os.path.join(os.environ["TEMP"], "ds1.txt")
-d2 = os.path.join(os.environ["TEMP"], "ds2.txt")
+d1 = os.path.join(SCRATCH, "ds1.txt")
+d2 = os.path.join(SCRATCH, "ds2.txt")
 q = np.linspace(0.02, 0.30, 40)
 for path, amp in ((d1, 1.0), (d2, 2.0)):
     y = amp * np.exp(-((q - 0.1) ** 2) / 0.002) + 0.01

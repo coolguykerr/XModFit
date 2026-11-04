@@ -1,7 +1,8 @@
 """Reproduce + verify the per-dataset PDB-file persistence fix (offscreen)."""
 import os, sys, types
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
-ROOT = r"C:\Users\kerr\Documents\GitHub\XModJointFit"
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SCRATCH = os.path.join(ROOT, 'tests', '_logs'); os.makedirs(SCRATCH, exist_ok=True)
 os.chdir(ROOT)
 _xr = types.ModuleType("xraydb")
 class _XrayDB:
@@ -24,7 +25,7 @@ xmodfit.QMessageBox=_MB
 w = xmodfit.XModFit()
 
 # two datasets
-d1=os.path.join(os.environ["TEMP"],"pp1.txt"); d2=os.path.join(os.environ["TEMP"],"pp2.txt")
+d1=os.path.join(SCRATCH,"pp1.txt"); d2=os.path.join(SCRATCH,"pp2.txt")
 q=np.linspace(0.02,0.30,30)
 for p,a in ((d1,1.0),(d2,2.0)):
     np.savetxt(p, np.c_[q, a*np.exp(-((q-0.1)**2)/0.002)+0.01, np.full_like(q,0.01)], header="x y yerr")
@@ -45,9 +46,7 @@ def set_pdb(path):
     w.update_fixed_parameters()   # rebuild button from live fname (the fix)
     w.update_plot()               # round-trip button -> fname
 
-ok=True
-def check(n,c):
-    global ok; print(("PASS" if c else "FAIL"),"-",n); ok=ok and c
+from tests.harness import check, finish
 
 # ds0 -> PDB1
 w.dataListWidget.setCurrentRow(0)
@@ -65,5 +64,4 @@ check("ds0 store holds PDB1", os.path.basename(w.dataset_fits[names[0]].func.fna
 w.dataListWidget.setCurrentRow(1)
 check("ds1 remembers PDB2 after switch", os.path.basename(w.fit.func.fname)=="Nd9.pdb")
 
-print("\nRESULT:", "ALL PASS" if ok else "FAIL")
-sys.exit(0 if ok else 1)
+sys.exit(finish())

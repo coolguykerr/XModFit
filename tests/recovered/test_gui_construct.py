@@ -1,7 +1,16 @@
 import os, sys
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
-ROOT = r"C:\Users\kerr\Documents\GitHub\XModJointFit"
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(ROOT); sys.path.append(ROOT)  # append so installed xraydb wins over local ./xraydb dir
+import types
+try:
+    from xraydb import XrayDB as _R
+except Exception:
+    _xr = types.ModuleType("xraydb")
+    class _X:
+        def __init__(s, *a, **k): pass
+        def __getattr__(s, n): return lambda *a, **k: 0
+    _xr.XrayDB = _X; _xr.f0 = lambda *a, **k: 0; _xr.__path__ = []; sys.modules["xraydb"] = _xr
 from PyQt5.QtWidgets import QApplication
 app = QApplication(sys.argv)
 import xmodfit

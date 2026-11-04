@@ -50,6 +50,7 @@ REGISTRY = {
                  "(decision D1); 5000-step x2 sampling did not finish in 240 s",
         'slow': True, 'timeout': 900},
     'tests/recovered/test_joint_abort.py': {'slow': True, 'timeout': 900},
+    'tests/recovered/test_gui_construct.py': {'smoke': True},
 }
 
 DEFAULT_TIMEOUT = 600

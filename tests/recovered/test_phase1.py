@@ -10,7 +10,7 @@ Covers:
 """
 import os, sys, copy
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-ROOT = r"C:\Users\kerr\Documents\GitHub\XModJointFit"
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(ROOT)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "Functions"))
@@ -21,11 +21,7 @@ from importlib import import_module
 PDB = os.path.join("Data", "Pr4.pdb")
 assert os.path.exists(PDB), PDB
 
-ok = True
-def check(name, cond):
-    global ok
-    print(("PASS" if cond else "FAIL"), "-", name)
-    ok = ok and cond
+from tests.harness import check, finish
 
 # 1. all variants import
 for mod in ["XLayersPDB", "XLayersPDB_G", "XLayersPDB_H", "XLayersPDB_box"]:
@@ -89,5 +85,4 @@ clone.functionCalled.connect(lambda *a: got.setdefault("fired", True))
 clone.functionCalled.emit({}, 0, np.zeros(3), "Linear")
 check("cloned Fit signal works", got.get("fired", False))
 
-print("\nRESULT:", "ALL PASS" if ok else "FAILURES PRESENT")
-sys.exit(0 if ok else 1)
+sys.exit(finish())
