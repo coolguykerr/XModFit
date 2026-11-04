@@ -180,16 +180,25 @@ def test_rod_lipid_agreement():
 # --------------------------------------------------- 6. pack / load / fit --
 def test_pack_and_map():
     print('\n[6] pack_map / load_map / map mode')
-    if not os.path.exists(RAW):
-        check('raw map present', False, 'SKIPPED, not found: %s' % RAW)
-        return
-    if not os.path.isdir(os.path.dirname(PACKED)):
-        os.makedirs(os.path.dirname(PACKED))
-    info = GC.pack_map(RAW, PACKED, drop_masked=True, qz_min=0.0)
+    # Never write into tracked Data/: the raw map (original T:\ file if reachable,
+    # else regenerated from the tracked packed map) and the repacked output both
+    # live in tests/_logs. The T:\ path is still hard-coded (A1.16).
+    scratch = os.path.join(HERE, 'tests', '_logs')
+    os.makedirs(scratch, exist_ok=True)
+    raw = RAW
+    if not os.path.exists(raw):
+        src = GC.load_map(PACKED)
+        raw = os.path.join(scratch, 'dppc_q2d_gid_raw_copy.txt')
+        np.savetxt(raw, np.c_[src['qxy'], src['qz'], src['I'], src['Ierr']],
+                   delimiter='	')
+        print('        NOTE: %s not found; regenerated a raw-format map from the '
+              'tracked packed map: %s' % (RAW, raw))
+    packed_out = os.path.join(scratch, 'dppc_q2d_gid_repacked.txt')
+    info = GC.pack_map(raw, packed_out, drop_masked=True, qz_min=0.0)
     check('packed %d rows (dropped %d)' % (info['kept'], info['dropped']),
           info['kept'] > 30000, '')
     print('        %s' % info['sigma_note'])
-    mp = GC.load_map(PACKED)
+    mp = GC.load_map(packed_out)
     check('no non-positive errors survive packing', bool(np.all(mp['Ierr'] > 0)))
     check('no non-positive intensities survive packing', bool(np.all(mp['I'] > 0)))
     # the sigma floor must remove the mask residue that would otherwise carry
@@ -200,7 +209,7 @@ def test_pack_and_map():
     check('index column strictly increasing',
           bool(np.all(np.diff(mp['idx']) == 1)))
     check('load_map is cached on the file stamp',
-          GC.load_map(PACKED) is mp)
+          GC.load_map(packed_out) is mp)
 
     # float row index must work: XModFit's x line-edit accepts np.linspace(...)
     xf = np.linspace(0, mp['n'] - 1, 257)
@@ -210,7 +219,7 @@ def test_pack_and_map():
 
     # full-map evaluation, and the windowing contract
     x = np.arange(mp['n'], dtype=float)
-    f = GID2D(x=x, mapfile=PACKED, mode='map2d', E=15.126, alpha_i=0.10,
+    f = GID2D(x=x, mapfile=packed_out, mode='map2d', E=15.126, alpha_i=0.10,
               qc=0.0217, yscale=1.0, bkg0=1.0, fisher=False, **NN)
     f.__fit__ = True
     y = f.y()
@@ -219,7 +228,7 @@ def test_pack_and_map():
     check('map mode is finite everywhere', bool(np.all(np.isfinite(y))))
 
     # a q_xy/q_z window must zero the residual OUTSIDE it, exactly
-    f2 = GID2D(x=x, mapfile=PACKED, mode='map2d', qxymin=1.42, qxymax=1.52,
+    f2 = GID2D(x=x, mapfile=packed_out, mode='map2d', qxymin=1.42, qxymax=1.52,
                qzmin=0.05, qzmax=0.60, yscale=1.0, bkg0=1.0, fisher=False, **NN)
     f2.__fit__ = True
     y2 = f2.y()
