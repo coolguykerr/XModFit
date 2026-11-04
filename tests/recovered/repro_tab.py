@@ -1,7 +1,7 @@
 """Reproduce: LOAD the GID data as a dataset, then pick GID2D. Does the 2D tab show?"""
 import os, sys, types
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-ROOT = r"C:\Users\kerr\Documents\GitHub\XModJointFit"
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(ROOT)
 _xr = types.ModuleType("xraydb")
 class _XrayDB:

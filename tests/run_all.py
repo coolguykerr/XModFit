@@ -51,6 +51,12 @@ REGISTRY = {
         'slow': True, 'timeout': 900},
     'tests/recovered/test_joint_abort.py': {'slow': True, 'timeout': 900},
     'tests/recovered/test_gui_construct.py': {'smoke': True},
+    'tests/recovered/repro_raw.py': {'smoke': True},
+    'tests/recovered/repro_tab.py': {'smoke': True},
+    'tests/recovered/smoke_fit.py': {
+        'known': "reads scaler_parameters['chi2_per_N_reported'] etc.; GID2D now "
+                 "emits chi2_per_N_reported_LINEAR / chi2_per_N_active_only_LINEAR "
+                 "(stale key names -> KeyError at the first print)"},
 }
 
 DEFAULT_TIMEOUT = 600

@@ -1,7 +1,7 @@
 """Reproduce the user's state: load the RAW 4-column file as the dataset."""
 import os, sys, types
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-ROOT = r"C:\Users\kerr\Documents\GitHub\XModJointFit"
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(ROOT)
 _xr = types.ModuleType("xraydb")
 class _XrayDB:
@@ -25,12 +25,13 @@ class _Prog:
     def __getattr__(self, n): return lambda *a, **k: None
 xmodfit.QProgressDialog = _Prog
 
-RAW = r"T:\SURFACE\NX_school\2026sep\extracted_data\dppc_q2d_gid.txt"
-if not os.path.exists(RAW):
-    RAW = os.path.abspath(os.path.join('Data', 'dppc_q2d_gid_raw_copy.txt'))
-    import gid2d_core as GC
-    mp = GC.load_map(os.path.join('Data', 'dppc_q2d_gid_indexed.txt'))
-    np.savetxt(RAW, np.c_[mp['qxy'], mp['qz'], mp['I'], mp['Ierr']], delimiter='\t')
+# The original read a T: drive file; always rebuild the 4-column raw file from the
+# packed map, into the scratch dir instead of Data/.
+RAW = os.path.join(ROOT, 'tests', '_logs', 'dppc_q2d_gid_raw_copy.txt')
+os.makedirs(os.path.dirname(RAW), exist_ok=True)
+import gid2d_core as GC
+mp = GC.load_map(os.path.join('Data', 'dppc_q2d_gid_indexed.txt'))
+np.savetxt(RAW, np.c_[mp['qxy'], mp['qz'], mp['I'], mp['Ierr']], delimiter='\t')
 print("raw file:", RAW)
 d = np.loadtxt(RAW)
 print("raw shape:", d.shape)

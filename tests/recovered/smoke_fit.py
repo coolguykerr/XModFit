@@ -1,7 +1,7 @@
 """End-to-end smoke fit of GID2D through the real Fit_Routines.Fit path."""
 import os, sys, time
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
-os.chdir(r"C:\Users\kerr\Documents\GitHub\XModJointFit")
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))); os.chdir(ROOT)
 sys.path.insert(0, os.path.abspath('.'))
 sys.path.insert(0, os.path.abspath('./Functions'))
 import numpy as np
