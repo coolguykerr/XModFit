@@ -7,7 +7,8 @@ mouse override just routes plain within-selection clicks to it).
 """
 import os, sys, types
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-ROOT = r"C:\Users\kerr\Documents\GitHub\XModJointFit"
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SCRATCH = os.path.join(ROOT, 'tests', '_logs'); os.makedirs(SCRATCH, exist_ok=True)
 os.chdir(ROOT); sys.path.insert(0, ROOT)
 try:
     from xraydb import XrayDB as _R
@@ -22,8 +23,7 @@ import numpy as np
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
 
-_OK={"ok":True}
-def check(n,c): print(("PASS" if c else "FAIL"),"-",n); _OK["ok"]=_OK["ok"] and bool(c)
+from tests.harness import check, finish
 
 app=QApplication.instance() or QApplication(sys.argv)
 import xmodfit, PyQt5.QtWidgets as _QtW
@@ -45,8 +45,8 @@ xmodfit.FitResultDialog=_FRD
 w=xmodfit.XModFit()
 check("data list is the custom DataListWidget", type(w.dataListWidget).__name__=="DataListWidget")
 
-d1=os.path.join(os.environ.get("TEMP",ROOT),"ds_d1.txt")
-d2=os.path.join(os.environ.get("TEMP",ROOT),"ds_d2.txt")
+d1=os.path.join(SCRATCH,"ds_d1.txt")
+d2=os.path.join(SCRATCH,"ds_d2.txt")
 q=np.linspace(0.02,0.30,40)
 for p,amp in ((d1,1.0),(d2,2.0)):
     np.savetxt(p, np.c_[q, amp*np.exp(-((q-0.1)**2)/0.002)+0.01, np.full_like(q,0.02)], header="x y yerr")
@@ -121,5 +121,4 @@ if e is not None:
     check("single-select unfit dataset still plots its EDP",
           len(set(w.extra_param_1DplotWidget.selDataNames or []))>=1)
 
-print("\nRESULT:", "ALL PASS" if _OK["ok"] else "FAILURES PRESENT")
-sys.exit(0 if _OK["ok"] else 1)
+sys.exit(finish())

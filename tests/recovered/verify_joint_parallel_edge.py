@@ -4,7 +4,8 @@ abort THROUGH the pool (step_callback raises in the main process), and resume+po
 Run under `if __name__ == '__main__':` (spawn Pool re-imports this module).
 """
 import os, sys
-sys.path.insert(0, r'C:\Users\kerr\Documents\GitHub\XModJointFit')
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))); os.chdir(ROOT); sys.path.insert(0, ROOT)
+SCRATCH = os.path.join(ROOT, 'tests', '_logs'); os.makedirs(SCRATCH, exist_ok=True)
 import numpy as np
 from lmfit import Parameters
 from lmfit.customhdf import CustomHDFBackend
@@ -47,7 +48,7 @@ def build_neither():
 
 def test_neither_parallel():
     jf = build_neither()
-    tmp = os.path.join(os.environ.get('TEMP', '.'), 'jpe_neither.h5')
+    tmp = os.path.join(SCRATCH, 'jpe_neither.h5')
     if os.path.exists(tmp): os.remove(tmp)
     be = CustomHDFBackend(tmp)
     jf.perform_fit(0.02, 0.5, fit_method='emcee', emcee_walkers=16, emcee_steps=20,
@@ -83,7 +84,7 @@ def test_abort_through_pool():
         state['n'] += 1
         return True if state['n'] >= 3 else None
     jf.callback = aborting_callback
-    tmp = os.path.join(os.environ.get('TEMP', '.'), 'jpe_abort.h5')
+    tmp = os.path.join(SCRATCH, 'jpe_abort.h5')
     if os.path.exists(tmp): os.remove(tmp)
     be = CustomHDFBackend(tmp)
     jf.perform_fit(0.02, 0.5, fit_method='emcee', emcee_walkers=24, emcee_steps=50,
@@ -96,7 +97,7 @@ def test_abort_through_pool():
 
 def test_resume_pool():
     jf = build_neither()
-    tmp = os.path.join(os.environ.get('TEMP', '.'), 'jpe_resume.h5')
+    tmp = os.path.join(SCRATCH, 'jpe_resume.h5')
     if os.path.exists(tmp): os.remove(tmp)
     be = CustomHDFBackend(tmp)
     jf.perform_fit(0.02, 0.5, fit_method='emcee', emcee_walkers=24, emcee_steps=15,

@@ -5,7 +5,8 @@
 """
 import os, sys, types
 os.environ.setdefault("QT_QPA_PLATFORM","offscreen")
-ROOT=r"C:\Users\kerr\Documents\GitHub\XModJointFit"; os.chdir(ROOT); sys.path.insert(0,ROOT)
+ROOT=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))); os.chdir(ROOT); sys.path.insert(0,ROOT)
+SCRATCH = os.path.join(ROOT, 'tests', '_logs'); os.makedirs(SCRATCH, exist_ok=True)
 try: from xraydb import XrayDB as _R
 except Exception:
     _xr=types.ModuleType("xraydb")
@@ -16,8 +17,7 @@ except Exception:
 import numpy as np
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
-_OK={"ok":True}
-def check(n,c): print(("PASS" if c else "FAIL"),"-",n); _OK["ok"]=_OK["ok"] and bool(c)
+from tests.harness import check, finish
 app=QApplication.instance() or QApplication(sys.argv)
 import xmodfit, PyQt5.QtWidgets as _W
 class _MB:
@@ -35,7 +35,7 @@ class _F:
     def show(s): pass
 xmodfit.FitResultDialog=_F
 w=xmodfit.XModFit()
-d1=os.path.join(os.environ.get("TEMP",ROOT),"bl_d1.txt"); d2=os.path.join(os.environ.get("TEMP",ROOT),"bl_d2.txt")
+d1=os.path.join(SCRATCH,"bl_d1.txt"); d2=os.path.join(SCRATCH,"bl_d2.txt")
 q=np.linspace(0.02,0.30,40)
 for p,a in ((d1,1.),(d2,2.)):
     np.savetxt(p,np.c_[q,a*np.exp(-((q-0.1)**2)/0.002)+0.01,np.full_like(q,0.02)],header="x y yerr")
@@ -72,5 +72,4 @@ w.dataListWidget.clearSelection()
 w.dataListWidget.item(0).setSelected(True); w.dataListWidget.item(1).setSelected(True)
 check("S2 individual multi after joint: banner shown", shown() and tinted())
 
-print("\nRESULT:", "ALL PASS" if _OK["ok"] else "FAILURES PRESENT")
-sys.exit(0 if _OK["ok"] else 1)
+sys.exit(finish())

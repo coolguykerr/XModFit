@@ -1,5 +1,6 @@
 import os, sys, time
-sys.path.insert(0, r'C:\Users\kerr\Documents\GitHub\XModJointFit')
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))); os.chdir(ROOT); sys.path.insert(0, ROOT)
+SCRATCH = os.path.join(ROOT, 'tests', '_logs'); os.makedirs(SCRATCH, exist_ok=True)
 import numpy as np
 from lmfit import Parameters
 PI = np.pi
@@ -38,7 +39,7 @@ def main():
     jf = build()
     jf.perform_fit(0.02, 0.5, fit_method='leastsq')
     print('both_shared:', jf.orientation_layout()['both_shared'])
-    tmp = os.path.join(os.environ.get('TEMP', '.'), 'joint_par_scan.h5')
+    tmp = os.path.join(SCRATCH, 'joint_par_scan.h5')
     if os.path.exists(tmp): os.remove(tmp)
     t0 = time.time()
     jf.perform_fit(0.02, 0.5, fit_method='emcee', emcee_walkers=16, emcee_steps=20,

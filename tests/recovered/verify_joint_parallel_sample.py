@@ -8,7 +8,8 @@ spawn workers can import + unpickle the shipped model instances.
 Env: C:\\Users\\kerr\\.conda\\envs\\cmc-py39\\python.exe  (QT not needed here).
 """
 import os, sys, time
-sys.path.insert(0, r'C:\Users\kerr\Documents\GitHub\XModJointFit')
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))); os.chdir(ROOT); sys.path.insert(0, ROOT)
+SCRATCH = os.path.join(ROOT, 'tests', '_logs'); os.makedirs(SCRATCH, exist_ok=True)
 import numpy as np
 from lmfit import Parameters
 from lmfit.customhdf import CustomHDFBackend
@@ -92,7 +93,7 @@ def test_bitforbit():
 
 def run_sample(cores, tag, steps=25, nw=12):
     jf = build_jf()
-    tmp = os.path.join(os.environ.get('TEMP', '.'), 'jps_%s.h5' % tag)
+    tmp = os.path.join(SCRATCH, 'jps_%s.h5' % tag)
     if os.path.exists(tmp):
         os.remove(tmp)
     be = CustomHDFBackend(tmp)

@@ -9,7 +9,8 @@
 """
 import os, sys, types
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-ROOT = r"C:\Users\kerr\Documents\GitHub\XModJointFit"
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SCRATCH = os.path.join(ROOT, 'tests', '_logs'); os.makedirs(SCRATCH, exist_ok=True)
 os.chdir(ROOT); sys.path.insert(0, ROOT)
 try:
     from xraydb import XrayDB as _R  # noqa
@@ -25,9 +26,7 @@ import numpy as np
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
 
-_OK = {"ok": True}
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), "-", name); _OK["ok"] = _OK["ok"] and bool(cond)
+from tests.harness import check, finish
 
 
 def main():
@@ -73,8 +72,8 @@ def main():
           and pw.data['dashcurve'].opts['pen'].style() == Qt.DashLine)
 
     # ---------------- B3: multi-dataset EDP co-plot ----------------
-    d1 = os.path.join(os.environ.get("TEMP", ROOT), "bpl_ds1.txt")
-    d2 = os.path.join(os.environ.get("TEMP", ROOT), "bpl_ds2.txt")
+    d1 = os.path.join(SCRATCH, "bpl_ds1.txt")
+    d2 = os.path.join(SCRATCH, "bpl_ds2.txt")
     q = np.linspace(0.02, 0.30, 40)
     for p, amp in ((d1, 1.0), (d2, 2.0)):
         np.savetxt(p, np.c_[q, amp*np.exp(-((q-0.1)**2)/0.002)+0.01, np.full_like(q, 0.02)],
@@ -167,8 +166,7 @@ def main():
                   ep.data[iname].opts['symbolPen'].color().name()
                   == ep.data[jname].opts['symbolPen'].color().name())
 
-    print("\nRESULT:", "ALL PASS" if _OK["ok"] else "FAILURES PRESENT")
-    return 0 if _OK["ok"] else 1
+    return finish()
 
 
 if __name__ == "__main__":

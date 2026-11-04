@@ -3,7 +3,8 @@ dataset is fit from its OWN current params (distinct starting qoff -> distinct f
 results); (3) both are marked fitted."""
 import os, sys, types
 os.environ.setdefault("QT_QPA_PLATFORM","offscreen")
-ROOT=r"C:\Users\kerr\Documents\GitHub\XModJointFit"; os.chdir(ROOT); sys.path.insert(0,ROOT)
+ROOT=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))); os.chdir(ROOT); sys.path.insert(0,ROOT)
+SCRATCH = os.path.join(ROOT, 'tests', '_logs'); os.makedirs(SCRATCH, exist_ok=True)
 try: from xraydb import XrayDB as _R
 except Exception:
     _xr=types.ModuleType("xraydb")
@@ -14,8 +15,7 @@ except Exception:
 import numpy as np
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
-_OK={"ok":True}
-def check(n,c): print(("PASS" if c else "FAIL"),"-",n); _OK["ok"]=_OK["ok"] and bool(c)
+from tests.harness import check, finish
 app=QApplication.instance() or QApplication(sys.argv)
 import xmodfit, PyQt5.QtWidgets as _W
 class _MB:
@@ -33,7 +33,7 @@ class _FRD:
     def show(s): pass
 xmodfit.FitResultDialog=_FRD
 w=xmodfit.XModFit()
-d1=os.path.join(os.environ.get("TEMP",ROOT),"mf_d1.txt"); d2=os.path.join(os.environ.get("TEMP",ROOT),"mf_d2.txt")
+d1=os.path.join(SCRATCH,"mf_d1.txt"); d2=os.path.join(SCRATCH,"mf_d2.txt")
 q=np.linspace(0.02,0.30,40)
 for p,a in ((d1,1.),(d2,2.)):
     np.savetxt(p,np.c_[q,a*np.exp(-((q-0.1)**2)/0.002)+0.01,np.full_like(q,0.02)],header="x y yerr")
@@ -70,5 +70,4 @@ r0=w.dataset_fits[names[0]].fit_params['qoff'].value if w.dataset_fits[names[0]]
 r1=w.dataset_fits[names[1]].fit_params['qoff'].value if w.dataset_fits[names[1]].result is None else w.dataset_fits[names[1]].result.params['qoff'].value
 print("fitted qoff: ds0=%.5f ds1=%.5f (started %.3f / %.3f)"%(r0,r1,start0,start1))
 check("each dataset fit independently (results differ)", abs(r0-r1)>1e-9)
-print("\nRESULT:", "ALL PASS" if _OK["ok"] else "FAILURES PRESENT")
-sys.exit(0 if _OK["ok"] else 1)
+sys.exit(finish())
