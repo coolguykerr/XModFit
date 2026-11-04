@@ -496,7 +496,7 @@ PASS                        5.2  cmc-py39  validate_xlayerspdb_joint.py
 PASS                      294.7  cmcars    validate_xpr.py                                    external: XPR-main/test_data, sibling of the repo; slow
 
 summary: 1 FAIL, 2 KNOWN-FAIL, 1 KNOWN-FAIL NOW PASSES, 55 PASS
-NOTE: tests/recovered/compare_models.py is registered known-failing but now passes; remove its registry entry.
+NOTE: tests/recovered/compare_models.py is registered known-failing but now passes; remove its registry entry. (done, 3824709)
 ```
 
 Quick run (`tests/run_all.py --quick`, after the registry change): **504 s wall (~8.4 min)**,
