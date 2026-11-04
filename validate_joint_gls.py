@@ -12,6 +12,8 @@ and the GLS parameter covariance from the exact design matrix of that model.
     G2  n1_nocov_equals_stock_fit            JointFit(1 dataset, no cov) == stock Fit
     G3  gls_covar_matches_analytic           stderr(a) == sqrt((X^T C^-1 X)^-1 * redchi)
     G4  different_masks_with_cross_blocks    masked whitening == chol(C_active) solve
+    G4b same, plus per-dataset fit windows cutting into both masked regions
+        (slice -> imask order under covariance)
 
     QT_QPA_PLATFORM=offscreen python validate_joint_gls.py
 """
@@ -204,12 +206,21 @@ def test_g3():
         check("G3 gls_covar_matches_analytic (%s): chisqr == GLS chi2" % vname,
               dc < 1e-8, 'engine=%.8e analytic=%.8e rel=%.2e' % (res.chisqr, chi2, dc))
 
-        se_an = np.sqrt(Finv[0, 0] * res.redchi)
+        # redchi built independently of the engine: chi2 / (N - n_free)
+        redchi_an = chi2 / (nds * n - (1 + nds))
+        dr = rel(res.redchi, redchi_an)
+        check("G3 gls_covar_matches_analytic (%s): redchi == chi2/(N-n_free)" % vname,
+              dr < 1e-8, 'engine=%.8e analytic=%.8e rel=%.2e'
+              % (res.redchi, redchi_an, dr))
+
+        # lmfit scale_covar=True form (redchi-scaled). Whether reported GLS errors
+        # should be scaled or unscaled for an absolute C is a WS2 decision.
+        se_an = np.sqrt(Finv[0, 0] * redchi_an)
         se_en = res.params['a'].stderr
         ds = rel(se_en, se_an)
         check("G3 gls_covar_matches_analytic (%s): stderr(a)" % vname, ds < 1e-4,
               'engine=%.8e analytic=%.8e rel=%.2e redchi=%.4f'
-              % (se_en, se_an, ds, res.redchi))
+              % (se_en, se_an, ds, redchi_an))
         stderr_a[vname] = se_en
 
     dv = rel(stderr_a['cross'], stderr_a['block'])
@@ -253,9 +264,53 @@ def test_g4():
           dw < 1e-10, 'rel=%.3e' % dw)
 
 
+# ----------------------------------------------------------------------- G4b --
+def test_g4b():
+    from Joint_Fit_Routines import JointFit
+    ys = make_data(2)
+    ks, S = variant('cross', 2)
+    n = len(X)
+    mA = np.ones(n, bool); mA[5:12] = False      # same masks as G4
+    mB = np.ones(n, bool); mB[20:25] = False
+    jf = JointFit()
+    for i, (y, k, m) in enumerate(zip(ys, ks, (mA, mB))):
+        jf.add_dataset('D%d' % i, funcClass=Line, x=X, y=y, yerr=E * np.ones_like(X),
+                       cov=sidecar(y, k, S, footprint=True), mask=m)
+    jf.build_master_params()
+    # windows cut into both masked regions: D0 keeps 3..30, D1 keeps 8..n-4
+    jf._set_ranges(X[0], X[-1], ranges={'D0': (X[3], X[30]), 'D1': (X[8], X[-4])})
+    w = np.asarray(jf.residual(jf.master_params, 'Linear'))
+
+    wins = [(3, 30), (8, n - 4)]
+    got = [(o['imin'], o['imax']) for o in jf.objectives]
+    check("G4b windowed_masks_with_cross_blocks: engine windows", got == wins, str(got))
+    check("G4b windowed_masks_with_cross_blocks: _cov_mask all True",
+          bool(jf._cov_mask.all()), 'n_false=%d' % int((~jf._cov_mask).sum()))
+
+    # reference: per dataset (window AND mask), concatenated, then restrict full C
+    C = independent_C(ys, ks, S, footprint=True)
+    act = []
+    for (lo, hi), m in zip(wins, (mA, mB)):
+        a = np.zeros(n, bool); a[lo:hi + 1] = True
+        act.append(a & m)
+    act = np.concatenate(act)
+    p = jf.master_params
+    r = np.concatenate([ys[i] - (p['d%d_a' % i].value * X + p['d%d_b' % i].value)
+                        for i in range(2)])
+    want = solve_triangular(np.linalg.cholesky(C[np.ix_(act, act)]), r[act], lower=True)
+    check("G4b windowed_masks_with_cross_blocks: residual length",
+          len(w) == len(want), '%d vs %d' % (len(w), len(want)))
+    if len(w) == len(want):
+        dw = np.linalg.norm(w - want) / np.linalg.norm(want)
+    else:
+        dw = np.inf
+    check("G4b windowed_masks_with_cross_blocks: whitened residual == chol(C_active) solve",
+          dw < 1e-10, 'rel=%.3e' % dw)
+
+
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
-    for t in (test_g1, test_g2, test_g3, test_g4):
+    for t in (test_g1, test_g2, test_g3, test_g4, test_g4b):
         try:
             t()
         except Exception as ex:
