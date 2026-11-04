@@ -429,8 +429,9 @@ summary: 4 FAIL, 1 KNOWN-FAIL, 50 PASS, 2 SKIP, 2 TIMEOUT
 
 Command: `tests/run_all.py` (no flags), wall time 1968 s (~33 min). Nothing was fixed first.
 Result as run: **1 FAIL, 2 KNOWN-FAIL, 1 KNOWN-FAIL-NOW-PASSES, 55 PASS** (exit 1).
-After the one registry change below (validate_gid2d.py registered `known`, A1.16) the expected
-summary is 3 KNOWN-FAIL, 1 KNOWN-FAIL-NOW-PASSES, 56 PASS. The full run was not repeated.
+Registry as committed after two corrections (validate_gid2d.py registered `known` A1.16;
+compare_models.py `known` dropped, it passes): **3 KNOWN-FAIL, 56 PASS**. This is the full run
+plus registry corrections, not a second full run; compare_models was re-verified alone (PASS, 268 s).
 
 ```
 status                  seconds  interp    harness                                            note
@@ -505,7 +506,7 @@ KNOWN-FAIL reasons:
 - `tests/recovered/smoke_fit.py`: reads `scaler_parameters['chi2_per_N_reported']` etc.; GID2D now emits `chi2_per_N_reported_LINEAR` / `chi2_per_N_active_only_LINEAR` (stale key names -> KeyError at the first print). Harness-side staleness.
 - `tests/recovered/verify_jointmcmc.py`: binds a fixed list of XModFit methods onto a Fake; `_draw_corner` now calls `_corner_render_data` (added in `b953c3f`), absent from the list -> AttributeError at section 3. Harness-side staleness.
 - `validate_gid2d.py` (NEW, fix-list **A1.16**): `RAW` is a hard-coded `T:\SURFACE\...` path; absent -> `check('raw map present', False, ...)`, 1 of 28 checks. Re-run alone: same, deterministic. Fix: repoint at the untracked `Data/dppc_q2d_gid_raw_copy.txt` or make it a real skip.
-- `tests/recovered/compare_models.py` is registered known (tests the retiring `XLayersPDB_dev_smooth`; 5000-step x2 sampling did not finish in 240 s) but **passed in 270 s** under its 900 s timeout. The runner asks for its registry entry to be removed; left in place because the only registry change allowed in Task 7 is a `known` for a new defect. Decision for the controller.
+- (`tests/recovered/compare_models.py` was registered known in the as-run table but passed in 270 s under its 900 s timeout; its `known` was dropped, `slow`/`timeout: 900` kept. It exercises `XLayersPDB_dev_smooth` (retired, D1) and goes when WS1/B8 removes that variant.)
 
 New fix-list IDs: A1.16 (above). None raised by Task 5.
 
