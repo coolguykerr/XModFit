@@ -1,5 +1,6 @@
 import os, sys
-sys.path.insert(0, r'C:\Users\kerr\Documents\GitHub\XModJointFit')
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))); os.chdir(ROOT); sys.path.insert(0, ROOT)
+SCRATCH = os.path.join(ROOT, 'tests', '_logs'); os.makedirs(SCRATCH, exist_ok=True)
 import numpy as np
 from lmfit import Parameters
 from lmfit.customhdf import CustomHDFBackend
@@ -37,7 +38,7 @@ def build():
 
 def run(mode):
     jf = build()
-    tmp = os.path.join(os.environ.get('TEMP', '.'), 'seedmode_%s.h5' % mode)
+    tmp = os.path.join(SCRATCH, 'seedmode_%s.h5' % mode)
     if os.path.exists(tmp): os.remove(tmp)
     jf.perform_fit(0.02, 0.5, fit_method='emcee', emcee_walkers=12, emcee_steps=20,
                    emcee_cores=1, backend=CustomHDFBackend(tmp), seed_temperature=1.0,

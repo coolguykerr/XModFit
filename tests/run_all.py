@@ -36,6 +36,13 @@ REGISTRY = {
         'interp': 'cmcars', 'slow': True},
     # validate_fastscan.py Part B needs the Julia/XPR backend (see its header).
     'validate_fastscan.py': {'slow': True, 'interp': 'cmcars'},
+
+    # --- recovered harnesses (P-3b) ---
+    'tests/recovered/verify_jointmcmc.py': {
+        'known': "binds a fixed list of XModFit methods onto a Fake; _draw_corner now "
+                 "calls _corner_render_data (added in b953c3f), absent from the list "
+                 "-> AttributeError at section 3"},
+    'tests/recovered/repro_backend.py': {'smoke': True},
 }
 
 DEFAULT_TIMEOUT = 600

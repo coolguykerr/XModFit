@@ -1,6 +1,7 @@
 import os, sys, types as _t
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
-sys.path.insert(0, r'C:\Users\kerr\Documents\GitHub\XModJointFit')
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))); os.chdir(ROOT); sys.path.insert(0, ROOT)
+SCRATCH = os.path.join(ROOT, 'tests', '_logs'); os.makedirs(SCRATCH, exist_ok=True)
 _xr = _t.ModuleType('xraydb')
 class X:
     def __getattr__(s, n): return lambda *a, **k: None
@@ -25,7 +26,7 @@ w.fit.imin, w.fit.imax = 0, 79
 w.sfnames = ['0<>C:/data/i2_tim3_1000.rrf']
 w._mcmc_is_joint = False
 
-tmp = os.path.join(os.environ.get('TEMP', '.'), 'fp_test.h5')
+tmp = os.path.join(SCRATCH, 'fp_test.h5')
 if os.path.exists(tmp): os.remove(tmp)
 w.MCMCBackendFile = tmp
 w.backend = CustomHDFBackend(tmp)
@@ -65,7 +66,7 @@ print('diff-params msg:', m3.replace(chr(10), ' | '))
 assert 'parameters' in m3
 
 # ---- no-fingerprint file -> read returns (None, None) ----
-tmp2 = os.path.join(os.environ.get('TEMP', '.'), 'fp_none.h5')
+tmp2 = os.path.join(SCRATCH, 'fp_none.h5')
 if os.path.exists(tmp2): os.remove(tmp2)
 w.backend = CustomHDFBackend(tmp2); w.backend.reset(10, 3)
 fp2, act2 = w._read_mcmc_fingerprint()

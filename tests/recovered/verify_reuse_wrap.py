@@ -1,5 +1,6 @@
 import os, sys
-sys.path.insert(0, r'C:\Users\kerr\Documents\GitHub\XModJointFit')
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))); os.chdir(ROOT); sys.path.insert(0, ROOT)
+SCRATCH = os.path.join(ROOT, 'tests', '_logs'); os.makedirs(SCRATCH, exist_ok=True)
 import numpy as np
 from lmfit import Parameters, Minimizer
 from lmfit.customhdf import CustomHDFBackend
@@ -16,7 +17,7 @@ def resid(params, scale):
     dphi = ((ph - 70.0 + 180.0) % 360.0) - 180.0
     return np.array([a - 1.0, 0.1 * (th - 40.0), 0.1 * dphi, 0.05 * (a - 1.0)])
 
-tmp = os.path.join(os.environ.get('TEMP', '.'), 'reuse_wrap.h5')
+tmp = os.path.join(SCRATCH, 'reuse_wrap.h5')
 if os.path.exists(tmp): os.remove(tmp)
 
 NW = 8

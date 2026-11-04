@@ -1,6 +1,7 @@
 import os, sys, types as _t
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
-sys.path.insert(0, r'C:\Users\kerr\Documents\GitHub\XModJointFit')
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))); os.chdir(ROOT); sys.path.insert(0, ROOT)
+SCRATCH = os.path.join(ROOT, 'tests', '_logs'); os.makedirs(SCRATCH, exist_ok=True)
 _xr = _t.ModuleType('xraydb')
 class X:
     def __getattr__(s, n): return lambda *a, **k: None
@@ -48,7 +49,7 @@ cw = w.emceeConfIntervalWidget
 print('backend before Start MCMC file:', getattr(w, 'backend', None))
 
 # "Start MCMC file"
-tmp = os.path.join(os.environ.get('TEMP', '.'), 'joint_full_chain.h5')
+tmp = os.path.join(SCRATCH, 'joint_full_chain.h5')
 if os.path.exists(tmp):
     os.remove(tmp)
 QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (tmp, 'MCMC Files (*.h5)'))

@@ -1,5 +1,5 @@
 import os, sys
-sys.path.insert(0, r'C:\Users\kerr\Documents\GitHub\XModJointFit')
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))); os.chdir(ROOT); sys.path.insert(0, ROOT)
 import numpy as np
 from lmfit import Parameters
 from scipy.optimize import least_squares

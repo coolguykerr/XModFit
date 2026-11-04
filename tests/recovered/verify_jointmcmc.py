@@ -1,6 +1,6 @@
 import os, sys, types as _t
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
-sys.path.insert(0, r'C:\Users\kerr\Documents\GitHub\XModJointFit')
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))); os.chdir(ROOT); sys.path.insert(0, ROOT)
 
 # stub xraydb (not pip-installed in cmc-py39; only used for X-ray calcs, not for
 # constructing the module) -- see cmc-py39-env memory

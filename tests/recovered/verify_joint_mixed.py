@@ -1,5 +1,6 @@
 import os, sys
-sys.path.insert(0, r'C:\Users\kerr\Documents\GitHub\XModJointFit')
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))); os.chdir(ROOT); sys.path.insert(0, ROOT)
+SCRATCH = os.path.join(ROOT, 'tests', '_logs'); os.makedirs(SCRATCH, exist_ok=True)
 import numpy as np
 from lmfit import Parameters
 from lmfit.customhdf import CustomHDFBackend
@@ -42,7 +43,7 @@ assert not lay['both_shared'] and not lay['neither_shared']   # mixed
 assert 'theta' in lay['col'] and 'd0_phi' in lay['col'] and 'd1_phi' in lay['col']
 
 jf.perform_fit(0.02, 0.5, fit_method='leastsq')
-tmp = os.path.join(os.environ.get('TEMP', '.'), 'joint_mixed.h5')
+tmp = os.path.join(SCRATCH, 'joint_mixed.h5')
 if os.path.exists(tmp): os.remove(tmp)
 be = CustomHDFBackend(tmp)
 NW = 16
