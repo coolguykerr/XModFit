@@ -1,6 +1,6 @@
 """Show the periodic autocorr cost is now bounded (windowed) and constant vs chain length."""
 import os, sys, time, tempfile
-REPO = r"C:\Users\kerr\Documents\GitHub\XModJointFit"
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(REPO); sys.path.insert(0, REPO)
 import numpy as np
 from lmfit.customhdf import CustomHDFBackend

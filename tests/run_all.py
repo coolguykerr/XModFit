@@ -43,6 +43,13 @@ REGISTRY = {
                  "calls _corner_render_data (added in b953c3f), absent from the list "
                  "-> AttributeError at section 3"},
     'tests/recovered/repro_backend.py': {'smoke': True},
+    'tests/recovered/test_pickle_fit.py': {'smoke': True},
+    'tests/recovered/test_autocorr_window.py': {'smoke': True},
+    'tests/recovered/compare_models.py': {
+        'known': "tests XLayersPDB_dev_smooth, a variant slated for retirement "
+                 "(decision D1); 5000-step x2 sampling did not finish in 240 s",
+        'slow': True, 'timeout': 900},
+    'tests/recovered/test_joint_abort.py': {'slow': True, 'timeout': 900},
 }
 
 DEFAULT_TIMEOUT = 600

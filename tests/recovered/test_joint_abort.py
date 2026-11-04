@@ -1,8 +1,9 @@
 """Reproduce: joint emcee, aborted partway (like Stop), inspect result for the GUI path."""
 import os, sys, tempfile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-REPO = r"C:\Users\kerr\Documents\GitHub\XModJointFit"
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(REPO); sys.path.insert(0, REPO)
+from tests.harness import check, finish
 import numpy as np
 from PyQt5.QtWidgets import QApplication
 _app = QApplication.instance() or QApplication([])
@@ -11,7 +12,7 @@ XLayersPDB = import_module("Functions.XRR.XLayersPDB").XLayersPDB
 from Joint_Fit_Routines import JointFit
 from lmfit.customhdf import CustomHDFBackend
 
-RRF = r"C:\Users\kerr\Documents\XLayersProtTest\mTIM3 analysis\i2_tim3_1000.rrf"
+RRF = os.path.join(REPO, 'Data', 'i2_tim3_1000_test.txt')
 raw = np.loadtxt(RRF); m = (raw[:, 0] >= 0.026) & (raw[:, 0] <= 0.550)
 XD, YD, ED = raw[m, 0], raw[m, 1], raw[m, 2]
 MPAR = {'Model': {'Layers': ['top', 'tail', 'head', 'bottom'],
@@ -23,7 +24,7 @@ VARY = ['qoff', 'theta', 'phi', 'protins', 'cov',
 
 
 def build_func():
-    f = XLayersPDB(x=XD, E=10.0, fname='./Data/tim3_hmmm_ext_all_bestframe.pdb', mpar=MPAR,
+    f = XLayersPDB(x=XD, E=10.0, fname='./Data/1ubq.pdb', mpar=MPAR,
                    dz=0.5, fslice=0.5, rrf=True, fix_sig=True, qoff=9.83e-05, yscale=1.0,
                    bkg=0.0, theta=40.88, phi=74.08, protins=6.094141, cov=0.1582754)
     for k, v in [('__Model_d_001', 11.3182806), ('__Model_d_002', 8.75928561),
@@ -97,9 +98,11 @@ def safe(label, fn):
     print(label)
     try:
         fn()
+        check(label + " completes without raising", True)
     except Exception as e:
         import traceback
         print("  >> RAISED:", type(e).__name__, str(e)[:120])
+        check(label + " completes without raising", False, '%s: %s' % (type(e).__name__, str(e)[:120]))
 
 
 if __name__ == '__main__':
@@ -108,3 +111,4 @@ if __name__ == '__main__':
     safe("=== SERIAL joint, EARLY abort (~mid step 1) ===", lambda: run_abort(1, 30))
     safe("=== PARALLEL joint (cores=6), LATE abort (~step 40) ===", lambda: run_abort(6, 40))
     safe("=== PARALLEL joint (cores=6), EARLY abort (step 1) ===", lambda: run_abort(6, 1))
+    sys.exit(finish())

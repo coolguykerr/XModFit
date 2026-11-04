@@ -9,8 +9,9 @@ Guarded for Windows spawn.
 """
 import os, sys, time, tempfile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-REPO = r"C:\Users\kerr\Documents\GitHub\XModJointFit"
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(REPO); sys.path.insert(0, REPO)
+from tests.harness import check, finish
 import numpy as np
 from PyQt5.QtWidgets import QApplication
 _app = QApplication.instance() or QApplication([])
@@ -21,7 +22,7 @@ from Fit_Routines import Fit
 from lmfit.customhdf import CustomHDFBackend
 from pdb_logprob import PdbLogProb
 
-RRF = r"C:\Users\kerr\Documents\XLayersProtTest\mTIM3 analysis\i2_tim3_1000.rrf"
+RRF = os.path.join(REPO, 'Data', 'i2_tim3_1000_test.txt')
 raw = np.loadtxt(RRF); m = (raw[:, 0] >= 0.026) & (raw[:, 0] <= 0.550)
 XD, YD, ED = raw[m, 0], raw[m, 1], raw[m, 2]
 VARY = ['qoff', 'theta', 'phi', 'protins', 'cov',
@@ -34,7 +35,7 @@ def make_fit():
                       'rho': [0.0, 0.23396671, 0.46419943, 0.334],
                       'mu':  [0.0, 0.0, 0.0, 0.0],
                       'sig': [3.4, 3.4, 3.4, 3.4]}}
-    func = XLayersPDB(x=XD, E=10.0, fname='./Data/tim3_hmmm_ext_all_bestframe.pdb',
+    func = XLayersPDB(x=XD, E=10.0, fname='./Data/1ubq.pdb',
                       mpar=mpar, dz=0.5, fslice=0.5, rrf=True, fix_sig=True,
                       qoff=9.830348e-05, yscale=1.0, bkg=0.0,
                       theta=40.88, phi=74.08, protins=6.094141, cov=0.1582754)
@@ -100,6 +101,8 @@ def main():
         got = lp(th)
         maxdiff = max(maxdiff, abs(ref - got))
     print("(1) objective identity: max|PdbLogProb - (-0.5*sum(Fit.residual^2))| = %.3e" % maxdiff)
+    check("(1) PdbLogProb == -0.5*sum(Fit.residual^2)", maxdiff < 1e-6 * max(1.0, abs(ref)),
+          'max|diff|=%.3e' % maxdiff)
 
     # --- (2/5) parallel run + (4) progress hook ---
     prog = [0]
@@ -108,11 +111,15 @@ def main():
     print("(2) PARALLEL completed: chain shape %s finite=%s  time=%.1fs  progress_ticks=%d"
           % (chain_par.shape, bool(np.all(np.isfinite(chain_par))), t_par, prog[0]))
 
+    check("(2) parallel emcee finite chain", bool(np.all(np.isfinite(chain_par))))
+    check("(4) progress hook fired", prog[0] > 0, 'ticks=%d' % prog[0])
+
     # --- (3) serial run (regression) ---
     fits = make_fit(); fits.perform_fit(0.026, 0.550, fit_scale='Linear', fit_method='leastsq', maxiter=50)
     chain_ser, t_ser = emcee_run(fits, 1, steps=40)
     print("(3) SERIAL   completed: chain shape %s finite=%s  time=%.1fs"
           % (chain_ser.shape, bool(np.all(np.isfinite(chain_ser))), t_ser))
+    check("(3) serial emcee finite chain", bool(np.all(np.isfinite(chain_ser))))
     # sampling-only speedup (subtract ~equal seeding? seeding differs; report totals)
     print("(5) total-run speedup (incl seeding): %.2fx" % (t_ser / t_par))
 
@@ -121,7 +128,10 @@ def main():
     chain_ab, _ = emcee_run(fita, workers, steps=200, abort_after=6)
     print("(4) ABORT after ~6 steps: chain steps=%d (of 200 requested) aborted=%s"
           % (chain_ab.shape[0], getattr(fita.result, 'aborted', None)))
+    check("(4) user abort stops the run early", chain_ab.shape[0] < 200,
+          'steps=%d of 200' % chain_ab.shape[0])
 
 
 if __name__ == '__main__':
     main()
+    sys.exit(finish())

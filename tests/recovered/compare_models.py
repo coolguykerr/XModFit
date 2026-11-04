@@ -7,7 +7,7 @@ discretization (hard voxel) vs erf-smoothed objective.
 """
 import os, sys, time, tempfile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-REPO = r"C:\Users\kerr\Documents\GitHub\XModJointFit"
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(REPO); sys.path.insert(0, REPO)
 import numpy as np
 from PyQt5.QtWidgets import QApplication
@@ -16,7 +16,7 @@ from importlib import import_module
 from Fit_Routines import Fit
 from lmfit.customhdf import CustomHDFBackend
 
-RRF = r"C:\Users\kerr\Documents\XLayersProtTest\mTIM3 analysis\i2_tim3_1000.rrf"
+RRF = os.path.join(REPO, 'Data', 'i2_tim3_1000_test.txt')
 raw = np.loadtxt(RRF); m = (raw[:, 0] >= 0.026) & (raw[:, 0] <= 0.550)
 XD, YD, ED = raw[m, 0], raw[m, 1], raw[m, 2]
 VARY = ['qoff', 'theta', 'phi', 'protins', 'cov',
@@ -30,7 +30,7 @@ WALKERS, STEPS, WORKERS, BURN = 20, 5000, 8, 500
 
 def make_fit(clsname):
     cls = import_module("Functions.XRR.%s" % clsname).__getattribute__(clsname)
-    func = cls(x=XD, E=10.0, fname='./Data/tim3_hmmm_ext_all_bestframe.pdb', mpar=MPAR,
+    func = cls(x=XD, E=10.0, fname='./Data/1ubq.pdb', mpar=MPAR,
                dz=0.5, fslice=0.5, rrf=True, fix_sig=True, qoff=9.83e-05, yscale=1.0,
                bkg=0.0, theta=40.88, phi=74.08, protins=6.094141, cov=0.1582754)
     for k, v in [('__Model_d_001', 11.3182806), ('__Model_d_002', 8.75928561),

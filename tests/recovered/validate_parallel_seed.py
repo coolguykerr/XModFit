@@ -11,10 +11,11 @@ import sys
 import time
 import numpy as np
 
-REPO = r"C:\Users\kerr\Documents\GitHub\XModJointFit"
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(REPO)
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
+from tests.harness import check, finish
 
 from importlib import import_module
 XLayersPDB = import_module("Functions.XRR.XLayersPDB").XLayersPDB
@@ -22,7 +23,7 @@ import pdb_seed_worker as psw
 
 
 def build_func():
-    RRF = r"C:\Users\kerr\Documents\XLayersProtTest\mTIM3 analysis\i2_tim3_1000.rrf"
+    RRF = os.path.join(REPO, 'Data', 'i2_tim3_1000_test.txt')
     raw = np.loadtxt(RRF)
     xall, yall, eall = raw[:, 0], raw[:, 1], raw[:, 2]
     m = (xall >= 0.026) & (xall <= 0.550)
@@ -32,7 +33,7 @@ def build_func():
                       'rho': [0.0, 0.23396671, 0.46419943, 0.334],
                       'mu':  [0.0, 0.0, 0.0, 0.0],
                       'sig': [3.4, 3.4, 3.4, 3.4]}}
-    func = XLayersPDB(x=xd, E=10.0, fname='./Data/tim3_hmmm_ext_all_bestframe.pdb',
+    func = XLayersPDB(x=xd, E=10.0, fname='./Data/1ubq.pdb',
                       mpar=mpar, dz=0.5, fslice=0.5, rrf=True, fix_sig=True,
                       qoff=9.830348e-05, yscale=1.0, bkg=0.0,
                       theta=40.88, phi=74.08, protins=6.094141, cov=0.1582754)
@@ -90,6 +91,11 @@ def main():
     print("SERIAL subset (%d cells): %.1f s  -> per-cell %.3f s" %
           (len(subset), t_ser, t_ser / len(subset)))
     print("max |parallel - serial| over subset: %.3e" % maxdiff)
+    check("(1) parallel scan == serial scan (same worker code, deterministic)",
+          maxdiff < 1e-9 * max(1.0, max(abs(c) for (_, _, c) in par)),
+          'max|diff|=%.3e' % maxdiff)
+    check("all grid-cell costs finite", all(np.isfinite(c) for (_, _, c) in par),
+          '%d cells' % len(par))
     print("serial-estimate full scan: %.1f s -> speedup ~%.1fx" %
           (len(cells) * t_ser / len(subset), (len(cells) * t_ser / len(subset)) / t_par))
 
@@ -119,3 +125,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    sys.exit(finish())

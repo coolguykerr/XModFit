@@ -1,8 +1,9 @@
 """Validate emcee on a 2-dataset JointFit (engine-level, serial)."""
 import os, sys, tempfile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-REPO = r"C:\Users\kerr\Documents\GitHub\XModJointFit"
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(REPO); sys.path.insert(0, REPO)
+from tests.harness import check, finish
 import numpy as np
 from PyQt5.QtWidgets import QApplication
 _app = QApplication.instance() or QApplication([])
@@ -11,7 +12,7 @@ XLayersPDB = import_module("Functions.XRR.XLayersPDB").XLayersPDB
 from Joint_Fit_Routines import JointFit
 from emcee import backends
 
-RRF = r"C:\Users\kerr\Documents\XLayersProtTest\mTIM3 analysis\i2_tim3_1000.rrf"
+RRF = os.path.join(REPO, 'Data', 'i2_tim3_1000_test.txt')
 raw = np.loadtxt(RRF); m = (raw[:, 0] >= 0.026) & (raw[:, 0] <= 0.550)
 XD, YD, ED = raw[m, 0], raw[m, 1], raw[m, 2]
 MPAR = {'Model': {'Layers': ['top', 'tail', 'head', 'bottom'],
@@ -23,7 +24,7 @@ VARY = ['qoff', 'theta', 'phi', 'protins', 'cov',
 
 
 def build_func():
-    f = XLayersPDB(x=XD, E=10.0, fname='./Data/tim3_hmmm_ext_all_bestframe.pdb', mpar=MPAR,
+    f = XLayersPDB(x=XD, E=10.0, fname='./Data/1ubq.pdb', mpar=MPAR,
                    dz=0.5, fslice=0.5, rrf=True, fix_sig=True, qoff=9.83e-05, yscale=1.0,
                    bkg=0.0, theta=40.88, phi=74.08, protins=6.094141, cov=0.1582754)
     for k, v in [('__Model_d_001', 11.3182806), ('__Model_d_002', 8.75928561),
@@ -53,6 +54,7 @@ rep, msg = jf.perform_fit(0.026, 0.550, fit_scale='Linear', fit_method='emcee',
                           reuse_sampler=False, emcee_thin=1, backend=backends.HDFBackend(bp))
 chain = jf.result.chain
 print("JOINT emcee OK: chain shape", chain.shape, "finite:", bool(np.all(np.isfinite(chain))))
+check("joint emcee chain finite", bool(np.all(np.isfinite(chain))), 'shape %s' % (chain.shape,))
 print("var_names:", list(jf.result.var_names))
 fc = jf.result.flatchain
 print("flatchain keys:", list(fc.keys()))
@@ -61,3 +63,4 @@ for nm in ['theta', 'phi', 'cov']:
         col = np.asarray(fc[nm])
         print("  %-6s median=%.4f std=%.4f" % (nm, np.median(col), np.std(col)))
 print("acceptance:", np.mean(jf.fitter.sampler.acceptance_fraction))
+sys.exit(finish())

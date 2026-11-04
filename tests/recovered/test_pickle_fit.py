@@ -4,7 +4,7 @@ survive the pickling that multiprocessing.Pool.map performs at cores>1?
 """
 import os, sys, pickle
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-REPO = r"C:\Users\kerr\Documents\GitHub\XModJointFit"
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(REPO); sys.path.insert(0, REPO)
 import numpy as np
 from PyQt5.QtWidgets import QApplication

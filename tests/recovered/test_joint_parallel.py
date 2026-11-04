@@ -6,8 +6,9 @@ Guarded for Windows spawn.
 """
 import os, sys, tempfile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-REPO = r"C:\Users\kerr\Documents\GitHub\XModJointFit"
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(REPO); sys.path.insert(0, REPO)
+from tests.harness import check, finish
 import numpy as np
 from PyQt5.QtWidgets import QApplication
 _app = QApplication.instance() or QApplication([])
@@ -17,7 +18,7 @@ from Joint_Fit_Routines import JointFit
 from emcee import backends
 import pdb_joint_logprob as pjl
 
-RRF = r"C:\Users\kerr\Documents\XLayersProtTest\mTIM3 analysis\i2_tim3_1000.rrf"
+RRF = os.path.join(REPO, 'Data', 'i2_tim3_1000_test.txt')
 raw = np.loadtxt(RRF); m = (raw[:, 0] >= 0.026) & (raw[:, 0] <= 0.550)
 XD, YD, ED = raw[m, 0], raw[m, 1], raw[m, 2]
 MPAR = {'Model': {'Layers': ['top', 'tail', 'head', 'bottom'],
@@ -29,7 +30,7 @@ VARY = ['qoff', 'theta', 'phi', 'protins', 'cov',
 
 
 def build_func():
-    f = XLayersPDB(x=XD, E=10.0, fname='./Data/tim3_hmmm_ext_all_bestframe.pdb', mpar=MPAR,
+    f = XLayersPDB(x=XD, E=10.0, fname='./Data/1ubq.pdb', mpar=MPAR,
                    dz=0.5, fslice=0.5, rrf=True, fix_sig=True, qoff=9.83e-05, yscale=1.0,
                    bkg=0.0, theta=40.88, phi=74.08, protins=6.094141, cov=0.1582754)
     for k, v in [('__Model_d_001', 11.3182806), ('__Model_d_002', 8.75928561),
@@ -72,6 +73,8 @@ def main():
         got = lp(th)
         maxdiff = max(maxdiff, abs(ref - got))
     print("(1) JointLogProb vs -0.5*sum(JointFit.residual^2): max|diff| = %.3e" % maxdiff)
+    check("JointLogProb == -0.5*sum(JointFit.residual^2) (docstring: airtight)",
+          maxdiff < 1e-6 * max(1.0, abs(ref)), 'max|diff|=%.3e' % maxdiff)
 
     # (2) parallel joint emcee end-to-end
     jf2 = make_joint()
@@ -86,6 +89,8 @@ def main():
     chain = jf2.result.chain
     print("(2) PARALLEL joint emcee (workers=%d, ext_objective=%s): chain %s finite=%s"
           % (workers, used_ext, chain.shape, bool(np.all(np.isfinite(chain)))))
+    check("parallel joint emcee chain finite", bool(np.all(np.isfinite(chain))),
+          'workers=%d' % workers)
     fc = jf2.result.flatchain
     for nm in ['theta', 'phi', 'cov']:
         col = np.asarray(fc[nm])
@@ -101,3 +106,4 @@ def _set(params, names, vals):
 
 if __name__ == '__main__':
     main()
+    sys.exit(finish())
