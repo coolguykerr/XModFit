@@ -37,6 +37,7 @@ Use the conda environment, not the default interpreter:
 
 ```bash
 "C:/Users/kerr/.conda/envs/cmc-py39/python.exe" xmodfit.py
+"C:/Users/kerr/.conda/envs/cmc-py39/python.exe" tests/run_all.py --quick   # whole safety net, ~8.5 min (full run ~33 min)
 ```
 
 For headless work set `QT_QPA_PLATFORM=offscreen`, inject a stub `sys.modules['xraydb']`

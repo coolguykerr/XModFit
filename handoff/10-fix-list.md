@@ -249,10 +249,23 @@ or must assume old-convention input.
 **A1.16 `validate_gid2d.py` hard-codes an off-machine raw map.** [hygiene]
 Found by the WS0 baseline 2026-11-04. `RAW` (`validate_gid2d.py:25`) is
 `T:\SURFACE\NX_school\2026sep\extracted_data\dppc_q2d_gid.txt`; when it is absent, section 6
-records `check('raw map present', False, 'SKIPPED ...')`, which is a FAIL (1 of 28).
-*Fix:* repoint `RAW` at `Data/dppc_q2d_gid_raw_copy.txt` (currently untracked; track it as
-a fixture) or make the absence a real skip (exit 77). Registered `known` in
-`tests/run_all.py` until then.
+recorded `check('raw map present', False, 'SKIPPED ...')`, a FAIL that hid the other checks.
+*Done (WS0 final-review fixes):* when `RAW` is absent, section 6 now prints a NOTE and
+regenerates a raw-format map into `tests/_logs/` from the tracked packed map (the way
+`tests/recovered/repro_raw.py` does); `pack_map` output goes to `tests/_logs/` too, so the
+harness never writes into tracked `Data/`. All 38 checks run and pass; the `known` entry
+in `tests/run_all.py` is dropped.
+*Remains:* the hard-coded `T:` path itself (still tried first when reachable), and that
+without the T: file, section 6 packs a round-tripped raw map rather than the original.
+
+**A1.17 Two recovered harnesses are stale.** [hygiene]
+`tests/recovered/smoke_fit.py` reads `scaler_parameters['chi2_per_N_reported']`, which GID2D
+now emits as `chi2_per_N_reported_LINEAR` / `chi2_per_N_active_only_LINEAR` (KeyError at the
+first print). `tests/recovered/verify_jointmcmc.py` binds a fixed list of XModFit methods
+onto a `Fake`; `_draw_corner` now calls `_corner_render_data` (added in `b953c3f`), absent
+from the list (AttributeError at section 3). Neither is an engine defect.
+*Fix:* update the key names / add `_corner_render_data` to the bound list. Both are
+registered `known` in `tests/run_all.py` until then.
 
 ## A2. Data folder
 

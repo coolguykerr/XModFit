@@ -36,7 +36,7 @@ MCMC backend files into upstream's history permanently.
 
 | File | Lines | State | Role |
 |---|---|---|---|
-| `validate_joint_gls.py` | -- | new (WS0, 2026-11-04) | GLS core, synthetic: replaced the retired real-data `validate_jointfit.py` (whitening identity, N=1 == stock Fit, cross-cov stderrs) |
+| `validate_joint_gls.py` | 324 | new (WS0, 2026-11-04) | GLS core, synthetic: replaced the retired real-data `validate_jointfit.py` (whitening identity, N=1 == stock Fit, cross-cov stderrs) |
 | `validate_jointfit_gui.py` | 362 | new (`c5f697d`) + **uncommitted** (+43/-5) | joint-fit GUI: seeding, `.jpar` round-trip, overlay selection, model comparison |
 | `validate_perdataset_fit.py` | 199 | new (`c5f697d`) | per-dataset fit memory + shared PDB read cache |
 | `validate_fit_mask.py` | 199 | new-untracked | `Fit` per-point mask: freeze invariant, `_window_indices`, dict-x branch |
@@ -179,9 +179,21 @@ Runtimes are **estimates** (see section 7, claim V1) — nothing here was execut
 | `validate_column_limits.py` | limits store, `xmin`/`xmax` proxies, badge, `.xpar`/`.jpar` round-trip | **full offscreen widget** | none (writes its own 5-column file to `%TEMP%`) | n/a | cmc-py39 | 30-60 s |
 | `validate_perdataset_fit.py` | per-dataset fit memory, shared PDB cache, per-dataset PDB persistence | **full offscreen widget** | `Data/*.pdb` (any, for cache); `Data/Pr4.pdb` + `Data/Nd9.pdb` (else SKIP) | yes, tracked | cmc-py39 | 1-2 min |
 | `validate_jointfit_gui.py` | joint GUI: seeding, `.jpar` save/load-with-missing-dataset, `.par`-into-joint, overlay selection, CI button, model comparison | **full offscreen widget** | none (synthetic, `%TEMP%`) | n/a | cmc-py39 | 1-2 min |
-| `validate_xlayerspdb_joint.py` | real XLayersPDB individual + joint fit; `0.99*xmin` unification measured on real data; MCMC fingerprint unchanged | **full offscreen widget** | `Data/i2_tim3_1000_test.txt`, `Data/d6_tim3_1000_test.txt`, `Data/tim3_hmmm_ext_all_bestframe.pdb`, `Data/i2_tim3_1000_test_fitparam.par` | **yes** (2 tracked, 2 untracked) | cmc-py39 | 2-5 min (numba JIT + 2 real fits, `maxiter=12`) |
-| `validate_joint_gls.py` | GLS whitening identity (footprint ON), N=1 JointFit == stock `Fit`, engine stderr vs analytic GLS covariance; replaced the real-data `validate_jointfit.py` on 2026-11-04 | synthetic, no real Qt | none | n/a | cmc-py39 | ~1 s |
+| `validate_xlayerspdb_joint.py` | real XLayersPDB individual + joint fit; `0.99*xmin` unification measured on real data; MCMC fingerprint unchanged | **full offscreen widget** | `Data/i2_tim3_1000_test.txt`, `Data/d6_tim3_1000_test.txt`, `Data/1ubq.pdb`, `tests/fixtures/legacy_xlayerspdb_2024.par` | **yes** (all 4 tracked) | cmc-py39 | 2-5 min (numba JIT + 2 real fits, `maxiter=12`) |
+| `validate_joint_gls.py` | GLS whitening identity (footprint ON), N=1 JointFit == stock `Fit`, engine stderr vs the redchi-scaled analytic GLS covariance, different masks with cross blocks (G4) and with per-dataset windows (G4b); replaced the real-data `validate_jointfit.py` on 2026-11-04 | synthetic; creates a real `QApplication` (offscreen) but no widget | none | n/a | cmc-py39 | ~1 s |
 | `validate_xpr.py` | 3 published XPR logL, projected area, derived coverage, EDP, grad/hess, leastsq, emcee, angle canonicalisation, unit cube, analytic Jacobian | `QApplication` only | `../XPR-main/test_data/` (`2box.rrf`, `3box.rrf`, `protein_2box.rrf`, `protein.pdb`) | **yes, but OUTSIDE the repo** | cmc-py39 or cmcars (needs `juliacall`; both have it) | **5-15 min** (Julia session ~7 s, JIT ~8 s, cold Hessian ~34 s, an orientation seed scan, and a leastsq-with/without-Jacobian bake-off) |
+
+### 4.1b The runner: `tests/run_all.py`
+
+`tests/run_all.py` runs every `validate_*.py`, every `tests/recovered/*.py` and
+`tests/test_*.py` as its own subprocess (own interpreter per the REGISTRY, `cwd` = repo
+root, offscreen), logs each to `tests/_logs/`, and prints a status / seconds / note table.
+Exit code 1 on any FAIL or TIMEOUT. Registry fields: `interp`, `external`, `slow`, `known`
+(expected to fail, with a fix-list ID), `smoke` (assertion-free script), `timeout`.
+Flags: `--only SUBSTR`, `--timeout SEC`, `--dir DIR`, `--registry PATH`, and `--quick`,
+which skips every `slow` and `external` entry. **`--quick` is the before-and-after-every-change
+command for WS1** (about 8.5 min); the full run takes about 33 min. The recorded baseline is in
+`handoff/12-work-package-preaudit.md`.
 
 ### 4.2 Copy-pasteable commands
 
@@ -217,11 +229,11 @@ Runtimes are **estimates** (see section 7, claim V1) — nothing here was execut
 | Validator | Reference | Problem |
 |---|---|---|
 | `validate_jointfit.py:23` | `BASE = os.environ.get("ELCAT_BASE", "/mnt/project")` | POSIX container path; the script was written inside a Linux sandbox and never re-homed for Windows |
-| `validate_jointfit.py:30-32` | six `El_Cat_Si_1_*` files | **absent from the repo and from `Data/`**. All three tests call `load_all()`, so T1/T2/T3 all fail. The 3-dataset GLS core has no runnable regression today |
-| `validate_gid2d.py:25` | `RAW = r"T:\SURFACE\NX_school\2026sep\extracted_data\dppc_q2d_gid.txt"` | hardcoded network drive. Guarded (`:189` prints `SKIPPED`) so it degrades gracefully, but `test_pack_and_map` then only exercises `load_map`, never `pack_map` |
+| `validate_jointfit.py:30-32` | six `El_Cat_Si_1_*` files | **absent from the repo and from `Data/`** (retired 2026-11-04; its role is taken by the synthetic `validate_joint_gls.py`) |
+| `validate_gid2d.py:25` | `RAW = r"T:\SURFACE\NX_school\2026sep\extracted_data\dppc_q2d_gid.txt"` | hardcoded network drive. When absent, section 6 regenerates a raw-format map into `tests/_logs/` from the tracked packed map (A1.16), so `pack_map` is exercised on a round-tripped file |
 | `validate_xpr.py:26` | `../XPR-main/test_data` | outside the repo; present on this machine, will not exist for a collaborator. Overridable via `argv[1]` |
 | `validate_masked_x.py:36`, `validate_gid2d_gui.py:37`, `validate_gid2d.py:26` | `Data/dppc_q2d_gid_indexed.txt` | present but **untracked**, and only regenerable from the unavailable `T:\` raw file. If it is not committed, three validators become unrunnable for everyone else |
-| `validate_xlayerspdb_joint.py:40,43` | `Data/i2_tim3_1000_test.txt`, `Data/i2_tim3_1000_test_fitparam.par` | present but **untracked** (4.6 kB + 1.7 kB). Commit them |
+| `validate_xlayerspdb_joint.py:40-43` | `Data/i2_tim3_1000_test.txt`, `Data/d6_tim3_1000_test.txt`, `Data/1ubq.pdb`, `tests/fixtures/legacy_xlayerspdb_2024.par` | all four tracked |
 | `validate_jointfit.py:165` | `local = local[2:] if False else local` | dead line — a debugging leftover in the T2 name-matching block (and `local` itself is never used) |
 
 **There is no runner that executes all of them.** No `Makefile`, `tox.ini`, `noxfile.py`,
@@ -346,13 +358,14 @@ required there.
 
 ### 6.4 Validator gaps
 
-- **The GLS/covariance core has no runnable test** (`validate_jointfit.py` needs absent
-  data) — the highest-value gap, since the whitening composition order is the riskiest edit
-  in the fork and only `validate_joint_mask.py` touches it, with a synthetic 1x1 `Sigma_logc`.
+- **The GLS/covariance core now has a synthetic regression** (`validate_joint_gls.py` G1-G4b,
+  2026-11-04; the real-data `validate_jointfit.py` is retired). What is still open: the
+  real El_Cat covariance, and a comparison of `result.covar` stderrs against a covariance-aware
+  MCMC posterior.
 - No validator covers `Tools/StructureViewer/` (the NGL viewer) at all.
 - No validator runs a **parallel** (`emcee_cores > 1`) MCMC, so none of the four spawn-`Pool`
   paths is exercised. Covariance/GLS joint MCMC is still serial (per the notes) and untested.
-- `validate_gid2d.py`'s `pack_map` path is effectively dead without the `T:\` raw file.
+- `validate_gid2d.py`'s `pack_map` path runs on a map regenerated from the packed file when the `T:\` raw file is absent (A1.16), not on the original raw data.
 
 ## 7. Claims to verify (audit hooks)
 
