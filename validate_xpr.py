@@ -53,13 +53,7 @@ from Functions import xpr_backend as xb                       # noqa: E402
 from Functions import pdb_geometry as pg                      # noqa: E402
 from Functions.XRR.XLayersPDB_XPR import XLayersPDB_XPR       # noqa: E402
 
-# The cmcars env has an unrelated regular `tests` package in site-packages that
-# shadows the repo's namespace package, so load the harness by file path here.
-import importlib.util as _ilu                                 # noqa: E402
-_hs = _ilu.spec_from_file_location('xmf_harness', os.path.join(REPO, 'tests', 'harness.py'))
-_h = _ilu.module_from_spec(_hs)
-_hs.loader.exec_module(_h)
-check, check_close, skip, finish = _h.check, _h.check_close, _h.skip, _h.finish
+from tests.harness import check, check_close, skip, finish          # noqa: E402
 
 FAIL = []   # ad-hoc failures appended below; folded into the harness count at the end
 
