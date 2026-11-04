@@ -1,0 +1,4 @@
+{
+  "tests/selftest/fixtures/fixed.py": {"known": "self-test"},
+  "tests/selftest/fixtures/smoke.py": {"smoke": true}
+}

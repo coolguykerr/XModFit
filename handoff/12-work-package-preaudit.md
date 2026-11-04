@@ -355,3 +355,72 @@ D1, D2, A2.1 and D4 answered by the user, so two items changed and one was added
   rather than deletions. No per-file decision needed.
 - **D4: no push in prospect.** Reorganisation comes first, then a push, so commit strategy
   is not a live question and the pre-push guard stays.
+
+### 2026-11-04 -- P-2 as-found run (tests/run_all.py, before any harness is migrated)
+
+Run with `--quick --timeout 240` (slow/external entries skipped: validate_fastscan.py, validate_xpr.py; a 600 s default run stalled on compare_models.py and was abandoned). Many PASS rows are exit-0 only: harnesses not yet migrated to `check()` can PASS without asserting anything (Task 7 sorts these).
+
+```
+status                  seconds  interp    harness                                            note
+PASS                       28.0  cmc-py39  tests/recovered/check_aproj.py                     
+TIMEOUT                   240.9  cmc-py39  tests/recovered/compare_models.py                  
+PASS                        5.6  cmc-py39  tests/recovered/repro_backend.py                   
+PASS                        5.9  cmc-py39  tests/recovered/repro_full.py                      
+PASS                       13.6  cmc-py39  tests/recovered/repro_raw.py                       
+PASS                        4.4  cmc-py39  tests/recovered/repro_switch.py                    
+PASS                       13.7  cmc-py39  tests/recovered/repro_tab.py                       
+FAIL                        1.8  cmc-py39  tests/recovered/smoke_fit.py                       
+PASS                        6.5  cmc-py39  tests/recovered/smoke_merge.py                     
+PASS                       18.0  cmc-py39  tests/recovered/test_autocorr_window.py            
+FAIL                        1.8  cmc-py39  tests/recovered/test_gui_construct.py              
+PASS                       11.3  cmc-py39  tests/recovered/test_gui_listing.py                
+PASS                        4.2  cmc-py39  tests/recovered/test_gui_switch.py                 
+TIMEOUT                   240.5  cmc-py39  tests/recovered/test_joint_abort.py                
+PASS                      137.7  cmc-py39  tests/recovered/test_joint_emcee.py                
+PASS                       51.7  cmc-py39  tests/recovered/test_joint_parallel.py             
+PASS                        2.5  cmc-py39  tests/recovered/test_logprob.py                    
+PASS                        4.4  cmc-py39  tests/recovered/test_pdb_persist.py                
+PASS                        2.6  cmc-py39  tests/recovered/test_phase1.py                     
+PASS                        1.7  cmc-py39  tests/recovered/test_pickle_fit.py                 
+PASS                      236.0  cmc-py39  tests/recovered/test_xpr_fitting.py                
+PASS                       42.2  cmc-py39  tests/recovered/test_xpr_stage1.py                 
+PASS                      142.2  cmc-py39  tests/recovered/validate_parallel_sampling.py      
+PASS                       16.9  cmc-py39  tests/recovered/validate_parallel_seed.py          
+PASS                        4.5  cmc-py39  tests/recovered/verify_banner_lifecycle.py         
+PASS                        4.4  cmc-py39  tests/recovered/verify_detail_switch.py            
+PASS                        2.7  cmc-py39  tests/recovered/verify_fingerprint.py              
+PASS                        3.8  cmc-py39  tests/recovered/verify_joint_4ds_parallel.py       
+PASS                        4.3  cmc-py39  tests/recovered/verify_joint_detail_and_legend.py  
+PASS                        1.5  cmc-py39  tests/recovered/verify_joint_mixed.py              
+PASS                        1.5  cmc-py39  tests/recovered/verify_joint_neither.py            
+PASS                        1.5  cmc-py39  tests/recovered/verify_joint_orient.py             
+PASS                       14.8  cmc-py39  tests/recovered/verify_joint_parallel_edge.py      
+PASS                        4.1  cmc-py39  tests/recovered/verify_joint_parallel_sample.py    
+PASS                        1.9  cmc-py39  tests/recovered/verify_joint_seed_worker.py        
+FAIL                        2.4  cmc-py39  tests/recovered/verify_jointmcmc.py                
+PASS                        3.7  cmc-py39  tests/recovered/verify_jointwindow.py              
+PASS                        4.3  cmc-py39  tests/recovered/verify_legend.py                   
+PASS                        4.3  cmc-py39  tests/recovered/verify_multifit_selection.py       
+PASS                        4.3  cmc-py39  tests/recovered/verify_plotting_B.py               
+PASS                        1.2  cmc-py39  tests/recovered/verify_reuse_wrap.py               
+PASS                        2.8  cmc-py39  tests/recovered/verify_seed_gui.py                 
+PASS                        1.0  cmc-py39  tests/recovered/verify_seed_helpers.py             
+PASS                        1.8  cmc-py39  tests/recovered/verify_seedmode.py                 
+PASS                        0.4  cmc-py39  tests/test_harness.py                              
+PASS                       11.4  cmc-py39  tests/test_run_all.py                              
+PASS                        5.2  cmc-py39  validate_column_limits.py                          
+SKIP                        0.0  cmcars    validate_fastscan.py                               quick; slow
+PASS                       11.3  cmc-py39  validate_fastscan_gui.py                           
+PASS                        1.1  cmc-py39  validate_fit_mask.py                               
+FAIL                        1.9  cmc-py39  validate_gid2d.py                                  
+PASS                       18.5  cmc-py39  validate_gid2d_gui.py                              
+PASS                        1.1  cmc-py39  validate_joint_mask.py                             
+KNOWN-FAIL                  1.5  cmc-py39  validate_jointfit.py                               known: El_Cat data not in repo; retired in Task 4
+PASS                        5.3  cmc-py39  validate_jointfit_gui.py                           
+PASS                        1.8  cmc-py39  validate_masked_x.py                               
+PASS                        5.4  cmc-py39  validate_perdataset_fit.py                         
+PASS                        5.3  cmc-py39  validate_xlayerspdb_joint.py                       
+SKIP                        0.0  cmcars    validate_xpr.py                                    quick; external: XPR-main/test_data, sibling of the repo; slow
+
+summary: 4 FAIL, 1 KNOWN-FAIL, 50 PASS, 2 SKIP, 2 TIMEOUT
+```
