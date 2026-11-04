@@ -15,7 +15,7 @@ dataset:
 
 plus one shared K x K log-space covariance of the correction factors,
 ``Sigma_logc`` (identical across datasets stitched with the same attenuator
-calibration -- e.g. the three El_Cat_Si_1 measurements share a byte-identical
+calibration -- e.g. the three wafer_A_*.txt measurements share a byte-identical
 ``*_c_factors.txt``).
 
 The full data covariance over the *concatenation* of all datasets is then

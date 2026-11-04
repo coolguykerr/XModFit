@@ -31,8 +31,6 @@ INTERPS = {
 }
 
 REGISTRY = {
-    'validate_jointfit.py': {
-        'known': 'El_Cat data not in repo; retired in Task 4'},
     'validate_xpr.py': {
         'external': 'XPR-main/test_data, sibling of the repo',
         'interp': 'cmcars', 'slow': True},

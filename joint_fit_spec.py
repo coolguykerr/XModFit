@@ -52,8 +52,9 @@ class DatasetEntry:
 
     name       : unique dataset key (the GUI list item text / file name).
     model_class: model class for this dataset (e.g. XLayers).  May differ per
-                 dataset -- an El_Cat_Si run and a TGP_Qz run legitimately carry
-                 different layer counts.  Ignored if ``model`` is given.
+                 dataset -- a wafer_A_buffer.txt run and a wafer_B_bilayer.txt
+                 run legitimately carry different layer counts.  Ignored if
+                 ``model`` is given.
     model      : a pre-built model INSTANCE (overrides model_class).  Use this
                  to carry a per-dataset starting structure / .par into the fit.
     cov_path   : optional covariance sidecar (*.npz self-contained, or a
