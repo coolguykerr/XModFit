@@ -7,8 +7,8 @@ import time
 
 import numpy as np
 
-REPO = r'C:\Users\kerr\Documents\GitHub\XModJointFit'
-XPRMAIN = r'C:\Users\kerr\Documents\GitHub\XPR-main'
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+XPRMAIN = os.path.join(os.path.dirname(REPO), 'XPR-main')
 os.chdir(REPO)
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, 'Functions'))
@@ -21,7 +21,7 @@ from Fit_Routines import Fit                       # noqa: E402
 from Functions import pdb_geometry as pg                  # noqa: E402
 from Functions.XRR.XLayersPDB_XPR import XLayersPDB_XPR   # noqa: E402
 
-FAIL = []
+from tests.harness import check as _hcheck, finish   # noqa: E402
 
 
 def rrf(fname):
@@ -66,14 +66,14 @@ for k in ('qoff', '__Model_d_001', '__Model_d_002', '__Model_rho_001', '__Model_
 
 ref_chi2 = 2 * 1212.2127
 print('reference chi2 at the published best fit: %.1f' % ref_chi2)
-if not (chi2 < start and chi2 < ref_chi2 * 1.02):
-    FAIL.append('leastsq did not reach the published optimum')
+_hcheck('leastsq reached the published optimum', chi2 < start and chi2 < ref_chi2 * 1.02,
+        'chi2 %.1f start %.1f ref %.1f' % (chi2, start, ref_chi2))
 for k, ref in (('qoff', best['qoff']), ('__Model_d_001', best['d1']),
                ('__Model_d_002', best['d2']), ('__Model_rho_001', best['r1']),
                ('__Model_rho_002', best['r2'])):
     got = fit.result.params[k].value
-    if abs(got - ref) > 0.02 * max(abs(ref), 1e-3):
-        FAIL.append('leastsq %s: %g vs published %g' % (k, got, ref))
+    _hcheck('leastsq %s within 2%% of published' % k,
+            abs(got - ref) <= 0.02 * max(abs(ref), 1e-3), '%g vs published %g' % (got, ref))
 
 print('\n=== emcee through Fit_Routines (serial) ===')
 t0 = time.time()
@@ -84,10 +84,8 @@ print('emcee: %d walkers x 40 steps in %.1f s' % (20, time.time() - t0))
 ch = fit.result.flatchain
 print('flatchain shape:', ch.shape, 'columns:', list(ch.columns))
 print(ch.describe().loc[['mean', 'std']].to_string())
-if ch.shape[0] != 20 * 40:
-    FAIL.append('emcee chain shape %s' % (ch.shape,))
-if not np.isfinite(fit.result.lnprob).all():
-    FAIL.append('emcee lnprob has non-finite entries')
+_hcheck('emcee chain shape', ch.shape[0] == 20 * 40, '%s' % (ch.shape,))
+_hcheck('emcee lnprob finite', np.isfinite(fit.result.lnprob).all())
 
 print('\n=== emcee with theta/phi varying (orientation seeding path) ===')
 fp = os.path.join(XPRMAIN, 'test_data', 'protein_2box.rrf')
@@ -118,8 +116,7 @@ r3, m3 = fit2.perform_fit(xp.min(), xp.max(), fit_scale='Linear',
 chi2p = np.sum(fit2.result.residual ** 2)
 print('protein leastsq: %d nfev in %.1f s, chi2 = %.1f (published %.1f)'
       % (fit2.result.nfev, time.time() - t0, chi2p, 2 * 464.6397))
-if not np.isfinite(chi2p):
-    FAIL.append('protein leastsq chi2 not finite')
+_hcheck('protein leastsq chi2 finite', np.isfinite(chi2p))
 
 t0 = time.time()
 fit2.perform_fit(xp.min(), xp.max(), fit_scale='Linear', fit_method='emcee',
@@ -131,10 +128,9 @@ th = ch2['theta'].values
 ph = ch2['phi'].values
 print('theta range %.1f..%.1f   phi range %.1f..%.1f' %
       (th.min(), th.max(), ph.min(), ph.max()))
-if not (th.min() >= -1e-9 and th.max() <= 180 + 1e-9):
-    FAIL.append('theta escaped [0,180] -- angle wrapping not applied')
-if not (ph.min() >= -1e-9 and ph.max() <= 360 + 1e-9):
-    FAIL.append('phi escaped [0,360] -- angle wrapping not applied')
+_hcheck('theta stays in [0,180] (angle wrapping applied)',
+        th.min() >= -1e-9 and th.max() <= 180 + 1e-9)
+_hcheck('phi stays in [0,360] (angle wrapping applied)',
+        ph.min() >= -1e-9 and ph.max() <= 360 + 1e-9)
 
-print('\n' + ('ALL CHECKS PASSED' if not FAIL else 'FAILURES:\n  ' + '\n  '.join(FAIL)))
-sys.exit(1 if FAIL else 0)
+sys.exit(finish())

@@ -3,7 +3,7 @@ import os
 import sys
 import types
 
-REPO = r'C:\Users\kerr\Documents\GitHub\XModJointFit'
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(REPO)
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, 'Functions'))

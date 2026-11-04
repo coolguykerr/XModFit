@@ -12,7 +12,7 @@ ratio of the two EDPs is exactly A_xpr / A_exact, with no other approximation.
 import os, sys
 import numpy as np
 
-REPO = r'C:\Users\kerr\Documents\GitHub\XModJointFit'; XP = r'C:\Users\kerr\Documents\GitHub\XPR-main'
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))); XP = os.path.join(os.path.dirname(REPO), 'XPR-main')
 os.chdir(REPO); sys.path.insert(0, REPO); sys.path.insert(0, os.path.join(REPO, 'Functions'))
 from Functions.pdb_cache import pdbread
 from Functions import pdb_geometry as pg

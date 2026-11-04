@@ -57,6 +57,15 @@ REGISTRY = {
         'known': "reads scaler_parameters['chi2_per_N_reported'] etc.; GID2D now "
                  "emits chi2_per_N_reported_LINEAR / chi2_per_N_active_only_LINEAR "
                  "(stale key names -> KeyError at the first print)"},
+    'tests/recovered/check_aproj.py': {
+        'smoke': True, 'interp': 'cmcars',
+        'external': 'XPR-main/test_data, sibling of the repo'},
+    'tests/recovered/test_xpr_stage1.py': {
+        'interp': 'cmcars', 'external': 'XPR-main/test_data, sibling of the repo'},
+    'tests/recovered/test_xpr_fitting.py': {
+        'interp': 'cmcars', 'external': 'XPR-main/test_data, sibling of the repo',
+        'slow': True, 'timeout': 900},
+    'tests/recovered/test_gui_listing.py': {'interp': 'cmcars'},
 }
 
 DEFAULT_TIMEOUT = 600

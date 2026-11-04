@@ -9,8 +9,8 @@ import time
 
 import numpy as np
 
-REPO = r'C:\Users\kerr\Documents\GitHub\XModJointFit'
-XPRMAIN = r'C:\Users\kerr\Documents\GitHub\XPR-main'
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+XPRMAIN = os.path.join(os.path.dirname(REPO), 'XPR-main')
 os.chdir(REPO)
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, 'Functions'))
@@ -19,14 +19,7 @@ from Functions import xpr_backend as xb          # noqa: E402
 from Functions import pdb_geometry as pg         # noqa: E402
 from Functions.XRR.XLayersPDB_XPR import XLayersPDB_XPR   # noqa: E402
 
-FAIL = []
-
-
-def check(name, got, want, tol):
-    ok = abs(got - want) <= tol
-    print('%-40s got %14.4f  want %14.4f  %s' % (name, got, want, 'OK' if ok else 'FAIL'))
-    if not ok:
-        FAIL.append(name)
+from tests.harness import check_close as check, check as _hcheck, finish   # noqa: E402
 
 
 def rrf(fname):
@@ -116,8 +109,7 @@ print('output_params keys:', sorted(fp.output_params.keys()))
 z, rho = fp.output_params['Model_EDP']['x'], fp.output_params['Model_EDP']['y']
 print('EDP: %d points, z %.1f..%.1f, rho %.4f..%.4f' %
       (len(z), z.min(), z.max(), rho.min(), rho.max()))
-if not (len(z) > 10 and np.isfinite(rho).all()):
-    FAIL.append('EDP sane')
+_hcheck('EDP sane', len(z) > 10 and np.isfinite(rho).all())
 
 full = fp._full_params(fp.__d__['Model'], fp.__rho__['Model'], 2)
 # grad/hess are only meaningful against the real data, so reload with it
@@ -134,8 +126,6 @@ t0 = time.time()
 H = xb.hess(full)
 print('hess (%.1f s): shape %s, symmetric=%s' %
       (time.time() - t0, H.shape, np.allclose(H, H.T, atol=1e-6)))
-if not (np.isfinite(g).all() and np.isfinite(H).all()):
-    FAIL.append('grad/hess finite')
+_hcheck('grad/hess finite', np.isfinite(g).all() and np.isfinite(H).all())
 
-print('\n' + ('ALL CHECKS PASSED' if not FAIL else 'FAILURES: %s' % FAIL))
-sys.exit(1 if FAIL else 0)
+sys.exit(finish())
