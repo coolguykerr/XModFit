@@ -246,6 +246,14 @@ rotation origin. Close it with audit claim 07 #5, run on an `_XPR` model
 (`stub_func_from_par`) carry no convention tag, so the standalone entry point needs a flag
 or must assume old-convention input.
 
+**A1.16 `validate_gid2d.py` hard-codes an off-machine raw map.** [hygiene]
+Found by the WS0 baseline 2026-11-04. `RAW` (`validate_gid2d.py:25`) is
+`T:\SURFACE\NX_school\2026sep\extracted_data\dppc_q2d_gid.txt`; when it is absent, section 6
+records `check('raw map present', False, 'SKIPPED ...')`, which is a FAIL (1 of 28).
+*Fix:* repoint `RAW` at `Data/dppc_q2d_gid_raw_copy.txt` (currently untracked; track it as
+a fixture) or make the absence a real skip (exit 77). Registered `known` in
+`tests/run_all.py` until then.
+
 ## A2. Data folder
 
 **A2.1 Remove testing artefacts.** The untracked `Data/*.h5` (A0.3), the 3.9 MB

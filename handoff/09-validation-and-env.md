@@ -36,7 +36,7 @@ MCMC backend files into upstream's history permanently.
 
 | File | Lines | State | Role |
 |---|---|---|---|
-| `validate_jointfit.py` | 287 | new (`c5f697d`) | GLS core: whitening identity, N=1 JointFit == stock Fit, 3-dataset cross-cov fit |
+| `validate_joint_gls.py` | -- | new (WS0, 2026-11-04) | GLS core, synthetic: replaced the retired real-data `validate_jointfit.py` (whitening identity, N=1 == stock Fit, cross-cov stderrs) |
 | `validate_jointfit_gui.py` | 362 | new (`c5f697d`) + **uncommitted** (+43/-5) | joint-fit GUI: seeding, `.jpar` round-trip, overlay selection, model comparison |
 | `validate_perdataset_fit.py` | 199 | new (`c5f697d`) | per-dataset fit memory + shared PDB read cache |
 | `validate_fit_mask.py` | 199 | new-untracked | `Fit` per-point mask: freeze invariant, `_window_indices`, dict-x branch |
@@ -180,7 +180,7 @@ Runtimes are **estimates** (see section 7, claim V1) — nothing here was execut
 | `validate_perdataset_fit.py` | per-dataset fit memory, shared PDB cache, per-dataset PDB persistence | **full offscreen widget** | `Data/*.pdb` (any, for cache); `Data/Pr4.pdb` + `Data/Nd9.pdb` (else SKIP) | yes, tracked | cmc-py39 | 1-2 min |
 | `validate_jointfit_gui.py` | joint GUI: seeding, `.jpar` save/load-with-missing-dataset, `.par`-into-joint, overlay selection, CI button, model comparison | **full offscreen widget** | none (synthetic, `%TEMP%`) | n/a | cmc-py39 | 1-2 min |
 | `validate_xlayerspdb_joint.py` | real XLayersPDB individual + joint fit; `0.99*xmin` unification measured on real data; MCMC fingerprint unchanged | **full offscreen widget** | `Data/i2_tim3_1000_test.txt`, `Data/d6_tim3_1000_test.txt`, `Data/tim3_hmmm_ext_all_bestframe.pdb`, `Data/i2_tim3_1000_test_fitparam.par` | **yes** (2 tracked, 2 untracked) | cmc-py39 | 2-5 min (numba JIT + 2 real fits, `maxiter=12`) |
-| `validate_jointfit.py` | GLS whitening identity, N=1 JointFit == stock `Fit`, 3-dataset cross-cov GLS | fakes PyQt5 with stub modules (no real Qt) | `El_Cat_Si_1_{DOPC,HBS_1,Air}_wtrans.txt` + `*_c_factors.txt` under `$ELCAT_BASE` | **NO — absent from the repo** | cmc-py39 | cannot run |
+| `validate_joint_gls.py` | GLS whitening identity (footprint ON), N=1 JointFit == stock `Fit`, engine stderr vs analytic GLS covariance; replaced the real-data `validate_jointfit.py` on 2026-11-04 | synthetic, no real Qt | none | n/a | cmc-py39 | ~1 s |
 | `validate_xpr.py` | 3 published XPR logL, projected area, derived coverage, EDP, grad/hess, leastsq, emcee, angle canonicalisation, unit cube, analytic Jacobian | `QApplication` only | `../XPR-main/test_data/` (`2box.rrf`, `3box.rrf`, `protein_2box.rrf`, `protein.pdb`) | **yes, but OUTSIDE the repo** | cmc-py39 or cmcars (needs `juliacall`; both have it) | **5-15 min** (Julia session ~7 s, JIT ~8 s, cold Hessian ~34 s, an orientation seed scan, and a leastsq-with/without-Jacobian bake-off) |
 
 ### 4.2 Copy-pasteable commands
@@ -205,8 +205,8 @@ Runtimes are **estimates** (see section 7, claim V1) — nothing here was execut
 & $CMCPY validate_xpr.py
 & $CMCPY validate_xpr.py "C:\path\to\XPR-main\test_data"     # explicit path form
 
-# --- BLOCKED: supply the El_Cat data first, then ---
-$env:ELCAT_BASE = "C:\path\to\El_Cat_Si_1_data"; & $CMCPY validate_jointfit.py
+# validate_joint_gls.py (synthetic; replaced validate_jointfit.py on 2026-11-04)
+& $CMCPY validate_joint_gls.py
 
 # --- ancillary selfchecks (not validate_* but referenced by the notes) ---
 & $CMCPY Functions\gid2d_core.py        # geometry selfcheck, >50 assertions

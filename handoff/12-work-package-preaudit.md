@@ -85,7 +85,7 @@ Nothing after this is trustworthy until these three land.
       - `verify_joint_parallel_scan.py` was deliberately excluded (asserts the flipped
         behaviour); `verify_joint_4ds_parallel.py` replaces it.
 
-- [ ] **P-3b — adapt the recovered harnesses.** This is the part left for you, and it is
+- [x] **P-3b — adapt the recovered harnesses.** This is the part left for you, and it is
       the bulk of the work. In a commit *separate* from the provenance commit: fix
       hardcoded paths, repoint PDB loads at `Data/1ubq.pdb` (the tim3 structure was
       removed on 2026-09-04, so any numeric expectation tied to a specific fit result with
@@ -95,20 +95,20 @@ Nothing after this is trustworthy until these three land.
       shared `check()` from P-1. Expect a good fraction to fail on first run; record which
       and why in the progress log rather than forcing them green.
 
-- [ ] **P-1 / A1.10 — make `check()` actually fail.** Every `validate_*.py` defines a
+- [x] **P-1 / A1.10 — make `check()` actually fail.** Every `validate_*.py` defines a
       local `check(name, cond, detail)` that prints PASS/FAIL and folds the result into a
       module-level `_OK` dict, with the verdict carried only by the exit code. Under
       pytest a failing check reports PASSED. Give the validators a shared helper that
       raises or accumulates a failure count and exits non-zero, and make sure a
       deliberately-broken assertion is observed to fail.
 
-- [ ] **P-2 — add a runner.** `pytest` is **not installed** in `cmc-py39` (verified), so
+- [x] **P-2 — add a runner.** `pytest` is **not installed** in `cmc-py39` (verified), so
       make it a plain script — `tests/run_all.py` — that runs each validator as a
       subprocess with the right interpreter and env, and prints one summary table plus a
       single non-zero exit on any failure. Do not add a pytest dependency. Note which
       validators need `offscreen`, which need out-of-tree data, and which are slow.
 
-- [ ] **Phase 0 checkpoint — the BASELINE.** Run everything and report the results
+- [x] **Phase 0 checkpoint — the BASELINE.** Run everything and report the results
       **before fixing anything**. This is the most valuable single artefact in the
       package: it separates "already broken" from "broken by this work". Record it in the
       progress log below. Two failures are expected and are not yours to fix here:
@@ -424,3 +424,93 @@ SKIP                        0.0  cmcars    validate_xpr.py                      
 
 summary: 4 FAIL, 1 KNOWN-FAIL, 50 PASS, 2 SKIP, 2 TIMEOUT
 ```
+
+### 2026-11-04 -- BASELINE (WS0 Task 7; full run, cmc-py39 / cmcars per row)
+
+Command: `tests/run_all.py` (no flags), wall time 1968 s (~33 min). Nothing was fixed first.
+Result as run: **1 FAIL, 2 KNOWN-FAIL, 1 KNOWN-FAIL-NOW-PASSES, 55 PASS** (exit 1).
+After the one registry change below (validate_gid2d.py registered `known`, A1.16) the expected
+summary is 3 KNOWN-FAIL, 1 KNOWN-FAIL-NOW-PASSES, 56 PASS. The full run was not repeated.
+
+```
+status                  seconds  interp    harness                                            note
+PASS                       15.7  cmcars    tests/recovered/check_aproj.py                     smoke; external: XPR-main/test_data, sibling of the repo
+KNOWN-FAIL NOW PASSES     269.6  cmc-py39  tests/recovered/compare_models.py                  slow; known: tests XLayersPDB_dev_smooth, a variant slated for retirement (decision D1); 5000-step x2 sampling did not finish in 240 s
+PASS                        2.8  cmc-py39  tests/recovered/repro_backend.py                   smoke
+PASS                        3.4  cmc-py39  tests/recovered/repro_full.py                      
+PASS                       26.8  cmc-py39  tests/recovered/repro_raw.py                       smoke
+PASS                        2.7  cmc-py39  tests/recovered/repro_switch.py                    
+PASS                        7.0  cmc-py39  tests/recovered/repro_tab.py                       smoke
+KNOWN-FAIL                  1.1  cmc-py39  tests/recovered/smoke_fit.py                       known: reads scaler_parameters['chi2_per_N_reported'] etc.; GID2D now emits chi2_per_N_reported_LINEAR / chi2_per_N_active_only_LINEAR (stale key names -> KeyError at the first print)
+PASS                        3.8  cmc-py39  tests/recovered/smoke_merge.py                     
+PASS                       15.5  cmc-py39  tests/recovered/test_autocorr_window.py            smoke
+PASS                        2.7  cmc-py39  tests/recovered/test_gui_construct.py              smoke
+PASS                       13.6  cmcars    tests/recovered/test_gui_listing.py                
+PASS                        4.2  cmc-py39  tests/recovered/test_gui_switch.py                 
+PASS                      342.2  cmc-py39  tests/recovered/test_joint_abort.py                slow
+PASS                      103.6  cmc-py39  tests/recovered/test_joint_emcee.py                
+PASS                       45.1  cmc-py39  tests/recovered/test_joint_parallel.py             
+PASS                        2.5  cmc-py39  tests/recovered/test_logprob.py                    
+PASS                        4.5  cmc-py39  tests/recovered/test_pdb_persist.py                
+PASS                        2.6  cmc-py39  tests/recovered/test_phase1.py                     
+PASS                        1.8  cmc-py39  tests/recovered/test_pickle_fit.py                 smoke
+PASS                      234.0  cmcars    tests/recovered/test_xpr_fitting.py                external: XPR-main/test_data, sibling of the repo; slow
+PASS                       44.1  cmcars    tests/recovered/test_xpr_stage1.py                 external: XPR-main/test_data, sibling of the repo
+PASS                      122.1  cmc-py39  tests/recovered/validate_parallel_sampling.py      
+PASS                       14.1  cmc-py39  tests/recovered/validate_parallel_seed.py          
+PASS                        4.8  cmc-py39  tests/recovered/verify_banner_lifecycle.py         
+PASS                        4.2  cmc-py39  tests/recovered/verify_detail_switch.py            
+PASS                        2.8  cmc-py39  tests/recovered/verify_fingerprint.py              
+PASS                        3.8  cmc-py39  tests/recovered/verify_joint_4ds_parallel.py       
+PASS                        4.3  cmc-py39  tests/recovered/verify_joint_detail_and_legend.py  
+PASS                        1.4  cmc-py39  tests/recovered/verify_joint_mixed.py              
+PASS                        1.5  cmc-py39  tests/recovered/verify_joint_neither.py            
+PASS                        1.4  cmc-py39  tests/recovered/verify_joint_orient.py             
+PASS                       14.7  cmc-py39  tests/recovered/verify_joint_parallel_edge.py      
+PASS                        4.1  cmc-py39  tests/recovered/verify_joint_parallel_sample.py    
+PASS                        2.0  cmc-py39  tests/recovered/verify_joint_seed_worker.py        
+KNOWN-FAIL                  2.3  cmc-py39  tests/recovered/verify_jointmcmc.py                known: binds a fixed list of XModFit methods onto a Fake; _draw_corner now calls _corner_render_data (added in b953c3f), absent from the list -> AttributeError at section 3
+PASS                        3.7  cmc-py39  tests/recovered/verify_jointwindow.py              
+PASS                        4.4  cmc-py39  tests/recovered/verify_legend.py                   
+PASS                        4.4  cmc-py39  tests/recovered/verify_multifit_selection.py       
+PASS                        4.3  cmc-py39  tests/recovered/verify_plotting_B.py               
+PASS                        1.2  cmc-py39  tests/recovered/verify_reuse_wrap.py               
+PASS                        2.8  cmc-py39  tests/recovered/verify_seed_gui.py                 
+PASS                        1.0  cmc-py39  tests/recovered/verify_seed_helpers.py             
+PASS                        1.8  cmc-py39  tests/recovered/verify_seedmode.py                 
+PASS                        0.4  cmc-py39  tests/test_harness.py                              
+PASS                       11.4  cmc-py39  tests/test_run_all.py                              
+PASS                        5.3  cmc-py39  validate_column_limits.py                          
+PASS                      239.9  cmcars    validate_fastscan.py                               slow
+PASS                       18.9  cmc-py39  validate_fastscan_gui.py                           
+PASS                        1.1  cmc-py39  validate_fit_mask.py                               
+FAIL                        1.9  cmc-py39  validate_gid2d.py                                  
+PASS                       18.5  cmc-py39  validate_gid2d_gui.py                              
+PASS                        1.2  cmc-py39  validate_joint_gls.py                              
+PASS                        1.1  cmc-py39  validate_joint_mask.py                             
+PASS                        5.0  cmc-py39  validate_jointfit_gui.py                           
+PASS                        1.7  cmc-py39  validate_masked_x.py                               
+PASS                        5.3  cmc-py39  validate_perdataset_fit.py                         
+PASS                        5.2  cmc-py39  validate_xlayerspdb_joint.py                       
+PASS                      294.7  cmcars    validate_xpr.py                                    external: XPR-main/test_data, sibling of the repo; slow
+
+summary: 1 FAIL, 2 KNOWN-FAIL, 1 KNOWN-FAIL NOW PASSES, 55 PASS
+NOTE: tests/recovered/compare_models.py is registered known-failing but now passes; remove its registry entry.
+```
+
+Quick run (`tests/run_all.py --quick`, after the registry change): **504 s wall (~8.4 min)**,
+exit 0; 49 PASS, 3 KNOWN-FAIL, 7 SKIP (the slow/external ones).
+
+KNOWN-FAIL reasons:
+- `tests/recovered/smoke_fit.py`: reads `scaler_parameters['chi2_per_N_reported']` etc.; GID2D now emits `chi2_per_N_reported_LINEAR` / `chi2_per_N_active_only_LINEAR` (stale key names -> KeyError at the first print). Harness-side staleness.
+- `tests/recovered/verify_jointmcmc.py`: binds a fixed list of XModFit methods onto a Fake; `_draw_corner` now calls `_corner_render_data` (added in `b953c3f`), absent from the list -> AttributeError at section 3. Harness-side staleness.
+- `validate_gid2d.py` (NEW, fix-list **A1.16**): `RAW` is a hard-coded `T:\SURFACE\...` path; absent -> `check('raw map present', False, ...)`, 1 of 28 checks. Re-run alone: same, deterministic. Fix: repoint at the untracked `Data/dppc_q2d_gid_raw_copy.txt` or make it a real skip.
+- `tests/recovered/compare_models.py` is registered known (tests the retiring `XLayersPDB_dev_smooth`; 5000-step x2 sampling did not finish in 240 s) but **passed in 270 s** under its 900 s timeout. The runner asks for its registry entry to be removed; left in place because the only registry change allowed in Task 7 is a `known` for a new defect. Decision for the controller.
+
+New fix-list IDs: A1.16 (above). None raised by Task 5.
+
+Environment notes:
+- `.idea/XModFit.iml` and `.idea/misc.xml` are `skip-worktree` (undo: `git update-index --no-skip-worktree .idea/XModFit.iml .idea/misc.xml`).
+- 7 `julia/bakeoff` edits identical to the study copy are in `stash@{0}`; the 3 that differ (`README.md`, `run_multistart.py`, `tolerance_scale.py`) are left in the working tree for the user.
+- Many recovered PASS rows are `smoke` (exit-0 only, no assertions); that is labelled in the note column.
+- Full log: `tests/_logs/BASELINE.txt` (git-ignored).

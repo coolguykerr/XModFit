@@ -1,7 +1,7 @@
 """validate_fastscan_gui.py -- the fast global search against a REAL XModFit widget.
 
 Companion to validate_fastscan.py, split out for the same reason
-validate_jointfit_gui.py is split from validate_jointfit.py: constructing the real
+validate_jointfit_gui.py was split from the (since retired) validate_jointfit.py: constructing the real
 widget brings up a live IPython kernel that hijacks sys.stdout, so it cannot share a
 process with tests that report normally.
 

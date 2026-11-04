@@ -65,6 +65,8 @@ first.
 **Done when:** the runner exits 0 on a clean tree, with known failures listed explicitly,
 and the joint engine has a synthetic GLS regression that does not need off-repo data.
 
+**Status: Done 2026-11-04; baseline in `12-work-package-preaudit.md`.**
+
 ## WS1 — Joint-fit correctness (wrong results and crashes on the joint path)
 
 Each item is specified in the fix list. All are small.
