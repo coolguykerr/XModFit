@@ -19,12 +19,9 @@ import numpy as np
 from lmfit import Parameters
 from PyQt5.QtWidgets import QApplication
 
-_OK = {"ok": True}
+from tests.harness import check, finish
 
 
-def check(name, cond, detail=''):
-    print(("PASS" if cond else "FAIL"), "-", name, (' | ' + str(detail)) if detail else '')
-    _OK["ok"] = _OK["ok"] and bool(cond)
 
 
 class Line:
@@ -183,8 +180,7 @@ def main():
           (fm.set_x(xd, y=yd, yerr=ed) or fm.mask) is None)
 
     print()
-    print("ALL PASS" if _OK["ok"] else "FAILURES PRESENT")
-    return 0 if _OK["ok"] else 1
+    return finish()
 
 
 def _raises(fn):

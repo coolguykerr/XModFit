@@ -53,15 +53,15 @@ from Functions import xpr_backend as xb                       # noqa: E402
 from Functions import pdb_geometry as pg                      # noqa: E402
 from Functions.XRR.XLayersPDB_XPR import XLayersPDB_XPR       # noqa: E402
 
-FAIL = []
+# The cmcars env has an unrelated regular `tests` package in site-packages that
+# shadows the repo's namespace package, so load the harness by file path here.
+import importlib.util as _ilu                                 # noqa: E402
+_hs = _ilu.spec_from_file_location('xmf_harness', os.path.join(REPO, 'tests', 'harness.py'))
+_h = _ilu.module_from_spec(_hs)
+_hs.loader.exec_module(_h)
+check, check_close, skip, finish = _h.check, _h.check_close, _h.skip, _h.finish
 
-
-def check(name, got, want, tol):
-    ok = abs(got - want) <= tol
-    print('%-42s got %13.4f  want %13.4f  %s'
-          % (name, got, want, 'OK' if ok else 'FAIL'))
-    if not ok:
-        FAIL.append(name)
+FAIL = []   # ad-hoc failures appended below; folded into the harness count at the end
 
 
 def rrf(name):
@@ -89,7 +89,7 @@ def logL(f, y, e):
 
 
 if not os.path.isdir(DATA):
-    sys.exit('No XPR test data at %s -- pass its path as an argument.' % DATA)
+    skip('No XPR test data at %s -- pass its path as an argument.' % DATA)
 
 print('julia project: %s' % xb.julia_project_dir())
 t0 = time.time()
@@ -101,20 +101,20 @@ x, y, e = rrf('2box.rrf')
 f2 = build(x, [0.0, 12.870861541436838, 9.400266410116624, 1.0],
            [0.0, 0.21726162435306018, 0.4564847693916873, 0.334],
            fname=None, use_protein=False, qoff=-0.0005197557108984115, sig=3.4)
-check('2-box lipid', logL(f2, y, e), -1212.2127, 1e-3)
+check_close('2-box lipid', logL(f2, y, e), -1212.2127, 1e-3)
 
 x3, y3, e3 = rrf('3box.rrf')
 f3 = build(x3, [0.0, 26.886814178891647, 18.579820992512868, 11.532122447496487, 1.0],
            [0.2574, 0.30077908545466, 0.25596604523845007, 0.31662370213285806, 0.334],
            fname=None, use_protein=False, qoff=0.0008998796447718044,
            sig=2.511818916572768)
-check('3-box lipid (rho_top, fitted sigma)', logL(f3, y3, e3), -600.1768, 1e-3)
+check_close('3-box lipid (rho_top, fitted sigma)', logL(f3, y3, e3), -600.1768, 1e-3)
 
 x4, y4, e4 = rrf('4box.rrf')
 f4 = build(x4, [0.0, 8.0, 8.0, 8.0, 8.0, 1.0],
            [0.0, 0.1, 0.2, 0.3, 0.4, 0.334],
            fname=None, use_protein=False, qoff=0.0, yscale=1.05, bkg=1e-6)
-check('4-box (fitted yscl + bkg)', logL(f4, y4, e4), -62404.0635, 1e-2)
+check_close('4-box (fitted yscl + bkg)', logL(f4, y4, e4), -62404.0635, 1e-2)
 
 xp, yp, ep = rrf('protein_2box.rrf')
 pdb = os.path.join(DATA, 'protein.pdb')
@@ -130,14 +130,14 @@ prot = dict(fname=pdb, use_protein=True, vol_calc='approx',
             cov=2.20516005726808)
 fp = build(xp, [0.0, 11.66753477743085, 9.643473851409357, 1.0],
            [0.0, 0.21702095531305382, 0.4470646192673328, 0.334], **prot)
-check('protein + 2-box', logL(fp, yp, ep), -464.6397, 1e-3)
-check('  and maxh itself', MAXH_REF, 27.0751317, 1e-5)
-check('  protins_top reported back', fp.protins_top(), PROTINS_REF + MAXH_REF, 1e-9)
-check('  scaler output protins_top',
+check_close('protein + 2-box', logL(fp, yp, ep), -464.6397, 1e-3)
+check_close('  and maxh itself', MAXH_REF, 27.0751317, 1e-5)
+check_close('  protins_top reported back', fp.protins_top(), PROTINS_REF + MAXH_REF, 1e-9)
+check_close('  scaler output protins_top',
       fp.output_params['scaler_parameters']['protins_top'],
       PROTINS_REF + MAXH_REF, 1e-6)
 # the old top-referenced value must still round-trip through the converters
-check('  protins_from_top(13.358030329)', fp.protins_from_top(13.358030329245691),
+check_close('  protins_from_top(13.358030329)', fp.protins_from_top(13.358030329245691),
       13.358030329245691 - MAXH_REF, 1e-9)
 
 # --- the two insertion conventions, end to end -----------------------------------
@@ -338,7 +338,7 @@ full = fp._full_params(fp.__d__['Model'], fp.__rho__['Model'], 2)
 xb.load(xp, 2, pdbfile=pdb, vol_calc='approx', rho_top=0.0, rho_bottom=0.334,
         max_box_length=30.0, sig_max=5.0, d_protein_bounds=(-40.0, 20.0),
         data_R=yp, data_err=ep, force=True)
-check('protein logL from the backend', xb.sim(full)[0], -464.6397, 1e-3)
+check_close('protein logL from the backend', xb.sim(full)[0], -464.6397, 1e-3)
 g, H = xb.grad(full), xb.hess(full)
 print('grad: %d entries, all finite = %s' % (len(g), bool(np.isfinite(g).all())))
 print('hess: %s, symmetric = %s, all finite = %s'
@@ -706,4 +706,6 @@ except Exception as _e:
     print('    Julia on the same vector: %s (mirror confirmed)' % type(_e).__name__)
 
 print('\n' + ('ALL CHECKS PASSED' if not FAIL else 'FAILURES:\n  ' + '\n  '.join(FAIL)))
-sys.exit(1 if FAIL else 0)
+for _m in FAIL:
+    check(_m, False)   # registers the ad-hoc failure with the harness
+sys.exit(finish())

@@ -55,10 +55,7 @@ from importlib import import_module
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
 
-_OK = {"ok": True}
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), "-", name)
-    _OK["ok"] = _OK["ok"] and bool(cond)
+from tests.harness import check, finish
 
 
 def main():
@@ -191,8 +188,7 @@ def main():
     check("removeData drops the dataset's remembered fit", names[1] not in w.dataset_fits)
     check("other dataset's fit is retained", names[0] in w.dataset_fits)
 
-    print("\nRESULT:", "ALL PASS" if _OK["ok"] else "FAILURES PRESENT")
-    return 0 if _OK["ok"] else 1
+    return finish()
 
 
 if __name__ == "__main__":

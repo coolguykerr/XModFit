@@ -27,13 +27,7 @@ PACKED = os.path.join(HERE, 'Data', 'dppc_q2d_gid_indexed.txt')
 
 NN = dict(a0=4.8743, t=18.85, psi=0.0, eps=-0.0321, L_dom=200.0, L_ch=19.0)
 
-_fails = []
-
-
-def check(name, cond, detail=''):
-    print('  %s  %-56s %s' % ('PASS' if cond else 'FAIL', name, detail))
-    if not cond:
-        _fails.append(name)
+from tests.harness import check, finish                          # noqa: E402
 
 
 def mk(**kw):
@@ -339,5 +333,4 @@ if __name__ == '__main__':
     test_pack_and_map()
     test_outputs()
     test_tilt_spread()
-    print('\n' + ('ALL PASS' if not _fails else 'FAILURES: %s' % _fails))
-    sys.exit(1 if _fails else 0)
+    sys.exit(finish())

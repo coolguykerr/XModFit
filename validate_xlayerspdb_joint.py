@@ -42,12 +42,9 @@ DS = [os.path.join('Data', 'i2_tim3_1000_test.txt'),
 PDB = os.path.join('Data', '1ubq.pdb')
 PAR = os.path.join('tests', 'fixtures', 'legacy_xlayerspdb_2024.par')
 
-_OK = {"ok": True}
+from tests.harness import check, finish
 
 
-def check(name, cond, detail=''):
-    print(("PASS" if cond else "FAIL"), "-", name, (' | ' + str(detail)) if detail else '')
-    _OK["ok"] = _OK["ok"] and bool(cond)
 
 
 def main():
@@ -252,8 +249,7 @@ def main():
           '%s vs %d' % (fp.get('ndata'), len(old)))
 
     print()
-    print("ALL PASS" if _OK["ok"] else "FAILURES PRESENT")
-    return 0 if _OK["ok"] else 1
+    return finish()
 
 
 if __name__ == '__main__':

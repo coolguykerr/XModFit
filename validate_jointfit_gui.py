@@ -28,10 +28,7 @@ import numpy as np
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
 
-_OK = {"ok": True}
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), "-", name)
-    _OK["ok"] = _OK["ok"] and bool(cond)
+from tests.harness import check, finish
 
 
 def main():
@@ -354,8 +351,7 @@ def main():
         pass
     check("fitCallback is JointFit-safe (progress works for joint fits)", _jc and len(w.fitData) == 1)
 
-    print("\nRESULT:", "ALL PASS" if _OK["ok"] else "FAILURES PRESENT")
-    return 0 if _OK["ok"] else 1
+    return finish()
 
 
 if __name__ == "__main__":

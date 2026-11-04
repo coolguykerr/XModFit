@@ -28,13 +28,10 @@ import numpy as np
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
 
-_OK = {"ok": True}
+from tests.harness import check, finish
 TMP = os.environ.get('TEMP', ROOT)
 
 
-def check(name, cond, detail=''):
-    print(("PASS" if cond else "FAIL"), "-", name, (' | ' + str(detail)) if detail else '')
-    _OK["ok"] = _OK["ok"] and bool(cond)
 
 
 def main():
@@ -243,8 +240,7 @@ def main():
           list(w.limits.keys()))
 
     print()
-    print("ALL PASS" if _OK["ok"] else "FAILURES PRESENT")
-    return 0 if _OK["ok"] else 1
+    return finish()
 
 
 if __name__ == '__main__':

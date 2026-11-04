@@ -19,12 +19,9 @@ for p in (ROOT, os.path.join(ROOT, 'Functions'), os.path.join(ROOT, 'Functions',
 import numpy as np
 from PyQt5.QtWidgets import QApplication
 
-_OK = {"ok": True}
+from tests.harness import check, finish
 
 
-def check(name, cond, detail=''):
-    print(("PASS" if cond else "FAIL"), "-", name, (' | ' + str(detail)) if detail else '')
-    _OK["ok"] = _OK["ok"] and bool(cond)
 
 
 def main():
@@ -137,8 +134,7 @@ def main():
           'max %.4g' % yi.max())
 
     print()
-    print("ALL PASS" if _OK["ok"] else "FAILURES PRESENT")
-    return 0 if _OK["ok"] else 1
+    return finish()
 
 
 if __name__ == '__main__':

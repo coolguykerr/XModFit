@@ -35,12 +35,9 @@ from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
 
 MAP = os.path.join('Data', 'dppc_q2d_gid_indexed.txt')
-_OK = {"ok": True}
+from tests.harness import check, finish
 
 
-def check(name, cond, detail=''):
-    print(("PASS" if cond else "FAIL"), "-", name, (' | ' + str(detail)) if detail else '')
-    _OK["ok"] = _OK["ok"] and bool(cond)
 
 
 def select(w, cat, fun):
@@ -357,8 +354,7 @@ def main():
         _DD.Data_Dialog.exec_ = _real_exec
 
     print()
-    print("ALL PASS" if _OK["ok"] else "FAILURES PRESENT")
-    return 0 if _OK["ok"] else 1
+    return finish()
 
 
 if __name__ == '__main__':
