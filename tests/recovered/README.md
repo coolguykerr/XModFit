@@ -94,7 +94,7 @@ exits 0 (registry `smoke: true`, no invented checks); **known** = expected to fa
 | `repro_backend` | a | PASS | smoke | prints backend state, no assertion |
 | `validate_parallel_seed` | b | PASS | converted | parallel == serial, costs finite; tim3 minima numbers (chi2 148.9 / 157.2) no longer asserted |
 | `validate_parallel_sampling` | b | PASS | converted | objective identity, finite chains, progress hook, abort; ~121 s |
-| `compare_models` | b | KNOWN-FAIL | smoke-shaped | tests `XLayersPDB_dev_smooth`, retired under D1; slow, timeout 900 |
+| `compare_models` | b | PASS | smoke | no assertions (registered `smoke`); exercises `XLayersPDB_dev_smooth`, retired under D1; slow, timeout 900 |
 | `test_pickle_fit` | b | PASS | smoke | prints that `Fit` does not pickle (the reason `PdbLogProb` exists) |
 | `test_logprob` | b | PASS | converted | tim3 chi2 targets replaced by "lnprob finite and <= 0", out-of-bounds -> -inf, pickles |
 | `test_joint_emcee` | b | PASS | converted | chain finite; ~102 s |
@@ -123,5 +123,5 @@ exits 0 (registry `smoke: true`, no invented checks); **known** = expected to fa
 | `check_aproj` | f | PASS | smoke | `cmcars`, external `XPR-main/test_data`; ratio table only |
 | `smoke_merge` | g | PASS | converted | local `check(label, fn)` wrapper now feeds `tests.harness` |
 
-The three KNOWN-FAIL entries are stale harnesses, not engine defects; none was added to
-`handoff/10-fix-list.md`.
+The two KNOWN-FAIL entries (`verify_jointmcmc`, `smoke_fit`) are stale harnesses, not engine
+defects; both are tracked as `handoff/10-fix-list.md` A1.17.

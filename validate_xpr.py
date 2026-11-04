@@ -699,7 +699,9 @@ try:
 except Exception as _e:
     print('    Julia on the same vector: %s (mirror confirmed)' % type(_e).__name__)
 
-print('\n' + ('ALL CHECKS PASSED' if not FAIL else 'FAILURES:\n  ' + '\n  '.join(FAIL)))
 for _m in FAIL:
     check(_m, False)   # registers the ad-hoc failure with the harness
+from tests.harness import counts                                  # noqa: E402
+print('\n' + ('ALL CHECKS PASSED' if counts()[1] == 0
+              else 'FAILURES:\n  ' + '\n  '.join(FAIL)))
 sys.exit(finish())

@@ -39,24 +39,22 @@ REGISTRY = {
 
     # --- recovered harnesses (P-3b) ---
     'tests/recovered/verify_jointmcmc.py': {
-        'known': "binds a fixed list of XModFit methods onto a Fake; _draw_corner now "
+        'known': "A1.17: binds a fixed list of XModFit methods onto a Fake; _draw_corner now "
                  "calls _corner_render_data (added in b953c3f), absent from the list "
                  "-> AttributeError at section 3"},
     'tests/recovered/repro_backend.py': {'smoke': True},
     'tests/recovered/test_pickle_fit.py': {'smoke': True},
     'tests/recovered/test_autocorr_window.py': {'smoke': True},
     # exercises XLayersPDB_dev_smooth, retired under D1; goes when WS1/B8 removes that variant
-    'tests/recovered/compare_models.py': {'slow': True, 'timeout': 900},
+    'tests/recovered/compare_models.py': {'smoke': True, 'slow': True, 'timeout': 900},
     'tests/recovered/test_joint_abort.py': {'slow': True, 'timeout': 900},
     'tests/recovered/test_gui_construct.py': {'smoke': True},
     'tests/recovered/repro_raw.py': {'smoke': True},
     'tests/recovered/repro_tab.py': {'smoke': True},
     'tests/recovered/smoke_fit.py': {
-        'known': "reads scaler_parameters['chi2_per_N_reported'] etc.; GID2D now "
+        'known': "A1.17: reads scaler_parameters['chi2_per_N_reported'] etc.; GID2D now "
                  "emits chi2_per_N_reported_LINEAR / chi2_per_N_active_only_LINEAR "
                  "(stale key names -> KeyError at the first print)"},
-    'validate_gid2d.py': {
-        'known': 'A1.16: RAW points at an off-machine T: path; absent -> check(False) in section 6'},
     'tests/recovered/check_aproj.py': {
         'smoke': True, 'interp': 'cmcars',
         'external': 'XPR-main/test_data, sibling of the repo'},
@@ -103,7 +101,14 @@ def run_one(rel, interp, timeout):
         except subprocess.TimeoutExpired:
             subprocess.run(['taskkill', '/T', '/F', '/PID', str(proc.pid)],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            proc.wait()
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:      # taskkill failed: do not hang the suite
+                proc.kill()
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    pass
             return 'TIMEOUT', time.time() - t0
     secs = time.time() - t0
     return ('PASS' if rc == 0 else 'SKIP' if rc == 77 else 'FAIL'), secs
