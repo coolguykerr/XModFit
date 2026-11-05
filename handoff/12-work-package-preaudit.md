@@ -515,3 +515,76 @@ Environment notes:
 - 7 `julia/bakeoff` edits identical to the study copy are in `stash@{0}`; the 3 that differ (`README.md`, `run_multistart.py`, `tolerance_scale.py`) are left in the working tree for the user.
 - Many recovered PASS rows are `smoke` (exit-0 only, no assertions); that is labelled in the note column.
 - Full log: `tests/_logs/BASELINE.txt` (git-ignored).
+
+### 2026-11-04 -- BASELINE (re-recorded 2026-11-04, after final-review fixes)
+
+Command: `tests/run_all.py` (no flags), exit code **0**; sum of per-harness times 1856 s (~31 min). No harness was fixed
+during the run. Result: **2 KNOWN-FAIL, 57 PASS, 0 FAIL** -- the two KNOWN-FAIL are the stale
+harnesses `smoke_fit` and `verify_jointmcmc` (fix-list **A1.17**). `validate_gid2d.py` now passes
+(38 checks; A1.16), `compare_models.py` is registered `smoke`. Quick run: not repeated in this wave
+(previous: 504 s, exit 0).
+
+```
+status                  seconds  interp    harness                                            note
+PASS                       15.4  cmcars    tests/recovered/check_aproj.py                     smoke; external: XPR-main/test_data, sibling of the repo
+PASS                      262.5  cmc-py39  tests/recovered/compare_models.py                  smoke; slow
+PASS                        2.7  cmc-py39  tests/recovered/repro_backend.py                   smoke
+PASS                        3.2  cmc-py39  tests/recovered/repro_full.py                      
+PASS                        6.2  cmc-py39  tests/recovered/repro_raw.py                       smoke
+PASS                        2.6  cmc-py39  tests/recovered/repro_switch.py                    
+PASS                        6.6  cmc-py39  tests/recovered/repro_tab.py                       smoke
+KNOWN-FAIL                  1.1  cmc-py39  tests/recovered/smoke_fit.py                       known: A1.17: reads scaler_parameters['chi2_per_N_reported'] etc.; GID2D now emits chi2_per_N_reported_LINEAR / chi2_per_N_active_only_LINEAR (stale key names -> KeyError at the first print)
+PASS                        3.5  cmc-py39  tests/recovered/smoke_merge.py                     
+PASS                       14.8  cmc-py39  tests/recovered/test_autocorr_window.py            smoke
+PASS                        2.8  cmc-py39  tests/recovered/test_gui_construct.py              smoke
+PASS                       13.5  cmcars    tests/recovered/test_gui_listing.py                
+PASS                        3.9  cmc-py39  tests/recovered/test_gui_switch.py                 
+PASS                      325.3  cmc-py39  tests/recovered/test_joint_abort.py                slow
+PASS                       97.3  cmc-py39  tests/recovered/test_joint_emcee.py                
+PASS                       43.4  cmc-py39  tests/recovered/test_joint_parallel.py             
+PASS                        2.3  cmc-py39  tests/recovered/test_logprob.py                    
+PASS                        4.0  cmc-py39  tests/recovered/test_pdb_persist.py                
+PASS                        2.4  cmc-py39  tests/recovered/test_phase1.py                     
+PASS                        1.6  cmc-py39  tests/recovered/test_pickle_fit.py                 smoke
+PASS                      230.5  cmcars    tests/recovered/test_xpr_fitting.py                external: XPR-main/test_data, sibling of the repo; slow
+PASS                       41.1  cmcars    tests/recovered/test_xpr_stage1.py                 external: XPR-main/test_data, sibling of the repo
+PASS                      114.4  cmc-py39  tests/recovered/validate_parallel_sampling.py      
+PASS                       13.6  cmc-py39  tests/recovered/validate_parallel_seed.py          
+PASS                        4.2  cmc-py39  tests/recovered/verify_banner_lifecycle.py         
+PASS                        4.0  cmc-py39  tests/recovered/verify_detail_switch.py            
+PASS                        2.5  cmc-py39  tests/recovered/verify_fingerprint.py              
+PASS                        3.7  cmc-py39  tests/recovered/verify_joint_4ds_parallel.py       
+PASS                        3.9  cmc-py39  tests/recovered/verify_joint_detail_and_legend.py  
+PASS                        1.4  cmc-py39  tests/recovered/verify_joint_mixed.py              
+PASS                        1.3  cmc-py39  tests/recovered/verify_joint_neither.py            
+PASS                        1.4  cmc-py39  tests/recovered/verify_joint_orient.py             
+PASS                       14.2  cmc-py39  tests/recovered/verify_joint_parallel_edge.py      
+PASS                        3.9  cmc-py39  tests/recovered/verify_joint_parallel_sample.py    
+PASS                        1.8  cmc-py39  tests/recovered/verify_joint_seed_worker.py        
+KNOWN-FAIL                  2.2  cmc-py39  tests/recovered/verify_jointmcmc.py                known: A1.17: binds a fixed list of XModFit methods onto a Fake; _draw_corner now calls _corner_render_data (added in b953c3f), absent from the list -> AttributeError at section 3
+PASS                        3.5  cmc-py39  tests/recovered/verify_jointwindow.py              
+PASS                        4.0  cmc-py39  tests/recovered/verify_legend.py                   
+PASS                        4.0  cmc-py39  tests/recovered/verify_multifit_selection.py       
+PASS                        4.0  cmc-py39  tests/recovered/verify_plotting_B.py               
+PASS                        1.1  cmc-py39  tests/recovered/verify_reuse_wrap.py               
+PASS                        2.7  cmc-py39  tests/recovered/verify_seed_gui.py                 
+PASS                        0.9  cmc-py39  tests/recovered/verify_seed_helpers.py             
+PASS                        1.7  cmc-py39  tests/recovered/verify_seedmode.py                 
+PASS                        0.4  cmc-py39  tests/test_harness.py                              
+PASS                       11.3  cmc-py39  tests/test_run_all.py                              
+PASS                        4.9  cmc-py39  validate_column_limits.py                          
+PASS                      224.2  cmcars    validate_fastscan.py                               slow
+PASS                       17.4  cmc-py39  validate_fastscan_gui.py                           
+PASS                        1.0  cmc-py39  validate_fit_mask.py                               
+PASS                        2.3  cmc-py39  validate_gid2d.py                                  
+PASS                       17.4  cmc-py39  validate_gid2d_gui.py                              
+PASS                        1.2  cmc-py39  validate_joint_gls.py                              
+PASS                        1.0  cmc-py39  validate_joint_mask.py                             
+PASS                        4.6  cmc-py39  validate_jointfit_gui.py                           
+PASS                        1.6  cmc-py39  validate_masked_x.py                               
+PASS                        4.9  cmc-py39  validate_perdataset_fit.py                         
+PASS                        4.9  cmc-py39  validate_xlayerspdb_joint.py                       
+PASS                      278.2  cmcars    validate_xpr.py                                    external: XPR-main/test_data, sibling of the repo; slow
+
+summary: 2 KNOWN-FAIL, 57 PASS
+```
