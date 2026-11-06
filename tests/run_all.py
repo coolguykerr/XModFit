@@ -33,7 +33,9 @@ INTERPS = {
 REGISTRY = {
     'validate_xpr.py': {
         'external': 'XPR-main/test_data, sibling of the repo',
-        'interp': 'cmcars', 'slow': True},
+        'interp': 'cmcars', 'slow': True,
+        # its Julia warm-up and corpus runs exceed the default (WS1 final review)
+        'timeout': 1500},
     # validate_fastscan.py Part B needs the Julia/XPR backend (see its header).
     'validate_fastscan.py': {'slow': True, 'interp': 'cmcars'},
 
