@@ -1937,7 +1937,10 @@ class Minimizer:
                             import pdb_seed_worker as _psw
                             costs = _psw.map_cell_costs(
                                 cells, fitobj.func, xs, ys, es, seed_scale,
-                                list(result_mesh.var_names), start_vals, seed_workers)
+                                list(result_mesh.var_names), start_vals, seed_workers,
+                                # frozen by perform_fit; _yfit_masked is fresh from ndata above
+                                mask=fitobj.imask_for(),
+                                yfit_masked=bool(getattr(fitobj, '_yfit_masked', False)))
                             for (ti, pi, cost) in costs:
                                 chi2mesh[ti][pi] = cost
                             parallel_ok = True
@@ -1948,7 +1951,8 @@ class Minimizer:
                             models = [o["func"] for o in fitobj.objectives]
                             datas = [(np.asarray(o["x"])[o["imin"]:o["imax"] + 1],
                                       np.asarray(o["y"])[o["imin"]:o["imax"] + 1],
-                                      np.asarray(o["yerr"])[o["imin"]:o["imax"] + 1])
+                                      np.asarray(o["yerr"])[o["imin"]:o["imax"] + 1],
+                                      o.get("imask"), bool(o.get("yfit_masked")))  # A1.3
                                      for o in fitobj.objectives]
                             priors = dict(getattr(fitobj, '_priors', {}) or {})
                             scan = _pjs.JointSeedScan(list(result.var_names), fitobj.param_map,

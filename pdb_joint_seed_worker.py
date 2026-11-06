@@ -27,7 +27,33 @@ if _HERE not in sys.path:
 # reuse the joint model-shipping + per-curve normalised residual
 from pdb_joint_logprob import init_worker, _scale_residual_norm, _W
 
-_G = {}  # per-worker: the scan objective + profiled start values
+_G = {}  # per-worker: the scan objective + profiled start values + fit-side masks
+
+
+def _prepare(datas):
+    """Split ``datas`` entries ``(x, y, e[, mask[, yfit_masked]])`` -- x/y/e the
+    [imin, imax+1] window, mask the objective's frozen ``imask`` -- into the
+    ``(x, y, e)`` the models are evaluated and compared on, plus the per-dataset
+    fit-side selection. JointFit.residual's order: evaluate on the window, then
+    select the active points of fit, y and err, before the max-normalisation. A
+    ``__masked_x__`` model (yfit_masked) gets only the active x, so its fit is
+    already active-only and is not selected again. mask None: unchanged."""
+    plain, fitsel = [], []
+    for d in datas:
+        x, y, e = np.asarray(d[0]), np.asarray(d[1]), np.asarray(d[2])
+        m = d[3] if len(d) > 3 else None
+        ym = bool(d[4]) if len(d) > 4 else False
+        sel = None
+        if m is not None:
+            m = np.asarray(m, bool)[:len(y)]
+            y, e = y[m], e[m]
+            if ym:
+                x = x[m[:len(x)]]
+            else:
+                sel = m
+        plain.append((x, y, e))
+        fitsel.append(sel)
+    return plain, fitsel
 
 
 class JointSeedScan:
@@ -47,20 +73,23 @@ class JointSeedScan:
         # profiled = every varying master param except the fixed shared theta/phi
         self.prof_names = [k for k in self.var_names if k not in (theta_key, phi_key)]
         self._models = models
-        self._datas = datas
+        self._datas = None
+        self._fitsel = None
         if models is not None:
-            init_worker(models, datas)
+            self._datas, self._fitsel = _prepare(datas)
+            init_worker(models, self._datas)
 
     def __getstate__(self):
         st = self.__dict__.copy()
         st['_models'] = None
         st['_datas'] = None
+        st['_fitsel'] = None
         return st
 
     def _resolve(self):
         if self._models is not None:
-            return self._models, self._datas
-        return _W['models'], _W['datas']
+            return self._models, self._datas, self._fitsel
+        return _W['models'], _W['datas'], _G.get('fitsel') or [None] * len(_W['datas'])
 
     def start_vals(self):
         return np.array([self.master_params[k].value for k in self.prof_names], dtype=float)
@@ -72,7 +101,7 @@ class JointSeedScan:
         p[self.theta_key].value = float(theta)
         p[self.phi_key].value = float(phi)
         p.update_constraints()
-        models, datas = self._resolve()
+        models, datas, fitsel = self._resolve()
         # push master -> per-objective (mirror JointFit.push_params)
         for mkey, targets in self.param_map.items():
             v = p[mkey].value
@@ -84,8 +113,10 @@ class JointSeedScan:
                     lp.expr = None
                 lp.value = v
         parts = []
-        for mdl, (x, y, e) in zip(models, datas):
+        for mdl, (x, y, e), sel in zip(models, datas, fitsel):
             fit = np.asarray(mdl.y()).ravel()
+            if sel is not None:
+                fit = fit[sel]
             parts.append(_scale_residual_norm(y, fit, e, self.fit_scale))
         resid = np.concatenate(parts)
         if self.priors:
@@ -95,7 +126,8 @@ class JointSeedScan:
 
 
 def _init(scan, models, datas):
-    init_worker(models, datas)
+    plain, _G['fitsel'] = _prepare(datas)
+    init_worker(models, plain)
     _G['scan'] = scan
     _G['start'] = scan.start_vals()
 
@@ -115,7 +147,10 @@ def cell_cost(cell):
 
 
 def map_cell_costs(cells, scan, models, datas, workers):
-    """Return [(ti, pi, cost), ...] aligned to ``cells``. Spawn Pool when workers>1."""
+    """Return [(ti, pi, cost), ...] aligned to ``cells``. Spawn Pool when workers>1.
+
+    ``datas`` entries are ``(x, y, e)`` or ``(x, y, e, imask, yfit_masked)``; see
+    ``_prepare``."""
     if workers is None or workers <= 1:
         _init(scan, models, datas)
         return [cell_cost(c) for c in cells]

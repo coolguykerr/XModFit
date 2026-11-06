@@ -44,12 +44,28 @@ def _scale_residual(y, fit, err, fit_scale):
         return (y - fit) / err
 
 
-def _init(func, x, y, err, fit_scale, nuisance_names, start_vals):
-    func.x = np.asarray(x)          # evaluate() slices func.x to the fit range
+def _init(func, x, y, err, fit_scale, nuisance_names, start_vals, mask=None,
+          yfit_masked=False):
+    x, y, err = np.asarray(x), np.asarray(y), np.asarray(err)
+    fitsel = None
+    if mask is not None:
+        # The frozen window mask (Fit.imask_for), applied in Fit.residual's order:
+        # evaluate on the whole window x[imin:imax+1], THEN select the active points
+        # of fit, y and err. A __masked_x__ model (yfit_masked) is handed only the
+        # active points instead, so its output is already active-only and must not
+        # be masked a second time.
+        mask = np.asarray(mask, bool)[:len(y)]
+        y, err = y[mask], err[mask]
+        if yfit_masked:
+            x = x[mask[:len(x)]]
+        else:
+            fitsel = mask
+    func.x = x                      # evaluate() slices func.x to the fit range
     func.__fit__ = True             # matches Fit.residual; skips output_params work
     _G['func'] = func
-    _G['y'] = np.asarray(y)
-    _G['err'] = np.asarray(err)
+    _G['y'] = y
+    _G['err'] = err
+    _G['fitsel'] = fitsel
     _G['fit_scale'] = fit_scale
     _G['nuisance_names'] = list(nuisance_names)
     _G['start_vals'] = np.asarray(start_vals, dtype=float)
@@ -67,6 +83,8 @@ def _cell_residual(fvars, theta, phi):
     setattr(func, 'phi', float(phi));     p['phi'].value = float(phi)
     p.update_constraints()
     fit = np.asarray(func.y()).ravel()
+    if _G.get('fitsel') is not None:
+        fit = fit[_G['fitsel']]
     return _scale_residual(_G['y'], fit, _G['err'], _G['fit_scale'])
 
 
@@ -85,14 +103,21 @@ def cell_cost(cell):
     return (ti, pi, cost)
 
 
-def map_cell_costs(cells, func, x, y, err, fit_scale, nuisance_names, start_vals, workers):
-    """Return a list of (ti, pi, cost). Uses a spawn Pool when workers > 1."""
+def map_cell_costs(cells, func, x, y, err, fit_scale, nuisance_names, start_vals, workers,
+                   mask=None, yfit_masked=False):
+    """Return a list of (ti, pi, cost). Uses a spawn Pool when workers > 1.
+
+    x/y/err are the [imin, imax+1] window. ``mask`` is the window-restricted frozen
+    column mask (``Fit.imask_for()`` / a joint objective's ``imask``) or None;
+    ``yfit_masked`` says the model is a ``__masked_x__`` one that is evaluated on
+    the active points only. mask=None is the unmasked scan, unchanged."""
     if workers is None or workers <= 1:
-        _init(func, x, y, err, fit_scale, nuisance_names, start_vals)
+        _init(func, x, y, err, fit_scale, nuisance_names, start_vals, mask, yfit_masked)
         return [cell_cost(c) for c in cells]
     import multiprocessing as mp
     ctx = mp.get_context('spawn')
     chunk = max(1, len(cells) // (workers * 4))
     with ctx.Pool(workers, initializer=_init,
-                  initargs=(func, x, y, err, fit_scale, nuisance_names, start_vals)) as pool:
+                  initargs=(func, x, y, err, fit_scale, nuisance_names, start_vals,
+                            mask, yfit_masked)) as pool:
         return pool.map(cell_cost, cells, chunksize=chunk)

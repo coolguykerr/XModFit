@@ -842,9 +842,16 @@ class JointFit(QObject):
                     and loc2master.get((i, lk)) in col
                     and len(self.param_map.get(loc2master.get((i, lk)), [])) == 1]
             start = [func.params[lk].value for lk in nuis]
-            costs = _psw.map_cell_costs(cells, func, xs, ys, es, fit_scale, nuis, start, workers)
+            # A1.3: the frozen imask (set by _set_ranges), applied after evaluating on
+            # the window. yfit_masked is derived as evaluate() would set it -- no
+            # evaluate() has run since _set_ranges, so the stored flag may be stale.
+            im = self.objectives[i].get("imask")
+            ym = im is not None and bool(getattr(func, "__masked_x__", False))
+            costs = _psw.map_cell_costs(cells, func, xs, ys, es, fit_scale, nuis, start, workers,
+                                        mask=im, yfit_masked=ym)
             Mi[i] = np.array([c[2] for c in costs], dtype=float)
-            ndata_i[i] = len(xs); ndof_i[i] = len(nuis) + 2
+            ndata_i[i] = len(xs) if im is None else int(np.count_nonzero(im[:len(xs)]))
+            ndof_i[i] = len(nuis) + 2
 
         # both-shared 'individual' mode: ONE shared (theta,phi) seeded from the SUM of
         # the per-dataset landscapes (shared params pinned above).
