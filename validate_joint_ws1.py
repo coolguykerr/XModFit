@@ -5,6 +5,11 @@ One function per task section; later tasks append T2..T5.
 
     T1  one PDB model-name list (A1.1): Fit_Routines and xmodfit hold exactly
         lmfit.minimizer.PDB_FUNCNAMES
+    T2  .npz sidecars carry the shared-beam footprint term (B2a)
+    T3  share-group mismatches (01 6.8): differing start values warn once per
+        group; differing min/max/vary raise ShareMismatchError unless
+        on_mismatch='first'; JointFit.warnings does not grow across rebuilds
+        or re-fits and is printed in the report
 
     QT_QPA_PLATFORM=offscreen python validate_joint_ws1.py
 """
@@ -123,9 +128,128 @@ def test_t2():
               pc in str(ex) and "'v' and 'var_fwhm'" in str(ex), str(ex))
 
 
+def test_t3():
+    import numpy as np
+    from validate_joint_gls import Line, X, make_data, E
+    from Joint_Fit_Routines import JointFit, ShareMismatchError
+    ys = make_data(3)
+    err = E * np.ones_like(X)
+    names = ('DS_one', 'DS_two', 'DS_three')
+
+    def build(starts=(3.0, 3.0, 3.0), max2=np.inf, vary2=True, **kw):
+        jf = JointFit()
+        for i, (nm, y) in enumerate(zip(names, ys)):
+            jf.add_dataset(nm, funcClass=Line, x=X, y=y, yerr=err)
+            pa = jf.objectives[i]['func'].params['a']
+            pa.set(value=starts[i], vary=(vary2 if i == 1 else True),
+                   max=(max2 if i == 1 else np.inf))
+            jf.objectives[i]['func'].params['b'].set(vary=True)
+        grp = jf.share_within('a', list(names))
+        jf.build_master_params(groups=[grp], **kw)
+        return jf, grp
+
+    # (a) same bounds, different values -> builds, exactly one warning
+    jf, grp = build(starts=(2.5, 3.0, 3.5))
+    w = list(jf.warnings)
+    check("T3a value mismatch builds with exactly 1 warning", len(w) == 1, w)
+    check("T3a warning names all three datasets",
+          len(w) == 1 and all(nm in w[0] for nm in names), w)
+    check("T3a warning text follows the brief",
+          len(w) == 1 and w[0].startswith('shared ')
+          and 'endpoints start at different values' in w[0]
+          and w[0].endswith('using DS_one=2.5'), w)
+    mk = list(jf.param_map)[0]
+    check("T3a master takes the first endpoint's value",
+          jf.master_params[mk].value == 2.5, jf.master_params[mk].value)
+
+    # (e) a second build does not grow the list
+    jf.build_master_params(groups=[grp])
+    check("T3e rebuilding does not grow warnings", len(jf.warnings) == 1,
+          jf.warnings)
+
+    # (f) after perform_fit the report carries the warnings block; re-fit doesn't grow
+    rep, msg = jf.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq')
+    check("T3f report contains 'Joint-fit warnings:'",
+          'Joint-fit warnings:' in rep and names[2] in rep, rep[-400:])
+    rep2, _ = jf.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq')
+    check("T3f re-fit keeps the build warning and does not grow",
+          len(jf.warnings) == 1 and rep2.count('Joint-fit warnings:') == 1,
+          jf.warnings)
+    # run-time entries (perform_fit's own, via _add_run_warning) are replaced
+    jf._add_run_warning('stale run-time note')
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq')
+    check("T3f perform_fit drops its previous run-time warnings only",
+          jf.warnings == [w for w in jf.warnings if 'stale' not in w]
+          and len(jf.warnings) == 1, jf.warnings)
+    jf.clear()
+    check("T3 clear() resets warnings", jf.warnings == [], jf.warnings)
+
+    # (b) dataset 2 has max=10, the others inf -> ShareMismatchError
+    try:
+        build(max2=10.0)
+        check("T3b bound mismatch raises ShareMismatchError", False, 'no exception')
+    except ShareMismatchError as ex:
+        s = str(ex)
+        check("T3b ShareMismatchError names 'a' and the dataset",
+              "'a'" in s and 'DS_two' in s and isinstance(ex, ValueError), s)
+
+    # (c) on_mismatch='first' -> builds, master max == inf, one warning
+    try:
+        jf, _ = build(max2=10.0, on_mismatch='first')
+        mk = list(jf.param_map)[0]
+        check("T3c on_mismatch='first' builds with master max == inf",
+              jf.master_params[mk].max == np.inf, jf.master_params[mk].max)
+        check("T3c on_mismatch='first' leaves exactly 1 warning",
+              len(jf.warnings) == 1, jf.warnings)
+    except Exception as ex:
+        check("T3c on_mismatch='first' builds", False, repr(ex))
+
+    # (d) vary differs -> ShareMismatchError
+    try:
+        build(vary2=False)
+        check("T3d vary mismatch raises ShareMismatchError", False, 'no exception')
+    except ShareMismatchError as ex:
+        check("T3d vary mismatch raises ShareMismatchError", True, str(ex))
+
+    # the legacy shared= path obeys the same rule
+    try:
+        jf = JointFit()
+        for i, (nm, y) in enumerate(zip(names, ys)):
+            jf.add_dataset(nm, funcClass=Line, x=X, y=y, yerr=err)
+        jf.objectives[1]['func'].params['a'].set(min=0.0)
+        jf.build_master_params(shared=['a'])
+        check("T3 shared= path raises on a bound mismatch", False, 'no exception')
+    except ShareMismatchError as ex:
+        check("T3 shared= path raises on a bound mismatch", True, str(ex))
+
+    # JointFitSpec.compile passes on_mismatch through (default 'raise')
+    from joint_fit_spec import JointFitSpec
+    data = {nm: {'c': {'x': X, 'y': y, 'yerr': err}} for nm, y in zip(names, ys)}
+
+    def spec():
+        sp = JointFitSpec(default_model_class=Line)
+        for i, nm in enumerate(names):
+            m = Line(x=X)
+            m.params['a'].set(max=(10.0 if i == 1 else np.inf))
+            sp.add_dataset(nm, model=m)
+        sp.set_shared('a')
+        return sp
+    try:
+        spec().compile(data)
+        check("T3 compile() raises ShareMismatchError by default", False,
+              'no exception')
+    except ShareMismatchError as ex:
+        check("T3 compile() raises ShareMismatchError by default", True, str(ex))
+    try:
+        jf = spec().compile(data, on_mismatch='first')
+        check("T3 compile(on_mismatch='first') builds with 1 warning",
+              len(jf.warnings) == 1, jf.warnings)
+    except Exception as ex:
+        check("T3 compile(on_mismatch='first') builds", False, repr(ex))
+
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
-    for t in (test_t1, test_t2):
+    for t in (test_t1, test_t2, test_t3):
         try:
             t()
         except Exception as ex:

@@ -79,6 +79,25 @@ except Exception:                                        # pragma: no cover
 # --------------------------------------------------------------------------- #
 #  JointFit
 # --------------------------------------------------------------------------- #
+class ShareMismatchError(ValueError):
+    """The endpoints of one share-group disagree on ``min``, ``max`` or ``vary``.
+
+    A shared parameter is ONE master parameter, so it can only have one set of
+    bounds and one vary flag. Different start *values* are normal (each dataset
+    seeded from its own individual fit) and only warn; different bounds or vary
+    are a real conflict and refuse unless ``on_mismatch='first'``."""
+
+
+class _RunWarning(str):
+    """A ``JointFit.warnings`` entry added by ``perform_fit`` (run-time), as
+    opposed to one added by ``build_master_params`` (build-time). The subclass is
+    the bookkeeping: the next ``perform_fit`` drops exactly these entries."""
+
+
+def _fmt_num(v):
+    return '%g' % v
+
+
 class JointFit(QObject):
     # same signature as Fit.functionCalled so the GUI callbacks are reusable
     functionCalled = pyqtSignal(dict, int, np.ndarray, str)
@@ -105,6 +124,8 @@ class JointFit(QObject):
         # optional per-parameter Gaussian priors (soft constraints):
         #   {master_key: (mu, sigma)} -> append (value - mu)/sigma to the residual.
         self._priors = {}
+        # human-readable notes about the fit set-up (see _add_run_warning)
+        self.warnings = []
 
     # ----------------------------------------------------------------- #
     #  dataset registration
@@ -210,6 +231,53 @@ class JointFit(QObject):
         self._use_footprint = False
         self._cov_ready = False
         self._priors = {}
+        self.warnings = []
+
+    # ---- warnings bookkeeping ---------------------------------------- #
+    # ``self.warnings`` holds build-time entries (reset by build_master_params)
+    # and run-time entries (added by perform_fit). A perform_fit call replaces
+    # only the run-time entries of its previous call, so build-time warnings
+    # reach the report and neither kind piles up across re-fits.
+    def _reset_run_warnings(self):
+        self.warnings = [w for w in self.warnings if not isinstance(w, _RunWarning)]
+
+    def _add_run_warning(self, msg):
+        """Append a run-time warning (call from inside perform_fit)."""
+        self.warnings.append(_RunWarning(msg))
+
+    def _check_share_group(self, mkey, members, on_mismatch):
+        """Compare every endpoint of one share-group to the first (01 6.8).
+
+        value differs        -> one build-time warning for the group.
+        min/max/vary differs -> ShareMismatchError, or a warning if
+                                ``on_mismatch == 'first'``.
+        Bounds compare with ``==`` after ``float()``, so ``inf == inf``."""
+        names = self.objective_names
+        ps = [(names[idx], lk, self.objectives[idx]["func"].params[lk])
+              for (idx, lk) in members]
+        d0, lk0, p0 = ps[0]
+        if any(float(p.value) != float(p0.value) for (_, _, p) in ps[1:]):
+            self.warnings.append(
+                "shared %s: endpoints start at different values (%s); using %s=%s"
+                % (mkey, ', '.join('%s=%s' % (d, _fmt_num(p.value)) for (d, _, p) in ps),
+                   d0, _fmt_num(p0.value)))
+
+        def bounds(p):
+            return (float(p.min), float(p.max), bool(p.vary))
+        if all(bounds(p) == bounds(p0) for (_, _, p) in ps[1:]):
+            return
+        listing = ', '.join('(%s %r: min=%s, max=%s, vary=%s)'
+                            % (d, lk, _fmt_num(bounds(p)[0]), _fmt_num(bounds(p)[1]),
+                               bounds(p)[2])
+                            for (d, lk, p) in ps)
+        if on_mismatch == 'raise':
+            raise ShareMismatchError(
+                "shared %r (local %r): endpoints disagree on min/max/vary: %s. "
+                "Make them agree, or pass on_mismatch='first' to use the first "
+                "endpoint's." % (mkey, lk0, listing))
+        self.warnings.append(
+            "shared %s: endpoints disagree on min/max/vary %s; using the first "
+            "endpoint's (%s) bounds and vary" % (mkey, listing, d0))
 
     def _register_shared_sigma(self, Sigma_logc):
         Sigma_logc = np.asarray(Sigma_logc, dtype=float)
@@ -290,7 +358,7 @@ class JointFit(QObject):
         master value to heterogeneous local keys, so this Just Works."""
         return {"members": [(self._resolve_idx(r), lk) for (r, lk) in endpoints]}
 
-    def build_master_params(self, shared=None, groups=None):
+    def build_master_params(self, shared=None, groups=None, on_mismatch='raise'):
         """Build ``master_params`` + ``param_map`` from the registered objectives.
 
         Two ways to declare sharing (they may be combined):
@@ -315,9 +383,16 @@ class JointFit(QObject):
         attached?", never on "params shared?" (plan section 5a).
 
         The master parameter for a group inherits value/vary/bounds/brute_step
-        from its FIRST endpoint's local parameter (shared parameters should agree;
-        the first is authoritative).
+        from its FIRST endpoint's local parameter. The endpoints are checked
+        first (``_check_share_group``): different start values add a warning to
+        ``self.warnings``; different ``min``/``max``/``vary`` raise
+        ``ShareMismatchError`` unless ``on_mismatch='first'``, which uses the
+        first endpoint's and warns. ``self.warnings`` is reset on every call.
         """
+        if on_mismatch not in ('raise', 'first'):
+            raise ValueError("on_mismatch must be 'raise' or 'first', got %r"
+                             % (on_mismatch,))
+        self.warnings = []
         specs = []
         for nm in (shared or []):
             specs.append(self.share_all(nm))
@@ -340,6 +415,7 @@ class JointFit(QObject):
             mkey = spec.get("name") or self._group_master_key(
                 gid, first_lk, bare=spec.get("bare", False), used=used_names)
             used_names.add(mkey)
+            self._check_share_group(mkey, members, on_mismatch)
             p0 = self.objectives[first_idx]["func"].params[first_lk]
             self.master_params.add(mkey, value=p0.value, vary=p0.vary,
                                    min=p0.min, max=p0.max, expr=None,
@@ -1016,6 +1092,7 @@ class JointFit(QObject):
         extra kwargs the behaviour is unchanged."""
         self.Niter = 0
         self.fit_abort = False
+        self._reset_run_warnings()          # build-time warnings stay
         self._set_ranges(xmin, xmax, ranges=ranges)
         self._L = None                      # force Cholesky rebuild for new range
         self._cov_ready = False
@@ -1074,6 +1151,9 @@ class JointFit(QObject):
         One block per objective, but a SHARED insertion+orientation gives every
         dataset the same three master parameters and hence the same block, so
         duplicates are collapsed.
+
+        Any ``self.warnings`` (build-time and run-time) are appended as a
+        ``Joint-fit warnings:`` block.
         """
         rep = fit_report(self.result)
         blocks, seen = [], set()
@@ -1095,7 +1175,12 @@ class JointFit(QObject):
             if txt:
                 seen.add(key)
                 blocks.append(txt)
-        return rep + '\n\n' + '\n\n'.join(blocks) if blocks else rep
+        if blocks:
+            rep = rep + '\n\n' + '\n\n'.join(blocks)
+        if self.warnings:
+            rep = rep + '\n\nJoint-fit warnings:\n' + ''.join(
+                '  - %s\n' % w for w in self.warnings)
+        return rep
 
     # ----------------------------------------------------------------- #
     #  viewer / GUI duck-typing contract

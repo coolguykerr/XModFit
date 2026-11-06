@@ -229,14 +229,16 @@ class JointFitSpec:
         return "per-dataset"
 
     # ---- compile to a JointFit -------------------------------------------- #
-    def compile(self, data, masks=None) -> JointFit:
+    def compile(self, data, masks=None, on_mismatch='raise') -> JointFit:
         """Build a fresh ``JointFit`` from this spec + XModFit's ``self.data``.
 
         ``data`` is XModFit's ``data[fname][curve] -> {'x','y','yerr',...}``.
         Datasets are registered in the spec's order (the stable key contract);
         covariance sidecars are loaded and attached; share-groups are translated
         into the engine's ``share_endpoints`` and applied via
-        ``build_master_params(groups=...)``.
+        ``build_master_params(groups=...)``. ``on_mismatch`` ('raise' | 'first')
+        is passed through: a share-group whose endpoints disagree on
+        min/max/vary raises ``ShareMismatchError`` unless it is 'first'.
         """
         if len(self.datasets) < 2:
             raise ValueError("a joint fit needs at least 2 datasets")
@@ -281,7 +283,7 @@ class JointFitSpec:
                 engine_groups.append({"members": members,
                                       "bare": g.bare, "name": g.name})
 
-        jf.build_master_params(groups=engine_groups or None)
+        jf.build_master_params(groups=engine_groups or None, on_mismatch=on_mismatch)
         return jf
 
 
