@@ -228,6 +228,12 @@ class JointFitSpec:
                 return "shared-all" if covered >= have else "shared-subset"
         return "per-dataset"
 
+    def fit_ranges(self):
+        """``{dataset_name: (fit_xmin, fit_xmax)}`` -- the per-dataset fit windows
+        for ``JointFit._set_ranges(xmin, xmax, ranges=...)``. A ``None`` side
+        falls back to the scalar Xrange there."""
+        return {e.name: (e.fit_xmin, e.fit_xmax) for e in self.datasets}
+
     # ---- compile to a JointFit -------------------------------------------- #
     def compile(self, data, masks=None, on_mismatch='raise') -> JointFit:
         """Build a fresh ``JointFit`` from this spec + XModFit's ``self.data``.

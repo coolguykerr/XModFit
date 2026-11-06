@@ -98,13 +98,16 @@ def _fmt_num(v):
     return '%.10g' % v
 
 
-def chisqr_on(func, x, y, yerr, idx, masked_x=False):
+def chisqr_on(func, x, y, yerr, idx, masked_x=False, imin=None, imax=None):
     """Plain chi-square Sum(((y-f)/yerr)^2) of ``func`` on the points ``idx``.
 
     ``idx`` are integer indices into the full ``x``/``y``/``yerr`` (see
-    JointFit.active_index). The model is evaluated on the whole window
-    x[idx.min():idx.max()+1], as JointFit.residual does, and ``idx`` is then
-    selected. With ``masked_x`` (a ``__masked_x__`` model; the objective's
+    JointFit.active_index). The model is evaluated on the objective's whole
+    window x[imin:imax+1], as JointFit.residual does, and ``idx`` is then
+    selected. Pass the objective's ``imin``/``imax``; without them the window
+    falls back to x[idx.min():idx.max()+1], which differs when the mask drops
+    points at a window edge (only matters for a model that is not pointwise
+    in x). With ``masked_x`` (a ``__masked_x__`` model; the objective's
     ``yfit_masked``) the model is evaluated on the active points only, so its
     output is already selected and must not be masked again.
     Returns (chisqr, len(idx)).
@@ -118,7 +121,8 @@ def chisqr_on(func, x, y, yerr, idx, masked_x=False):
         func.x = x[idx]
         f = np.asarray(func.y(), dtype=float)
     else:
-        lo, hi = int(idx.min()), int(idx.max())
+        lo = int(idx.min()) if imin is None else int(imin)
+        hi = int(idx.max()) if imax is None else int(imax)
         func.x = x[lo:hi + 1]
         f = np.asarray(func.y(), dtype=float)[idx - lo]
     e = np.where(np.abs(yerr[idx]) < 1e-30, 1.0, yerr[idx])
@@ -302,12 +306,26 @@ class JointFit(QObject):
         if on_mismatch == 'raise':
             raise ShareMismatchError(
                 "shared %r (local %r): endpoints disagree on min/max/vary: %s. "
-                "Make them agree, or pass on_mismatch='first' to use the first "
-                "endpoint's." % (mkey, lk0, listing))
+                "Make them agree, or apply the first endpoint's bounds/vary to all "
+                "members (on_mismatch='first'; the GUI offers this as a Yes/No "
+                "prompt)." % (mkey, lk0, listing))
         out.append(
-            "shared %s: endpoints disagree on min/max/vary %s; using the first "
-            "endpoint's (%s) bounds and vary" % (mkey, listing, d0))
+            "shared %s: endpoints disagree on min/max/vary %s; bounds unified: "
+            "every endpoint now uses the first endpoint's (%s) min/max/vary"
+            % (mkey, listing, d0))
         return out
+
+    def _unify_share_group(self, members):
+        """Copy the first endpoint's min/max/vary onto every other endpoint's
+        local Parameter (``on_mismatch='first'``). Without this, push_params
+        writes the master value into a narrower local Parameter and lmfit's
+        value setter clips it silently, so that dataset is evaluated at a
+        different value from the one the master reports (final review I1)."""
+        idx0, lk0 = members[0]
+        p0 = self.objectives[idx0]["func"].params[lk0]
+        for (idx, lk) in members[1:]:
+            p = self.objectives[idx]["func"].params[lk]
+            p.set(min=p0.min, max=p0.max, vary=p0.vary)
 
     def _register_shared_sigma(self, Sigma_logc):
         Sigma_logc = np.asarray(Sigma_logc, dtype=float)
@@ -416,8 +434,10 @@ class JointFit(QObject):
         from its FIRST endpoint's local parameter. The endpoints are checked
         first (``_check_share_group``): different start values add a warning to
         ``self.warnings``; different ``min``/``max``/``vary`` raise
-        ``ShareMismatchError`` unless ``on_mismatch='first'``, which uses the
-        first endpoint's and warns. ``self.warnings`` is reset on every call.
+        ``ShareMismatchError`` unless ``on_mismatch='first'``, which copies the
+        first endpoint's min/max/vary onto every other endpoint's local
+        Parameter (so push_params cannot clip a later endpoint) and warns.
+        ``self.warnings`` is reset on every call.
         """
         if on_mismatch not in ('raise', 'first'):
             raise ValueError("on_mismatch must be 'raise' or 'first', got %r"
@@ -441,6 +461,12 @@ class JointFit(QObject):
             used_names.add(mkey)
             warnings += self._check_share_group(mkey, members, on_mismatch)
             resolved.append((mkey, members))
+
+        # every group passed the check: under 'first', unify the endpoints'
+        # bounds/vary on the local Parameters so push_params cannot clip
+        if on_mismatch == 'first':
+            for (_mk, members) in resolved:
+                self._unify_share_group(members)
 
         self.warnings = warnings
         self.shared = [nm for nm in (shared or [])]
@@ -1151,7 +1177,8 @@ class JointFit(QObject):
         self.Niter = 0
         self.fit_abort = False
         self._reset_run_warnings()          # build-time warnings stay
-        if len(self.objectives) >= 2 and not self._use_cov                 and fit_scale == 'Linear w/o error':
+        if (len(self.objectives) >= 2 and not self._use_cov
+                and fit_scale == 'Linear w/o error'):
             # 01 6.7: per-dataset 1/max(y) weighting is silent otherwise
             self._add_run_warning(
                 "fit scale 'Linear w/o error' divides each dataset by its own "

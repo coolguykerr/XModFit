@@ -71,6 +71,11 @@ os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 OP_META_KEYS = ('names', 'plotType', 'role', 'panel', 'cmap', 'zscale', 'levels')
 
 
+class _JointCompileRefused(Exception):
+    """Internal: XModFit._compile_joint_guarded refused or the user declined;
+    the message box has already been shown."""
+
+
 class _LimitProxy(MutableMapping):
     """Backwards-compatible view of ``limits[data_key]['x']`` as xmin / xmax.
 
@@ -7086,6 +7091,47 @@ class XModFit(QWidget):
         except Exception:
             pass
 
+    def _compile_joint_guarded(self, spec):
+        """``spec.compile`` for the GUI: never lets a ValueError reach a Qt slot
+        (an unhandled exception there aborts the app; final review I3).
+
+        A ShareMismatchError (share-group endpoints disagree on min/max/vary)
+        asks Yes/No whether to apply the first dataset's bounds/vary to every
+        member of each share group; Yes recompiles with ``on_mismatch='first'``
+        (final review I4). Any other ValueError (e.g. a covariance sidecar
+        problem) is shown in a warning box. Returns the JointFit, or None when
+        the compile was refused or declined."""
+        from Joint_Fit_Routines import ShareMismatchError
+        masks = self._joint_masks(spec)
+        try:
+            return spec.compile(self.data, masks=masks)
+        except ShareMismatchError as ex:
+            ans = QMessageBox.question(
+                self, 'Joint fit',
+                str(ex) + "\n\nApply the first dataset's bounds/vary to all members "
+                "of each share group and continue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if ans != QMessageBox.Yes:
+                return None
+            try:
+                return spec.compile(self.data, masks=masks, on_mismatch='first')
+            except ValueError as ex2:
+                QMessageBox.warning(self, 'Joint fit', str(ex2))
+                return None
+        except ValueError as ex:
+            QMessageBox.warning(self, 'Joint fit', str(ex))
+            return None
+
+    def _apply_joint_ranges(self, jf, spec):
+        """Freeze ``jf``'s fit windows and column masks the way ``perform_fit``
+        does (scalar Xrange box + the spec's per-dataset fit ranges), so
+        ``active_index`` -- and so the Model Comparison -- honours #FitRange= and
+        the column limits on a joint fit that was loaded but not re-fitted
+        (final review I2). Returns ``jf``."""
+        xmin, xmax = self._joint_range()
+        jf._set_ranges(xmin, xmax, ranges=spec.fit_ranges())
+        return jf
+
     def run_joint_fit(self):
         """Compile the panel's spec into a JointFit, fit it, and show the current
         dataset's fitted params in the stock tables (master/detail). q-range is a
@@ -7095,11 +7141,8 @@ class XModFit(QWidget):
         separate, deferred step."""
         import numpy as _np
         spec = self.jointFitPanel.spec
-        from Joint_Fit_Routines import ShareMismatchError
-        try:
-            _jf = spec.compile(self.data, masks=self._joint_masks(spec))
-        except ShareMismatchError as ex:   # unhandled in a slot would abort the app
-            QMessageBox.warning(self, 'Joint fit', str(ex))
+        _jf = self._compile_joint_guarded(spec)
+        if _jf is None:                     # refused or declined; nothing changed
             return
         self.fit = _jf                      # fresh JointFit
         self.jointFit = self.fit            # persist so switching to an individual
@@ -7110,13 +7153,9 @@ class XModFit(QWidget):
         self.fit_method = self.fitMethods[self.fitMethodComboBox.currentText()]
         self.fit_scale = self.fitScaleComboBox.currentText()
         # scalar q-bounds from the Xrange box (NOT the per-file self.xmin/self.xmax dicts)
-        try:
-            _xmin, _xmax = self.xminmaxLineEdit.text().split(':')
-            xmin, xmax = float(_xmin), float(_xmax)
-        except Exception:
-            xmin, xmax = -_np.inf, _np.inf
+        xmin, xmax = self._joint_range()
         # per-dataset fit windows from the panel (blank rows -> scalar fallback)
-        ranges = {e.name: (e.fit_xmin, e.fit_xmax) for e in spec.datasets}
+        ranges = spec.fit_ranges()
         # live progress screen (iteration / chi-sqr / Stop) -- same dialog as individual
         # fits; fitCallback is JointFit-aware (skips the single-Fit curve redraw).
         self.fitData = []
@@ -7436,11 +7475,13 @@ class XModFit(QWidget):
         if s.get('fit_iterations'):
             self.fitIterationLineEdit.setText(s['fit_iterations'])
         incomplete = bool(skipped or not_found)
-        from Joint_Fit_Routines import ShareMismatchError
         refused = False
         try:
             if len(spec.datasets) >= 2:
-                self.jointFit = spec.compile(self.data, masks=self._joint_masks(spec))
+                _jf = self._compile_joint_guarded(spec)
+                if _jf is None:
+                    raise _JointCompileRefused()
+                self.jointFit = self._apply_joint_ranges(_jf, spec)
                 self.fit = self.jointFit
                 if getattr(self.fit, 'objectives', None):
                     self._sync_joint_fixed_params(self.fit.objectives[0]['func'])
@@ -7448,9 +7489,8 @@ class XModFit(QWidget):
                 # flagged so the Model Comparison tells the user to re-run the joint fit.
                 self.jointFit._is_fitted = not incomplete
                 self.jointFit._jpar_incomplete = incomplete
-        except ShareMismatchError as ex:
-            refused = True
-            QMessageBox.warning(self, 'Joint fit', str(ex))
+        except _JointCompileRefused:
+            refused = True                  # already shown by _compile_joint_guarded
         except Exception:
             traceback.print_exc()
         self.jointFitEnabled = True
@@ -7503,15 +7543,16 @@ class XModFit(QWidget):
                 applied += 1
             except Exception:
                 traceback.print_exc()
-        from Joint_Fit_Routines import ShareMismatchError
         refused = False
         try:
             if len(spec.datasets) >= 2:
-                self.jointFit = spec.compile(self.data, masks=self._joint_masks(spec))
+                _jf = self._compile_joint_guarded(spec)
+                if _jf is None:
+                    raise _JointCompileRefused()
+                self.jointFit = self._apply_joint_ranges(_jf, spec)
                 self.fit = self.jointFit
-        except ShareMismatchError as ex:
-            refused = True
-            QMessageBox.warning(self, 'Joint fit', str(ex))
+        except _JointCompileRefused:
+            refused = True                  # already shown by _compile_joint_guarded
         except Exception:
             traceback.print_exc()
         try:
@@ -7551,10 +7592,11 @@ class XModFit(QWidget):
         except Exception:
             return -np.inf, np.inf
 
-    def _eval_chisqr(self, func, name, idx):
+    def _eval_chisqr(self, func, name, idx, imin=None, imax=None):
         """Plain chi-square Sum(((y-yfit)/yerr)^2) of `func` against dataset `name`'s
         PRIMARY curve at the points `idx` (indices into the full curve, normally the
-        joint fit's active_index). Returns (chisqr, ndata) or (None, 0)."""
+        joint fit's active_index), the model evaluated on the joint objective's
+        [imin, imax] window. Returns (chisqr, ndata) or (None, 0)."""
         d = self.data.get(name)
         if not d or len(idx) == 0:
             return None, 0
@@ -7563,7 +7605,8 @@ class XModFit(QWidget):
         from Joint_Fit_Routines import chisqr_on
         try:
             return chisqr_on(func, x, y, yerr, idx,
-                             masked_x=bool(getattr(func, '__masked_x__', False)))
+                             masked_x=bool(getattr(func, '__masked_x__', False)),
+                             imin=imin, imax=imax)
         except Exception:
             return None, 0
 
@@ -7605,8 +7648,9 @@ class XModFit(QWidget):
         for i, n in enumerate(names):
             indfit = self.dataset_fits[n]
             idx = jf.active_index(i)
-            ci, ni = self._eval_chisqr(indfit.func, n, idx)
-            cj, nj = self._eval_chisqr(jf.objectives[i]['func'], n, idx)
+            win = (jf.objectives[i]['imin'], jf.objectives[i]['imax'])
+            ci, ni = self._eval_chisqr(indfit.func, n, idx, *win)
+            cj, nj = self._eval_chisqr(jf.objectives[i]['func'], n, idx, *win)
             if ci is None or cj is None:
                 self.compareTextEdit.setText(
                     'Could not evaluate dataset %s over the fit range.' % self._short_name(n))

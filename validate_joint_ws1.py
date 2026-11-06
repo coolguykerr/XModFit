@@ -219,6 +219,28 @@ def test_t3():
     except Exception as ex:
         check("T3c on_mismatch='first' builds", False, repr(ex))
 
+    # (c2) final review I1: under 'first' a narrower later endpoint must not clip.
+    # master 50, DS_two bounded at max=30 -> every local value must equal 50.
+    try:
+        jf, _ = build(max2=30.0, on_mismatch='first')
+        mk = list(jf.param_map)[0]
+        p = jf.master_params.copy()
+        p[mk].value = 50.0
+        jf.push_params(p)
+        loc = [jf.objectives[i]['func'].params['a'].value for i in range(3)]
+        check("T3c2 'first': every local value == master 50 after push_params",
+              p[mk].value == 50.0 and all(v == 50.0 for v in loc), loc)
+        check("T3c2 'first': local bounds/vary unified to the first endpoint's",
+              all(jf.objectives[i]['func'].params['a'].max == np.inf
+                  and jf.objectives[i]['func'].params['a'].vary for i in range(3)),
+              [(jf.objectives[i]['func'].params['a'].max,
+                jf.objectives[i]['func'].params['a'].vary) for i in range(3)])
+        check("T3c2 'first' warning says the bounds were unified",
+              len(jf.warnings) == 1 and 'bounds unified' in jf.warnings[0],
+              jf.warnings)
+    except Exception as ex:
+        check("T3c2 'first' unifies bounds", False, repr(ex))
+
     # (d) vary differs -> ShareMismatchError
     try:
         build(vary2=False)
@@ -368,14 +390,21 @@ def test_t5():
     jf = build()
     jf.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq',
                    ranges=ranges)
-    tot = nd = 0
+    tot = nd = tot0 = 0
     for i, ob in enumerate(jf.objectives):
+        # M1: evaluate on the objective's own [imin, imax] window
         c, n = J.chisqr_on(ob['func'], ob['x'], ob['y'], ob['yerr'],
-                           jf.active_index(i), masked_x=ob['yfit_masked'])
+                           jf.active_index(i), masked_x=ob['yfit_masked'],
+                           imin=ob['imin'], imax=ob['imax'])
         tot += c; nd += n
+        c0, _ = J.chisqr_on(ob['func'], ob['x'], ob['y'], ob['yerr'],
+                            jf.active_index(i), masked_x=ob['yfit_masked'])
+        tot0 += c0
     rc = jf.result.chisqr
     check("T5b sum chisqr_on == result.chisqr to 1e-10",
           abs(tot - rc) <= 1e-10 * abs(rc), (tot, rc))
+    check("T5b chisqr_on without imin/imax (idx-span fallback) agrees for a "
+          "pointwise model", abs(tot0 - rc) <= 1e-10 * abs(rc), (tot0, rc))
     check("T5b ndata == result.ndata", nd == jf.result.ndata, (nd, jf.result.ndata))
 
     # (c) count follows the active points, not the scalar window
@@ -386,6 +415,31 @@ def test_t5():
           (nd, n_scalar))
     full = jf.active_index(0)
     check("T5c narrower range on D0 shortens it", len(full) == 26, len(full))
+
+    # (e) final review I2: a compiled, never-fitted JointFit (the .jpar / .par
+    # load paths) gets its fit ranges and column mask frozen by the same entry
+    # point those load paths call, XModFit._apply_joint_ranges.
+    import types as _types
+    import xmodfit
+    from joint_fit_spec import JointFitSpec
+    sp = JointFitSpec(default_model_class=Line)
+    for i in range(2):
+        m = Line(x=X)
+        m.params['b'].set(vary=True)
+        sp.add_dataset('D%d' % i, model=m, fit_xmin=ranges['D%d' % i][0],
+                       fit_xmax=ranges['D%d' % i][1])
+    sp.set_shared('a')
+    data = {'D%d' % i: {'c': {'x': X, 'y': ys[i], 'yerr': err}} for i in range(2)}
+    jl = sp.compile(data, masks={'D0': None, 'D1': mask})
+    check("T5e before: a compiled, unfitted JointFit scores every point",
+          len(jl.active_index(1)) == len(X), len(jl.active_index(1)))
+    fake = _types.SimpleNamespace(_joint_range=lambda: (X[0], X[-1]))
+    ret = xmodfit.XModFit._apply_joint_ranges(fake, jl, sp)
+    check("T5e _apply_joint_ranges returns the JointFit", ret is jl)
+    check("T5e after: active_index honours the fit ranges and mask (no perform_fit)",
+          all(np.array_equal(jl.active_index(i), jf.active_index(i)) for i in range(2))
+          and np.array_equal(jl.active_index(1), want),
+          [len(jl.active_index(i)) for i in range(2)])
 
     # __masked_x__ model: fed active points only, not masked twice
     class MX(Line):
@@ -407,22 +461,44 @@ def test_t5():
 
 
 def test_t3_gui():
-    """The GUI surfaces a ShareMismatchError instead of dying in a Qt slot."""
+    """The GUI guards spec.compile (final review I3/I4) and freezes the fit
+    ranges of a loaded joint fit (I2).
+
+    A ShareMismatchError asks Yes/No (No: nothing changes; Yes: recompile with
+    on_mismatch='first'); any other ValueError is shown in a warning box; neither
+    reaches the Qt slot, and no success box follows a refusal."""
     import numpy as np
     import xmodfit
     from PyQt5.QtCore import Qt
     import joint_fit_io
-    calls = {'warning': [], 'information': []}
+    from Fit_Routines import _window_indices
+    calls = {'warning': [], 'information': [], 'question': []}
 
     class _MB:
-        Ok = Yes = No = 0
+        Ok, Yes, No = 0x400, 0x4000, 0x10000
+        answer = [0x10000]
         warning = staticmethod(lambda *a, **k: calls['warning'].append(a) or 0)
         information = staticmethod(lambda *a, **k: calls['information'].append(a) or 0)
-        question = staticmethod(lambda *a, **k: 0)
+        question = staticmethod(
+            lambda *a, **k: calls['question'].append(a) or _MB.answer[0])
+
+    def reset():
+        for v in calls.values():
+            del v[:]
+
+    def run(fn, *a, **k):
+        try:
+            fn(*a, **k)
+            return None
+        except Exception as ex:
+            return ex
     saved = (xmodfit.QMessageBox, joint_fit_io.parse_par, joint_fit_io.apply_block)
     xmodfit.QMessageBox = _MB
     try:
         w = xmodfit.XModFit()
+        check("T3gui XModFit has _compile_joint_guarded / _apply_joint_ranges",
+              callable(getattr(w, '_compile_joint_guarded', None))
+              and callable(getattr(w, '_apply_joint_ranges', None)))
         d = os.path.join(ROOT, 'tests', '_logs')
         os.makedirs(d, exist_ok=True)
         q = np.linspace(0.02, 0.30, 40)
@@ -447,32 +523,89 @@ def test_t3_gui():
         w.fitIterationLineEdit.setText("5")
         w.jointFitEnabled = True
         fit0, jf0 = w.fit, getattr(w, 'jointFit', None)
-        try:
-            w.run_joint_fit()
-            raised = None
-        except Exception as ex:
-            raised = ex
+
+        # (I4, No) the mismatch is asked about; declining changes nothing
+        _MB.answer[0] = _MB.No
+        raised = run(w.run_joint_fit)
         check("T3gui run_joint_fit returns without raising", raised is None, repr(raised))
-        check("T3gui the refusal is shown in a warning box",
-              len(calls['warning']) == 1 and 'qoff' in str(calls['warning'][0][2]),
-              calls['warning'])
-        check("T3gui self.fit / self.jointFit unchanged",
+        check("T3gui the mismatch is shown in a Yes/No question naming qoff",
+              len(calls['question']) == 1 and 'qoff' in str(calls['question'][0][2])
+              and "Apply the first dataset's bounds/vary to all members of each "
+                  "share group and continue?" in str(calls['question'][0][2])
+              and not calls['warning'], calls)
+        check("T3gui No: self.fit / self.jointFit unchanged",
               w.fit is fit0 and getattr(w, 'jointFit', None) is jf0)
 
-        # .par-into-joint load path: refusal shown, no success box
+        # .par-into-joint load path: question shown, No -> no success box
         par = os.path.join(d, 'ws1_t3_dummy.par')
         open(par, 'w').write('')
         joint_fit_io.parse_par = lambda txt: {}
         joint_fit_io.apply_block = lambda *a, **k: None
-        del calls['warning'][:], calls['information'][:]
-        try:
-            w.loadParIntoJoint(fname=par)
-            raised = None
-        except Exception as ex:
-            raised = ex
-        check("T3gui loadParIntoJoint shows the refusal, no success box",
-              raised is None and len(calls['warning']) == 1
+        reset()
+        raised = run(w.loadParIntoJoint, fname=par)
+        check("T3gui loadParIntoJoint asks, No -> no success box",
+              raised is None and len(calls['question']) == 1
               and not calls['information'], (repr(raised), calls))
+
+        # (I3) any other ValueError from compile: warning box, no crash,
+        # no success box, nothing replaced
+        def _boom(*a, **k):
+            raise ValueError("attached covariances use different var_fwhm")
+        spec.compile = _boom
+        try:
+            reset()
+            raised = run(w.run_joint_fit)
+            check("T3gui ValueError: run_joint_fit shows a warning, does not raise",
+                  raised is None and len(calls['warning']) == 1
+                  and 'var_fwhm' in str(calls['warning'][0][2])
+                  and w.fit is fit0, (repr(raised), calls))
+            reset()
+            raised = run(w.loadParIntoJoint, fname=par)
+            check("T3gui ValueError: loadParIntoJoint warns, no success box",
+                  raised is None and len(calls['warning']) == 1
+                  and not calls['information'], (repr(raised), calls))
+        finally:
+            del spec.compile
+
+        # (I4, Yes) recompile with on_mismatch='first' and fit
+        _MB.answer[0] = _MB.Yes
+        reset()
+        raised = run(w.run_joint_fit)
+        jf = getattr(w, 'jointFit', None)
+        check("T3gui Yes: run_joint_fit fits with the first dataset's bounds",
+              raised is None and jf is not None and jf is not jf0
+              and getattr(jf, 'result', None) is not None
+              and any('bounds unified' in str(x) for x in jf.warnings),
+              (repr(raised), getattr(jf, 'warnings', None)))
+        check("T3gui Yes: both members' local qoff bounds now match",
+              jf is not None and all(o['func'].params['qoff'].max == np.inf
+                                     for o in jf.objectives),
+              None if jf is None else [o['func'].params['qoff'].max
+                                       for o in jf.objectives])
+
+        # (I2) .jpar round trip with a narrowed #FitRange: the loaded, never
+        # re-fitted joint fit's active_index honours it
+        joint_fit_io.parse_par, joint_fit_io.apply_block = saved[1], saved[2]
+        spec.datasets[1].fit_xmin, spec.datasets[1].fit_xmax = 0.05, 0.2
+        jpar = os.path.join(d, 'ws1_i2_roundtrip.jpar')
+        reset()
+        w.saveJointFit(fname=jpar)
+        reset()
+        raised = run(w.loadJointFit, fname=jpar)
+        jl = getattr(w, 'jointFit', None)
+        ok = raised is None and jl is not None and jl is not jf
+        if ok:
+            i0, i1 = _window_indices(q, 0.05, 0.2)
+            a0, a1 = _window_indices(q, *w._joint_range())
+            got1, got0 = np.asarray(jl.active_index(1)), np.asarray(jl.active_index(0))
+        check("T3gui I2: loaded .jpar's active_index honours #FitRange=",
+              ok and np.array_equal(got1, np.arange(i0, i1 + 1)) and len(got1) < len(q),
+              (repr(raised), None if not ok else (len(got1), i0, i1)))
+        check("T3gui I2: the other dataset uses the scalar Xrange window",
+              ok and np.array_equal(got0, np.arange(a0, a1 + 1)),
+              None if not ok else (len(got0), a0, a1))
+        check("T3gui I2: load succeeded (success box, no question)",
+              ok and len(calls['information']) == 1 and not calls['question'], calls)
     finally:
         xmodfit.QMessageBox, joint_fit_io.parse_par, joint_fit_io.apply_block = saved
 
