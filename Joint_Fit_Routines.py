@@ -1101,6 +1101,12 @@ class JointFit(QObject):
         self.Niter = 0
         self.fit_abort = False
         self._reset_run_warnings()          # build-time warnings stay
+        if len(self.objectives) >= 2 and not self._use_cov                 and fit_scale == 'Linear w/o error':
+            # 01 6.7: per-dataset 1/max(y) weighting is silent otherwise
+            self._add_run_warning(
+                "fit scale 'Linear w/o error' divides each dataset by its own "
+                "maximum, so datasets are weighted by 1/max(y); use 'Linear' "
+                "(error-weighted) for a comparable joint objective")
         self._set_ranges(xmin, xmax, ranges=ranges)
         self._L = None                      # force Cholesky rebuild for new range
         self._cov_ready = False

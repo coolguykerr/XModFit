@@ -11,6 +11,8 @@ One function per task section; later tasks append T2..T5.
         on_mismatch='first'; JointFit.warnings does not grow across rebuilds
         or re-fits and is printed in the report
 
+    T4  warn on per-max weighting (01 6.7) and dropped sub-curves (6.14)
+
     QT_QPA_PLATFORM=offscreen python validate_joint_ws1.py
 """
 import os, sys, types
@@ -259,6 +261,75 @@ def test_t3():
     except Exception as ex:
         check("T3 compile(on_mismatch='first') builds", False, repr(ex))
 
+def test_t4():
+    """01 6.7 / 6.14: warn on per-max weighting and on dropped sub-curves."""
+    import numpy as np
+    from validate_joint_gls import Line, X, make_data, E
+    from Joint_Fit_Routines import JointFit
+    ys = make_data(2)
+    err = E * np.ones_like(X)
+    WARN = ("fit scale 'Linear w/o error' divides each dataset by its own maximum, "
+            "so datasets are weighted by 1/max(y); use 'Linear' (error-weighted) "
+            "for a comparable joint objective")
+
+    def build(n=2):
+        jf = JointFit()
+        for i in range(n):
+            jf.add_dataset('D%d' % i, funcClass=Line, x=X, y=ys[i], yerr=err)
+            jf.objectives[i]['func'].params['b'].set(vary=True)
+        jf.build_master_params(groups=[jf.share_within('a', ['D%d' % i for i in range(n)])])
+        return jf
+
+    jf = build()
+    rep, _ = jf.perform_fit(X[0], X[-1], fit_scale='Linear w/o error',
+                            fit_method='leastsq')
+    check("T4a 'Linear w/o error' 2-dataset no-cov -> warning present",
+          WARN in list(jf.warnings), list(jf.warnings))
+    check("T4a warning appears in the report", WARN in rep)
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear w/o error', fit_method='leastsq')
+    check("T4a re-fit does not duplicate the warning",
+          list(jf.warnings).count(WARN) == 1, list(jf.warnings))
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq')
+    check("T4b 'Linear' on the same object drops the warning",
+          WARN not in list(jf.warnings), list(jf.warnings))
+    jf2 = build()
+    jf2.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq')
+    check("T4b 'Linear' fresh fit -> no such warning",
+          WARN not in list(jf2.warnings), list(jf2.warnings))
+    jf3 = build()
+    jf3.perform_fit(X[0], X[-1], fit_scale='Log w/o error', fit_method='leastsq')
+    check("T4b 'Log w/o error' -> no such warning",
+          WARN not in list(jf3.warnings), list(jf3.warnings))
+
+    # (c) compile(): two curve keys -> warning, first curve only
+    from joint_fit_spec import JointFitSpec
+    names = ('M_one', 'M_two')
+    other = {'x': X[:5], 'y': np.zeros(5), 'yerr': np.ones(5)}
+    data = {nm: {'curveA': {'x': X, 'y': y, 'yerr': err}, 'curveB': dict(other)}
+            for nm, y in zip(names, ys)}
+    sp = JointFitSpec(default_model_class=Line)
+    for nm in names:
+        sp.add_dataset(nm, model=Line(x=X))
+    sp.set_shared('a')
+    jf = sp.compile(data)
+    ws = list(jf.warnings)
+    check("T4c compile warns for each multi-curve dataset",
+          all(any(w.startswith('dataset %s has 2 curves; only the first (curveA) '
+                               'enters the joint fit' % nm) for w in ws)
+              for nm in names), ws)
+    check("T4c build-time warnings are plain str (not run-time)",
+          all(type(w) is str for w in ws), [type(w) for w in ws])
+    check("T4c only the first curve's points are fitted",
+          all(len(o['x']) == len(X) for o in jf.objectives),
+          [len(o['x']) for o in jf.objectives])
+    sp1 = JointFitSpec(default_model_class=Line)
+    one = {nm: {'curveA': {'x': X, 'y': y, 'yerr': err}} for nm, y in zip(names, ys)}
+    for nm in names:
+        sp1.add_dataset(nm, model=Line(x=X))
+    sp1.set_shared('a')
+    check("T4c single-curve datasets -> no multi-curve warning",
+          not any('curves' in w for w in sp1.compile(one).warnings))
+
 def test_t3_gui():
     """The GUI surfaces a ShareMismatchError instead of dying in a Qt slot."""
     import numpy as np
@@ -332,7 +403,7 @@ def test_t3_gui():
 
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
-    for t in (test_t1, test_t2, test_t3, test_t3_gui):
+    for t in (test_t1, test_t2, test_t3, test_t4, test_t3_gui):
         try:
             t()
         except Exception as ex:

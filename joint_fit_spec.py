@@ -252,8 +252,11 @@ class JointFitSpec:
 
         jf = JointFit()
         name_to_idx = {}
+        multi_curve = []
         for idx, e in enumerate(self.datasets):
-            x, y, yerr = _primary_curve(data[e.name])
+            x, y, yerr, n_curves = _primary_curve(data[e.name])
+            if n_curves > 1:
+                multi_curve.append((e.name, n_curves, next(iter(data[e.name]))))
             cov = None
             if e.cov_path:
                 cov = jcov.load_dataset_cov(e.cov_path, x=x, raw_path=e.raw_path)
@@ -284,6 +287,11 @@ class JointFitSpec:
                                       "bare": g.bare, "name": g.name})
 
         jf.build_master_params(groups=engine_groups or None, on_mismatch=on_mismatch)
+        # 01 6.14: only the first curve of a dataset enters the fit. Appended
+        # after build_master_params, which resets the build-time warnings.
+        for (nm, n, ck) in multi_curve:
+            jf.warnings.append("dataset %s has %d curves; only the first (%s) "
+                               "enters the joint fit" % (nm, n, ck))
         return jf
 
 
@@ -291,8 +299,11 @@ class JointFitSpec:
 #  helper (same convention as joint_fit_orchestration._primary_curve)
 # --------------------------------------------------------------------------- #
 def _primary_curve(dataset):
-    key = list(dataset.keys())[0]
+    """-> (x, y, yerr, n_curves); only the first curve is used."""
+    keys = list(dataset.keys())
+    key = keys[0]
     d = dataset[key]
     return (np.asarray(d["x"], dtype=float),
             np.asarray(d["y"], dtype=float),
-            np.asarray(d["yerr"], dtype=float))
+            np.asarray(d["yerr"], dtype=float),
+            len(keys))
