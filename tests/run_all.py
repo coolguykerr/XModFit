@@ -38,10 +38,6 @@ REGISTRY = {
     'validate_fastscan.py': {'slow': True, 'interp': 'cmcars'},
 
     # --- recovered harnesses (P-3b) ---
-    'tests/recovered/verify_jointmcmc.py': {
-        'known': "A1.17: binds a fixed list of XModFit methods onto a Fake; _draw_corner now "
-                 "calls _corner_render_data (added in b953c3f), absent from the list "
-                 "-> AttributeError at section 3"},
     'tests/recovered/repro_backend.py': {'smoke': True},
     'tests/recovered/test_pickle_fit.py': {'smoke': True},
     'tests/recovered/test_autocorr_window.py': {'smoke': True},
@@ -51,10 +47,6 @@ REGISTRY = {
     'tests/recovered/test_gui_construct.py': {'smoke': True},
     'tests/recovered/repro_raw.py': {'smoke': True},
     'tests/recovered/repro_tab.py': {'smoke': True},
-    'tests/recovered/smoke_fit.py': {
-        'known': "A1.17: reads scaler_parameters['chi2_per_N_reported'] etc.; GID2D now "
-                 "emits chi2_per_N_reported_LINEAR / chi2_per_N_active_only_LINEAR "
-                 "(stale key names -> KeyError at the first print)"},
     'tests/recovered/check_aproj.py': {
         'smoke': True, 'interp': 'cmcars',
         'external': 'XPR-main/test_data, sibling of the repo'},

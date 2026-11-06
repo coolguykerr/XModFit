@@ -107,9 +107,10 @@ for i, k in enumerate(keys):
 
 # bind the real methods
 import types, xmodfit
-for m in ('_corner_names', '_rebuild_pardata', '_corner_truths', '_draw_corner', '_is_structural_param'):
+for m in ('_corner_names', '_rebuild_pardata', '_corner_truths', '_draw_corner', '_corner_render_data', '_is_structural_param'):
     setattr(f, m, types.MethodType(getattr(xmodfit.XModFit, m), f))
 f._STRUCTURAL_PARAMS = xmodfit.XModFit._STRUCTURAL_PARAMS
+f._CORNER_MAX_SAMPLES = xmodfit.XModFit._CORNER_MAX_SAMPLES   # read by _corner_render_data
 # final_fit_params substitute (dict-like with .value + .keys())
 class P:
     def __init__(self, v): self.value = v

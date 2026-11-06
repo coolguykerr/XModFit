@@ -43,11 +43,11 @@ y0 = fit.evaluate()
 print("one evaluation (reports OFF, in-fit):  %.3f s" % (time.perf_counter() - t0))
 s = f.output_params['scaler_parameters']
 print("\nstart point: chi2/N reported %.1f, active-only %.1f, %d active px"
-      % (s['chi2_per_N_reported'], s['chi2_per_N_active_only'], s['n_active_pixels']))
+      % (s['chi2_per_N_reported_LINEAR'], s['chi2_per_N_active_only_LINEAR'], s['n_active_pixels']))
 print("chi2 concentration: top 0.1%% carry %.1f%%, top 10 px carry %.1f%%"
-      % (100 * s['chi2_frac_in_top_0.1pct_pixels'],
-         100 * s['chi2_frac_in_top_10_pixels']))
-print("min sigma / median sigma = %.3e" % s['min_sigma_over_median_sigma'])
+      % (100 * s['chi2_frac_top_0.1pct_px_LINEAR'],
+         100 * s['chi2_frac_top_10_px_LINEAR']))
+print("median sigma / I = %.3e" % s['median_sigma_over_I'])
 
 for k in ('yscale', 'bkg0', 'bkg2', 'a0', 'L_dom', 'L_ch'):
     f.params[k].vary = 1
@@ -66,7 +66,7 @@ f.__fit__ = False
 fit.evaluate()
 s = f.output_params['scaler_parameters']
 print("\nafter fit: chi2/N active-only %.2f (was %.1f)"
-      % (s['chi2_per_N_active_only'], 2312.0))
+      % (s['chi2_per_N_active_only_LINEAR'], 2312.0))
 for k in sorted(s):
     if k.startswith('varinflation_') or k in ('fisher_condition_number',
                                               'A_per_molecule', 'qxy_11',

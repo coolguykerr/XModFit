@@ -87,7 +87,7 @@ exits 0 (registry `smoke: true`, no invented checks); **known** = expected to fa
 | `verify_seed_gui` | a | PASS | assert | |
 | `verify_reuse_wrap` | a | PASS | assert | |
 | `verify_fingerprint` | a | PASS | assert | |
-| `verify_jointmcmc` | a | KNOWN-FAIL | assert | binds a fixed method list onto a `Fake`; `_draw_corner` now calls `_corner_render_data` (b953c3f), not in the list |
+| `verify_jointmcmc` | a | PASS | assert | A1.17: `_corner_render_data` (b953c3f) and `_CORNER_MAX_SAMPLES` now bound onto the `Fake` |
 | `verify_jointwindow` | a | PASS | assert | |
 | `repro_full` | a | PASS | assert | |
 | `repro_switch` | a | PASS | assert | |
@@ -114,7 +114,7 @@ exits 0 (registry `smoke: true`, no invented checks); **known** = expected to fa
 | `test_gui_switch` | d | PASS | assert | |
 | `test_pdb_persist` | d | PASS | converted | |
 | `test_phase1` | d | PASS | converted | |
-| `smoke_fit` | e | KNOWN-FAIL | smoke-shaped | reads `chi2_per_N_reported`; GID2D now emits `chi2_per_N_reported_LINEAR` (stale key names) |
+| `smoke_fit` | e | PASS | smoke-shaped | A1.17: reads the `_LINEAR` scaler keys GID2D has always emitted |
 | `repro_raw` | e | PASS | smoke | rebuilds the raw map in `tests/_logs`, no longer writes into `Data/` |
 | `repro_tab` | e | PASS | smoke | |
 | `test_xpr_stage1` | f | PASS | converted | `cmcars`, external `XPR-main/test_data`; ~44 s |
@@ -123,5 +123,5 @@ exits 0 (registry `smoke: true`, no invented checks); **known** = expected to fa
 | `check_aproj` | f | PASS | smoke | `cmcars`, external `XPR-main/test_data`; ratio table only |
 | `smoke_merge` | g | PASS | converted | local `check(label, fn)` wrapper now feeds `tests.harness` |
 
-The two KNOWN-FAIL entries (`verify_jointmcmc`, `smoke_fit`) are stale harnesses, not engine
-defects; both are tracked as `handoff/10-fix-list.md` A1.17.
+`verify_jointmcmc` and `smoke_fit` were stale harnesses, not engine defects; both were
+brought up to date under `handoff/10-fix-list.md` A1.17.

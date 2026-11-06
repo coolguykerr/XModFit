@@ -258,7 +258,7 @@ in `tests/run_all.py` is dropped.
 *Remains:* the hard-coded `T:` path itself (still tried first when reachable), and that
 without the T: file, section 6 packs a round-tripped raw map rather than the original.
 
-**A1.17 Two recovered harnesses are stale.** [hygiene]
+**A1.17 Two recovered harnesses are stale.** [hygiene] **DONE 2026-11-06 (WS1 Task 7).**
 `tests/recovered/smoke_fit.py` reads `scaler_parameters['chi2_per_N_reported']`, which GID2D
 now emits as `chi2_per_N_reported_LINEAR` / `chi2_per_N_active_only_LINEAR` (KeyError at the
 first print). `tests/recovered/verify_jointmcmc.py` binds a fixed list of XModFit methods
@@ -266,6 +266,13 @@ onto a `Fake`; `_draw_corner` now calls `_corner_render_data` (added in `b953c3f
 from the list (AttributeError at section 3). Neither is an engine defect.
 *Fix:* update the key names / add `_corner_render_data` to the bound list. Both are
 registered `known` in `tests/run_all.py` until then.
+*Done:* semantics confirmed, neither was a behaviour change. GID2D has emitted only the
+`_LINEAR` keys since its first commit (`dad9f9d`); `chi2_raw`/`chi2_eff` are the padded-count
+and active-only chi2/N the harness meant. Its two `chi2_frac_in_top_*` keys were renamed
+`chi2_frac_top_*_px_LINEAR`, and `min_sigma_over_median_sigma` no longer exists (the report now
+gives `median_sigma_over_I`, a different quantity; the harness only prints it).
+`_corner_render_data` is a render-only stride thinning to `_CORNER_MAX_SAMPLES` rows;
+the harness now binds it and sets the class constant on its `Fake`. Both `known` entries dropped.
 
 ## A2. Data folder
 
