@@ -7551,26 +7551,21 @@ class XModFit(QWidget):
         except Exception:
             return -np.inf, np.inf
 
-    def _eval_chisqr(self, func, name):
+    def _eval_chisqr(self, func, name, idx):
         """Plain chi-square Sum(((y-yfit)/yerr)^2) of `func` against dataset `name`'s
-        PRIMARY curve over the joint fit range. Returns (chisqr, ndata) or (None, 0)."""
+        PRIMARY curve at the points `idx` (indices into the full curve, normally the
+        joint fit's active_index). Returns (chisqr, ndata) or (None, 0)."""
         d = self.data.get(name)
-        if not d:
+        if not d or len(idx) == 0:
             return None, 0
         key = list(d.keys())[0]
         x = np.asarray(d[key]['x']); y = np.asarray(d[key]['y']); yerr = np.asarray(d[key]['yerr'])
-        xmin, xmax = self._joint_range()
-        m = (x >= xmin) & (x <= xmax)
-        x, y, yerr = x[m], y[m], yerr[m]
-        if len(x) == 0:
-            return None, 0
-        func.x = x; func.__fit__ = False
+        from Joint_Fit_Routines import chisqr_on
         try:
-            yfit = np.asarray(func.y())
+            return chisqr_on(func, x, y, yerr, idx,
+                             masked_x=bool(getattr(func, '__masked_x__', False)))
         except Exception:
             return None, 0
-        yerr = np.where(np.abs(yerr) < 1e-30, 1.0, yerr)
-        return float(np.sum(((y - yfit) / yerr) ** 2)), int(len(x))
 
     def computeModelComparison(self):
         import numpy as _np
@@ -7609,8 +7604,9 @@ class XModFit(QWidget):
         N = p_ind = 0
         for i, n in enumerate(names):
             indfit = self.dataset_fits[n]
-            ci, ni = self._eval_chisqr(indfit.func, n)
-            cj, nj = self._eval_chisqr(jf.objectives[i]['func'], n)
+            idx = jf.active_index(i)
+            ci, ni = self._eval_chisqr(indfit.func, n, idx)
+            cj, nj = self._eval_chisqr(jf.objectives[i]['func'], n, idx)
             if ci is None or cj is None:
                 self.compareTextEdit.setText(
                     'Could not evaluate dataset %s over the fit range.' % self._short_name(n))

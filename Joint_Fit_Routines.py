@@ -98,6 +98,33 @@ def _fmt_num(v):
     return '%.10g' % v
 
 
+def chisqr_on(func, x, y, yerr, idx, masked_x=False):
+    """Plain chi-square Sum(((y-f)/yerr)^2) of ``func`` on the points ``idx``.
+
+    ``idx`` are integer indices into the full ``x``/``y``/``yerr`` (see
+    JointFit.active_index). The model is evaluated on the whole window
+    x[idx.min():idx.max()+1], as JointFit.residual does, and ``idx`` is then
+    selected. With ``masked_x`` (a ``__masked_x__`` model; the objective's
+    ``yfit_masked``) the model is evaluated on the active points only, so its
+    output is already selected and must not be masked again.
+    Returns (chisqr, len(idx)).
+    """
+    idx = np.asarray(idx, dtype=int)
+    if len(idx) == 0:
+        return 0.0, 0
+    x, y, yerr = np.asarray(x), np.asarray(y), np.asarray(yerr)
+    func.__fit__ = False
+    if masked_x:
+        func.x = x[idx]
+        f = np.asarray(func.y(), dtype=float)
+    else:
+        lo, hi = int(idx.min()), int(idx.max())
+        func.x = x[lo:hi + 1]
+        f = np.asarray(func.y(), dtype=float)[idx - lo]
+    e = np.where(np.abs(yerr[idx]) < 1e-30, 1.0, yerr[idx])
+    return float(np.sum(((y[idx] - f) / e) ** 2)), int(len(idx))
+
+
 class JointFit(QObject):
     # same signature as Fit.functionCalled so the GUI callbacks are reusable
     functionCalled = pyqtSignal(dict, int, np.ndarray, str)
@@ -672,6 +699,16 @@ class JointFit(QObject):
     # ----------------------------------------------------------------- #
     #  fit driver
     # ----------------------------------------------------------------- #
+    def active_index(self, i):
+        """Integer indices (into objective ``i``'s full x) of the points actually
+        fitted: arange(imin, imax+1) filtered by the frozen window mask. Mirrors
+        Fit.active_index. imask is frozen by _set_ranges inside perform_fit, so
+        before a fit this is the whole dataset (imin=0, imax=len-1, imask=None)."""
+        obj = self.objectives[i]
+        idx = np.arange(obj["imin"], obj["imax"] + 1)
+        im = obj.get("imask")
+        return idx if im is None else idx[im[:len(idx)]]
+
     def _set_ranges(self, xmin, xmax, ranges=None):
         """Set each objective's [imin, imax] fit window.
 

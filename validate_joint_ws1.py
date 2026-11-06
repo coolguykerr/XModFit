@@ -12,6 +12,7 @@ One function per task section; later tasks append T2..T5.
         or re-fits and is printed in the report
 
     T4  warn on per-max weighting (01 6.7) and dropped sub-curves (6.14)
+    T5  joint-vs-individual chi-square on the joint fit's own active points (A1.4)
 
     QT_QPA_PLATFORM=offscreen python validate_joint_ws1.py
 """
@@ -330,6 +331,81 @@ def test_t4():
     check("T4c single-curve datasets -> no multi-curve warning",
           not any('curves' in w for w in sp1.compile(one).warnings))
 
+def test_t5():
+    """A1.4 (01 6.6): joint-vs-individual chi-square on the joint fit's own points."""
+    import numpy as np
+    from validate_joint_gls import Line, X, make_data, E
+    import Joint_Fit_Routines as J
+    from Joint_Fit_Routines import JointFit
+    ys = make_data(2)
+    err = E * np.ones_like(X)
+    mask = np.ones(len(X), bool)
+    mask[[12, 13, 20]] = False
+
+    def build(mask1=mask):
+        jf = JointFit()
+        for i in range(2):
+            jf.add_dataset('D%d' % i, funcClass=Line, x=X, y=ys[i], yerr=err,
+                           mask=(mask1 if i == 1 else None))
+            jf.objectives[i]['func'].params['b'].set(vary=True)
+        jf.build_master_params(groups=[jf.share_within('a', ['D0', 'D1'])])
+        return jf
+
+    jf = build()
+    ranges = {'D0': (X[5], X[30]), 'D1': (X[8], X[35])}
+    jf._set_ranges(X[0], X[-1], ranges)
+    o = jf.objectives[1]
+    want = np.arange(o['imin'], o['imax'] + 1)
+    want = want[mask[o['imin']:o['imax'] + 1]]
+    got = np.asarray(jf.active_index(1))
+    check("T5a active_index(1) == arange(i0,i1+1)[mask[i0:i1+1]]",
+          np.array_equal(got, want) and len(want) < o['imax'] - o['imin'] + 1,
+          (got, want))
+    check("T5a masked-out point 12 absent, 13 absent",
+          12 not in got and 13 not in got and 20 not in got)
+
+    # (b) no-cov Linear fit: summed chisqr_on == result.chisqr
+    jf = build()
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq',
+                   ranges=ranges)
+    tot = nd = 0
+    for i, ob in enumerate(jf.objectives):
+        c, n = J.chisqr_on(ob['func'], ob['x'], ob['y'], ob['yerr'],
+                           jf.active_index(i), masked_x=ob['yfit_masked'])
+        tot += c; nd += n
+    rc = jf.result.chisqr
+    check("T5b sum chisqr_on == result.chisqr to 1e-10",
+          abs(tot - rc) <= 1e-10 * abs(rc), (tot, rc))
+    check("T5b ndata == result.ndata", nd == jf.result.ndata, (nd, jf.result.ndata))
+
+    # (c) count follows the active points, not the scalar window
+    n_scalar = sum(1 for o in jf.objectives
+                   for _ in range(o['imin'], o['imax'] + 1))
+    check("T5c ndata == sum len(active_index) and < scalar-window count",
+          nd == sum(len(jf.active_index(i)) for i in range(2)) and nd < n_scalar,
+          (nd, n_scalar))
+    full = jf.active_index(0)
+    check("T5c narrower range on D0 shortens it", len(full) == 26, len(full))
+
+    # __masked_x__ model: fed active points only, not masked twice
+    class MX(Line):
+        __masked_x__ = True
+    jm = JointFit()
+    for i in range(2):
+        jm.add_dataset('D%d' % i, funcClass=MX, x=X, y=ys[i], yerr=err, mask=mask)
+        jm.objectives[i]['func'].params['b'].set(vary=True)
+    jm.build_master_params(groups=[jm.share_within('a', ['D0', 'D1'])])
+    jm.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq')
+    t = 0
+    for i, ob in enumerate(jm.objectives):
+        c, n = J.chisqr_on(ob['func'], ob['x'], ob['y'], ob['yerr'],
+                           jm.active_index(i), masked_x=ob['yfit_masked'])
+        t += c
+    check("T5d __masked_x__ model: chisqr_on == result.chisqr",
+          ob['yfit_masked'] and abs(t - jm.result.chisqr) <= 1e-10 * jm.result.chisqr,
+          (t, jm.result.chisqr))
+
+
 def test_t3_gui():
     """The GUI surfaces a ShareMismatchError instead of dying in a Qt slot."""
     import numpy as np
@@ -403,7 +479,7 @@ def test_t3_gui():
 
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
-    for t in (test_t1, test_t2, test_t3, test_t4, test_t3_gui):
+    for t in (test_t1, test_t2, test_t3, test_t4, test_t5, test_t3_gui):
         try:
             t()
         except Exception as ex:
