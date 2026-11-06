@@ -91,8 +91,9 @@ except ImportError:
 # variant and is treated identically here; XLayersPDB_XPR is the Julia-backed
 # smoothed variant, whose theta/phi carry the same [0,180]x[0,360] fundamental
 # domain and so need the same wrapping and orientation seeding.
-_PDB_FUNCNAMES = ('XLayersPDB', 'XLayersPDB_box', 'XLayersPDB_G', 'XLayersPDB_H',
-                  'XLayersPDB_dev_smooth', 'XLayersPDB_XPR')
+PDB_FUNCNAMES = ('XLayersPDB', 'XLayersPDB_box', 'XLayersPDB_G', 'XLayersPDB_H',
+                 'XLayersPDB_dev_smooth', 'XLayersPDB_XPR')
+_PDB_FUNCNAMES = PDB_FUNCNAMES
 
 
 # --------------------------------------------------------------------------- #

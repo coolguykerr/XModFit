@@ -55,6 +55,7 @@ import json
 import hashlib
 from emcee import backends
 from lmfit.customhdf import CustomHDFBackend
+from lmfit.minimizer import PDB_FUNCNAMES
 from joint_fit_panel import JointFitPanel, NameDelegate
 from Image2DWidget import Image2DWidget
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
@@ -2631,7 +2632,7 @@ class XModFit(QWidget):
             self._mcmc_is_joint = False
         return super(XModFit, self).eventFilter(obj, event)
 
-    _PDB_MCMC_FUNCS = ('XLayersPDB', 'XLayersPDB_box', 'XLayersPDB_dev_smooth')
+    _PDB_MCMC_FUNCS = PDB_FUNCNAMES
 
     def _mcmc_funcname(self):
         """Function name driving the MCMC backend type + angle handling.

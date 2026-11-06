@@ -1,6 +1,7 @@
 import numpy as np
 from lmfit import fit_report, Minimizer, conf_interval, printfuncs
 from PyQt5.QtCore import pyqtSignal, QObject
+from lmfit.minimizer import PDB_FUNCNAMES
 from PyQt5.QtWidgets import QMessageBox
 import traceback
 import os
@@ -511,7 +512,7 @@ class Fit(QObject):
                             emcee_burn=0, reuse_sampler=False, emcee_thin=1,backend=None,seed_temperature=1.0):
 
         funcname = type(self.func).__name__
-        if funcname in ('XLayersPDB', 'XLayersPDB_dev_smooth', 'XLayersPDB_XPR'):
+        if funcname in PDB_FUNCNAMES:
             if any([self.result.params[key].stderr is None for key in self.result.params.keys() if
                     self.result.params[key].vary == 1]):
                 fiterr = np.zeros(len([self.result.params[key].value for key in self.result.params.keys() if
