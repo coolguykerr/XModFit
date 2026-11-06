@@ -31,8 +31,9 @@ parameter vectors:
     (g) single model, mask on: in-process and 2-worker-pool lnprob == serial
     (h) joint no-cov, mask on: the same
     (i) mask on: lnprob differs from mask off
-    (j) mask=None: lnprob == the parent commit's pdb_logprob / pdb_joint_logprob
-        (loaded from git, 63e984e), not the new code run twice
+    (j) mask=None: lnprob == the parent commit's pdb_logprob / pdb_joint_logprob,
+        frozen in tests/fixtures/seed_mask_parent_ref.json (no git needed;
+        regenerate deliberately with tests/fixtures/make_seed_mask_parent_ref.py)
     (k) a __masked_x__ model through both log-probs is not masked twice
 
     QT_QPA_PLATFORM=offscreen python validate_seed_mask.py
@@ -298,28 +299,35 @@ def check_masked_x():
 
 
 # ------------------------------------------------- A1.18: sampling objectives --
-PARENT = '63e984e'      # last commit before A1.18 touched pdb_logprob / pdb_joint_logprob
+# Frozen mask=None reference: lnprob from the parent commit's pdb_logprob /
+# pdb_joint_logprob (before A1.18) at the fixed vectors below. Regenerate only
+# deliberately, with tests/fixtures/make_seed_mask_parent_ref.py.
+PARENT_REF = os.path.join(ROOT, 'tests', 'fixtures', 'seed_mask_parent_ref.json')
+PARENT_TOL = 1e-12
 
 
-def load_parent(modname):
-    """Import the parent commit's copy of `modname` under a private name, or None."""
-    import subprocess
-    import importlib.util
-    import tempfile
+def load_parent_ref():
+    import json
     try:
-        src = subprocess.run(['git', 'show', '%s:%s.py' % (PARENT, modname)], cwd=ROOT,
-                             capture_output=True, check=True).stdout
-    except Exception as exc:                                  # no git / no history
-        print('parent %s unavailable: %s' % (modname, exc))
+        with open(PARENT_REF, encoding='utf-8') as fh:
+            return json.load(fh)
+    except Exception as exc:
+        print('parent reference unavailable: %s' % exc)
         return None
-    d = tempfile.mkdtemp(prefix='seedmask_')
-    path = os.path.join(d, '_parent_%s.py' % modname)
-    with open(path, 'wb') as fh:
-        fh.write(src)
-    spec = importlib.util.spec_from_file_location('_parent_%s' % modname, path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+
+
+def parent_ref_check(name, pref, key, var_names, thetas, got):
+    """(j): same vectors as the fixture, then got == the frozen parent lnprob."""
+    ref = pref.get(key) if pref else None
+    if ref is None:
+        check(name, False, 'fixture %s missing' % PARENT_REF)
+        return
+    same_vecs = (ref['var_names'] == list(var_names) and len(ref['thetas']) == len(thetas)
+                 and all(np.allclose(a, b, rtol=1e-14, atol=0) for a, b in zip(ref['thetas'], thetas)))
+    d = rel_list(got, ref['lnprob'])
+    check(name, same_vecs and d <= PARENT_TOL,
+          'max rel %.3e vs %s (parent %s); vectors match fixture: %s'
+          % (d, os.path.basename(PARENT_REF), pref.get('parent_commit', '?'), same_vecs))
 
 
 class _FakePool:
@@ -450,17 +458,11 @@ def check_sampling(x, y, e, imin, n, masks_joint):
     ser0 = serial_lnprob(fit_off.residual, fit_off.emcee_params, vn, thetas)
     check("(i) single model, mask off: parallel == serial lnprob",
           rel_list(off, ser0) < REL, 'max rel %.3e' % rel_list(off, ser0))
-    old = load_parent('pdb_logprob')
-    if old is not None:
-        model, xs, ys, es = iargs0[:4]
-        ref = old.PdbLogProb(vn, obj0.bounds, obj0.fit_scale, obj0.is_weighted,
-                             has_lnsigma=obj0.has_lnsigma, model=model, x=xs, y=ys, err=es)
-        refv = [float(ref(t)) for t in thetas]
-        check("(j) single model, mask=None: lnprob == parent commit's PdbLogProb (exact)",
-              rel_list(off, refv) == 0.0 and (len(iargs0) <= 4 or iargs0[4] is None),
-              'max rel %.3e' % rel_list(off, refv))
-    else:
-        check("(j) single model: parent pdb_logprob loadable", False, 'git show failed')
+    pref = load_parent_ref()
+    check("(j) single model, mask=None: minimizer ships no mask",
+          len(iargs0) <= 4 or iargs0[4] is None, '%d initargs' % len(iargs0))
+    parent_ref_check("(j) single model, mask=None: lnprob == frozen parent-commit PdbLogProb",
+                     pref, 'single', vn, thetas, off)
 
     # --------------------------------------------------------- joint, no cov --
     jf = make_joint(x, y, e, masks_joint)
@@ -484,19 +486,11 @@ def check_sampling(x, y, e, imin, n, masks_joint):
     d = rel_list(inp, off)
     check("(i) joint: mask-on lnprob differs from mask-off",
           np.isfinite(d) and d > 1e-6, 'max rel diff %.3e' % d)
-    oldj = load_parent('pdb_joint_logprob')
-    if oldj is not None:
-        models, datas = jargs0
-        ref = oldj.JointLogProb(vn, jobj0.bounds, jobj0.fit_scale, jobj0.is_weighted,
-                                jobj0.param_map, jobj0.priors, jf_off.emcee_params.copy(),
-                                has_lnsigma=jobj0.has_lnsigma,
-                                models=models, datas=[tuple(dd[:3]) for dd in datas])
-        refv = [float(ref(t)) for t in thetas]
-        check("(j) joint, mask=None: lnprob == parent commit's JointLogProb (exact)",
-              rel_list(off, refv) == 0.0 and all(len(dd) == 3 or dd[3] is None for dd in datas),
-              'max rel %.3e' % rel_list(off, refv))
-    else:
-        check("(j) joint: parent pdb_joint_logprob loadable", False, 'git show failed')
+    models, datas = jargs0
+    check("(j) joint, mask=None: every datas entry carries mask None",
+          all(len(dd) == 3 or dd[3] is None for dd in datas), '%d datasets' % len(datas))
+    parent_ref_check("(j) joint, mask=None: lnprob == frozen parent-commit JointLogProb",
+                     pref, 'joint', vn, thetas, off)
 
 
 def check_masked_x_logprob():
