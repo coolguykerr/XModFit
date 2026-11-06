@@ -84,6 +84,8 @@ Each item is specified in the fix list. All are small.
 
 **Done when:** each item has a regression check in the WS0 runner.
 
+**Status: Done 2026-11-06 (A1.1, A1.3, A1.4, A1.17, B2a, 01 §6.2/3/6/7/8/14, plus A1.18 found during execution); full-run table in `12-work-package-preaudit.md`. Full run: 60 PASS, 0 FAIL, 0 KNOWN-FAIL, 1 TIMEOUT (`validate_xpr.py` at the 600 s default under a slow machine; PASS alone in 622 s).**
+
 ## WS2 — The reporting contract: statistics the program computes for the user
 
 New module **`joint_fit_stats.py`** (Qt-free). It consumes a fitted `JointFit`. Every

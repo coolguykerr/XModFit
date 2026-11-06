@@ -588,3 +588,125 @@ PASS                      278.2  cmcars    validate_xpr.py                      
 
 summary: 2 KNOWN-FAIL, 57 PASS
 ```
+
+### 2026-11-06 -- WS1 (joint-path correctness): recorded
+
+Plan: `16-plan-ws1-joint-correctness.md`. Commits, oldest first:
+
+| item | commit |
+|---|---|
+| A1.1 one PDB model-name list | `a1717a6` |
+| B2a / 01 §6.2-3 footprint term from `.npz` sidecars | `1b83aae` |
+| 01 §6.8 share-group mismatches (refuse on bounds/vary, warn on values) | `e177e2f`, GUI guard `9518ef9` |
+| 01 §6.7 / §6.14 warnings (`Linear w/o error`, dropped sub-curves) | `6b727d0` |
+| A1.4 model comparison on the fit's own active points (01 §6.6) | `e1e8b9f` |
+| A1.3 seed scans honour the frozen column mask | `63e984e` |
+| A1.18 (new) parallel MCMC sampling honours the frozen column mask | `bfdd234`, `6ffcff9` |
+| A1.17 two stale harnesses brought up to date | `6ed34fc` |
+
+Full run: `tests/run_all.py` (no flags), log `tests/_logs/ws1_full_run.txt` (git-ignored). Sum of per-harness times
+about 3,600 s (WS0 baseline 1,856 s): this machine ran roughly 1.5-2x slower than at the baseline on every row.
+Result: **60 PASS, 1 TIMEOUT, 0 FAIL, 0 KNOWN-FAIL**; exit code **1**, solely because `validate_xpr.py` hit the runner's
+600 s timeout (baseline 295 s; same slowdown). The XPR validator does not touch any WS1 code. Re-run alone with
+`--only validate_xpr --timeout 1500`: **PASS** in 622 s (`tests/_logs/ws1_xpr_rerun.txt`). So the WS1 acceptance
+"exit 0, zero KNOWN-FAIL" is met on the substance (zero KNOWN-FAIL, no failing check) but NOT as a single exit-0 run;
+the registry timeout for `validate_xpr.py` (default 600 s) is too tight under load, a runner setting left for the user to decide.
+The two baseline KNOWN-FAILs (`smoke_fit`, `verify_jointmcmc`) now PASS. New rows since the baseline: `validate_joint_ws1.py`
+and `validate_seed_mask.py`.
+
+```
+status                  seconds  interp    harness                                            note
+PASS                       25.9  cmcars    tests/recovered/check_aproj.py                     smoke; external: XPR-main/test_data, sibling of the repo
+PASS                      534.3  cmc-py39  tests/recovered/compare_models.py                  smoke; slow
+PASS                        2.7  cmc-py39  tests/recovered/repro_backend.py                   smoke
+PASS                        3.7  cmc-py39  tests/recovered/repro_full.py                      
+PASS                       11.1  cmc-py39  tests/recovered/repro_raw.py                       smoke
+PASS                        2.8  cmc-py39  tests/recovered/repro_switch.py                    
+PASS                       11.6  cmc-py39  tests/recovered/repro_tab.py                       smoke
+PASS                        1.9  cmc-py39  tests/recovered/smoke_fit.py                       
+PASS                        4.5  cmc-py39  tests/recovered/smoke_merge.py                     
+PASS                       22.1  cmc-py39  tests/recovered/test_autocorr_window.py            smoke
+PASS                        2.8  cmc-py39  tests/recovered/test_gui_construct.py              smoke
+PASS                       22.1  cmcars    tests/recovered/test_gui_listing.py                
+PASS                        5.3  cmc-py39  tests/recovered/test_gui_switch.py                 
+PASS                      558.0  cmc-py39  tests/recovered/test_joint_abort.py                slow
+PASS                      174.1  cmc-py39  tests/recovered/test_joint_emcee.py                
+PASS                       63.1  cmc-py39  tests/recovered/test_joint_parallel.py             
+PASS                        2.5  cmc-py39  tests/recovered/test_logprob.py                    
+PASS                        5.2  cmc-py39  tests/recovered/test_pdb_persist.py                
+PASS                        2.5  cmc-py39  tests/recovered/test_phase1.py                     
+PASS                        1.8  cmc-py39  tests/recovered/test_pickle_fit.py                 smoke
+PASS                      526.1  cmcars    tests/recovered/test_xpr_fitting.py                external: XPR-main/test_data, sibling of the repo; slow
+PASS                       65.6  cmcars    tests/recovered/test_xpr_stage1.py                 external: XPR-main/test_data, sibling of the repo
+PASS                      170.7  cmc-py39  tests/recovered/validate_parallel_sampling.py      
+PASS                       19.1  cmc-py39  tests/recovered/validate_parallel_seed.py          
+PASS                        5.6  cmc-py39  tests/recovered/verify_banner_lifecycle.py         
+PASS                        5.1  cmc-py39  tests/recovered/verify_detail_switch.py            
+PASS                        2.7  cmc-py39  tests/recovered/verify_fingerprint.py              
+PASS                        4.1  cmc-py39  tests/recovered/verify_joint_4ds_parallel.py       
+PASS                        5.1  cmc-py39  tests/recovered/verify_joint_detail_and_legend.py  
+PASS                        1.5  cmc-py39  tests/recovered/verify_joint_mixed.py              
+PASS                        1.5  cmc-py39  tests/recovered/verify_joint_neither.py            
+PASS                        1.5  cmc-py39  tests/recovered/verify_joint_orient.py             
+PASS                       16.4  cmc-py39  tests/recovered/verify_joint_parallel_edge.py      
+PASS                        4.4  cmc-py39  tests/recovered/verify_joint_parallel_sample.py    
+PASS                        2.1  cmc-py39  tests/recovered/verify_joint_seed_worker.py        
+PASS                        2.4  cmc-py39  tests/recovered/verify_jointmcmc.py                
+PASS                        4.3  cmc-py39  tests/recovered/verify_jointwindow.py              
+PASS                        5.2  cmc-py39  tests/recovered/verify_legend.py                   
+PASS                        5.3  cmc-py39  tests/recovered/verify_multifit_selection.py       
+PASS                       25.6  cmc-py39  tests/recovered/verify_plotting_B.py               
+PASS                        1.3  cmc-py39  tests/recovered/verify_reuse_wrap.py               
+PASS                        2.8  cmc-py39  tests/recovered/verify_seed_gui.py                 
+PASS                        1.1  cmc-py39  tests/recovered/verify_seed_helpers.py             
+PASS                        1.9  cmc-py39  tests/recovered/verify_seedmode.py                 
+PASS                        0.4  cmc-py39  tests/test_harness.py                              
+PASS                       12.0  cmc-py39  tests/test_run_all.py                              
+PASS                       27.3  cmc-py39  validate_column_limits.py                          
+PASS                      465.3  cmcars    validate_fastscan.py                               slow
+PASS                       27.7  cmc-py39  validate_fastscan_gui.py                           
+PASS                        1.1  cmc-py39  validate_fit_mask.py                               
+PASS                        2.4  cmc-py39  validate_gid2d.py                                  
+PASS                       53.9  cmc-py39  validate_gid2d_gui.py                              
+PASS                        1.4  cmc-py39  validate_joint_gls.py                              
+PASS                        1.1  cmc-py39  validate_joint_mask.py                             
+PASS                        5.2  cmc-py39  validate_joint_ws1.py                              
+PASS                       27.0  cmc-py39  validate_jointfit_gui.py                           
+PASS                        1.8  cmc-py39  validate_masked_x.py                               
+PASS                        7.1  cmc-py39  validate_perdataset_fit.py                         
+PASS                       31.6  cmc-py39  validate_seed_mask.py                              
+PASS                        7.0  cmc-py39  validate_xlayerspdb_joint.py                       
+TIMEOUT                   600.6  cmcars    validate_xpr.py                                    external: XPR-main/test_data, sibling of the repo; slow
+```
+
+New fix-list ID: A1.18 (done). A1.17 completed. Premise corrections: decision X2 (see `16-plan` Decisions and `01-joint-fit.md` §6.8).
+
+Consequences for the user:
+- Discard any `.h5` MCMC backend from a pre-A1.18 parallel run (`emcee_cores>1`) that used a column mask: it was sampled under the unmasked likelihood but carries a matching fingerprint.
+- `tests/fixtures/make_seed_mask_parent_ref.py` pins `PARENT=63e984e`; re-point it after the A0.6 history rewrite (dropping `7942458`) before regenerating `tests/fixtures/seed_mask_parent_ref.json`.
+
+#### WS1 deferred minors
+
+One line each, from the review ledger; the final review will triage them.
+- T1: `Fit_Routines.py:4` import sits between the PyQt5 imports.
+- T1: `validate_joint_ws1.py:41,43` pin tuple ordering with `==`.
+- T1: no direct test that `_mcmc_is_pdb()` is True for XPR.
+- T2: T2c tests the `v`-only direction, not `var_fwhm`-only.
+- T2: `len(v) == len(x)` is not validated at load; `v` with `var_fwhm == 0` is silently footprint-off.
+- T3: the GUI shows `jf.warnings` only through the report text (WS2 surfacing).
+- T3: no GUI-level test of the mismatch path beyond what review round 1 added.
+- T3: after a refused `.jpar`/`.par` load, `self.jointFit` stays the previous one while the panel shows the loaded spec.
+- T3: the `.jpar` refusal path has no headless test (same pattern as the tested `loadParIntoJoint`).
+- T4: `Joint_Fit_Routines.py` ~1104 has a stray whitespace run inside a condition.
+- T4: no test that the `Linear w/o error` warning is suppressed with covariance attached or with a single dataset.
+- T4: `joint_fit_spec.py:64` recomputes the first key that `_primary_curve` could return.
+- T5: `chisqr_on` window `idx.min..idx.max` vs `imin..imax` differs when a mask drops window-edge points (no current model affected; no edge-mask test).
+- T5: T5d checks `yfit_masked` only on the last loop variable.
+- T5: the `_eval_chisqr` / `computeModelComparison` wiring is covered only through `validate_jointfit_gui`.
+- T5: `xmodfit._joint_range` is now dead code.
+- T5: under covariance the comparison scores raw `y`/`yerr` (pre-existing, intended); documented in `01` §6.6 and A1.4.
+- T6: `validate_seed_mask` check (d) is near-tautological (brief-mandated form).
+- T6: `pdb_joint_seed_worker.py:177` uses `or [None]*` rather than an explicit `is None`.
+- T6b: the `yfit_masked=True` sampling branch is tested only with synthetic models (no PDB `__masked_x__` model exists).
+- T6b: `mask[:len(y)]` truncation hides a length mismatch (inherited convention).
+- T7: `verify_jointmcmc` does not exercise the stride-thinning branch of `_corner_render_data`.

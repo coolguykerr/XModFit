@@ -123,7 +123,7 @@ encode one machine's absolute conda path. *Fix:* `git checkout -- .idea/`.
 
 ## A1. Correctness fixes
 
-**A1.1 One source of truth for the PDB model-name list.** [crash]
+**A1.1 One source of truth for the PDB model-name list.** [crash] **DONE 2026-11-06 (WS1, `a1717a6`).**
 Three tuples disagree, all three uncommitted: `lmfit/minimizer.py:94` (6 names),
 `xmodfit.py:2634` (3, drops `_G`/`_H`/`_XPR`), `Fit_Routines.py:491` (a different 3, drops
 `_box`). Consequence: for `XLayersPDB_XPR`/`_G`/`_H` the engine builds a `CustomSampler`
@@ -132,6 +132,7 @@ while the GUI supplies a stock emcee `HDFBackend`; `get_autocorr_time` then pass
 `except` list at `minimizer.py:2300`. Found independently by three agents. XPR is under
 active development, so this bites soonest. *Fix:* one module-level constant, imported by
 all three sites.
+*Done:* `lmfit.minimizer.PDB_FUNCNAMES` (the old `_PDB_FUNCNAMES` kept as an alias); `xmodfit._PDB_MCMC_FUNCS` and `Fit_Routines` import it. Regression: `validate_joint_ws1.py` T1.
 
 **A1.2 `mkey` used before assignment in `_G`, `_H`, `_box`.** [crash]
 `self.__d__[mkey]` precedes `mkey`'s assignment (`XLayersPDB_G.py:696` vs `:699`,
@@ -140,18 +141,20 @@ a loop that runs *only when `__fit__` is False*, and `Joint_Fit_Routines.py:452`
 `__fit__ = True` — so none of the three can be joint-fitted. *Fix:* hoist the assignment,
 or drop the variants (D1 — if they go, this item disappears).
 
-**A1.3 Seed workers ignore the per-column fit mask.** [wrong-result]
+**A1.3 Seed workers ignore the per-column fit mask.** [wrong-result] **DONE 2026-11-06 (WS1, `63e984e`).**
 `Fit.residual` applies the mask (`Fit_Routines.py:291-296`) and `JointFit.residual` applies
 `obj["imask"]` (`Joint_Fit_Routines.py:552-558`), but `pdb_seed_worker`,
 `pdb_joint_seed_worker.JointSeedScan.residual` and `_build_orientation_seed`'s slices all
 use bare `imin:imax`. The "parallel == serial bit-for-bit" validation is therefore only
 true while no column limit is active — and the two features were never exercised together.
 *Fix:* thread the frozen mask into both workers.
+*Done:* `pdb_seed_worker` and `pdb_joint_seed_worker` take the window-restricted frozen mask plus a `yfit_masked` flag (evaluate on the true window, then select fit/y/err active points; a `__masked_x__` model is not masked twice); `Minimizer.emcee`'s seed block and `JointFit._build_orientation_seed` pass them. `mask=None` is byte-identical to before. Regression: `validate_seed_mask.py` (serial == parallel with a mask, differs from mask-off).
 
-**A1.4 `_eval_chisqr` ignores per-dataset ranges and column masks.** [wrong-result]
+**A1.4 `_eval_chisqr` ignores per-dataset ranges and column masks.** [wrong-result] **DONE 2026-11-06 (WS1, `e1e8b9f`).**
 The joint-vs-individual model comparison masks with the scalar Xrange only, so the two
 chi2 values are computed on different point sets whenever `#FitRange=` or a column limit
 is in use. *Fix:* route it through the same `imask_for`/`active_index` path as the fit.
+*Done:* `JointFit.active_index(i)` and module function `chisqr_on`; `_eval_chisqr` evaluates both models on the joint fit's own active points. Under covariance the comparison scores both models on raw `y`/`yerr` (a plain chi-square), not `y_corr`/`sigma_meas`; that was already the case and is intended (see `01-joint-fit.md` §6.6). `xmodfit._joint_range` is now dead code. Regression: `validate_joint_ws1.py` T5. Superseded by WS2 §2.1 when that lands.
 
 **A1.5 Mask + `__masked_x__` breaks the 1-D plot.** [crash, modal dialog]
 With both active, `self.fit.yfit` is shorter than `self.fit.x[imin:imax+1]`, but
@@ -258,7 +261,7 @@ in `tests/run_all.py` is dropped.
 *Remains:* the hard-coded `T:` path itself (still tried first when reachable), and that
 without the T: file, section 6 packs a round-tripped raw map rather than the original.
 
-**A1.17 Two recovered harnesses are stale.** [hygiene] **DONE 2026-11-06 (WS1 Task 7).**
+**A1.17 Two recovered harnesses are stale.** [hygiene] **DONE 2026-11-06 (WS1 Task 7, `6ed34fc`).**
 `tests/recovered/smoke_fit.py` reads `scaler_parameters['chi2_per_N_reported']`, which GID2D
 now emits as `chi2_per_N_reported_LINEAR` / `chi2_per_N_active_only_LINEAR` (KeyError at the
 first print). `tests/recovered/verify_jointmcmc.py` binds a fixed list of XModFit methods
@@ -272,7 +275,15 @@ and active-only chi2/N the harness meant. Its two `chi2_frac_in_top_*` keys were
 `chi2_frac_top_*_px_LINEAR`, and `min_sigma_over_median_sigma` no longer exists (the report now
 gives `median_sigma_over_I`, a different quantity; the harness only prints it).
 `_corner_render_data` is a render-only stride thinning to `_CORNER_MAX_SAMPLES` rows;
-the harness now binds it and sets the class constant on its `Fake`. Both `known` entries dropped.
+the harness now binds it and sets the class constant on its `Fake`. Both `known` entries dropped; the WS1 full run has zero KNOWN-FAIL rows.
+Residual: `verify_jointmcmc` does not exercise the stride-thinning branch of `_corner_render_data`.
+
+**A1.18 Parallel MCMC sampling ignored the per-column fit mask.** [wrong-result] **DONE 2026-11-06 (WS1 Task 6b, `bfdd234`, `6ffcff9`).**
+Found by WS1 while fixing A1.3. With a column mask and `emcee_cores>1`, the parallel sampling objectives (`PdbLogProb` via `pdb_logprob.init_worker`, and `JointLogProb` via `pdb_joint_logprob.init_worker`, attached by `JointFit._attach_joint_parallel`) evaluated unmasked data, so the posterior was sampled from a different likelihood than the serial path. *Done:* both take the frozen window mask plus a `__masked_x__` flag and apply it exactly as `Fit.residual` / `JointFit.residual` do; the seed workers and log-probs share `apply_mask` / `prepare_datas`; `yfit_masked` is derived (`mask is not None and func.__masked_x__`) at both seed call sites rather than read from a stored flag. `mask=None` is byte-identical to the parent. Regression: `validate_seed_mask.py` (g)-(k); check (j) compares against `tests/fixtures/seed_mask_parent_ref.json`, so it has no git-history dependency.
+*Consequences to act on:*
+- **Discard old `.h5` backends.** A backend written by a pre-A1.18 parallel run that used a column mask was sampled under the wrong (unmasked) likelihood, yet it carries a matching MCMC fingerprint and will resume without complaint. Delete such backends and re-run.
+- **Re-point the fixture generator after A0.6.** `tests/fixtures/make_seed_mask_parent_ref.py` pins `PARENT=63e984e`. Dropping `7942458` (A0.6) rewrites that hash, so re-point `PARENT` before anyone regenerates the fixture. The committed fixture itself is unaffected.
+- Open: the `yfit_masked=True` sampling branch is only tested with synthetic models (no PDB model declares `__masked_x__`); `mask[:len(y)]` truncation hides a length mismatch (inherited convention).
 
 ## A2. Data folder
 

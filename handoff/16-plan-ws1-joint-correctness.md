@@ -74,20 +74,20 @@ Baseline: `handoff/12-work-package-preaudit.md` "BASELINE (re-recorded 2026-11-0
 - Produces: `lmfit.minimizer.PDB_FUNCNAMES: tuple[str, ...]`, the six current names. B8/D1
   (WS7) shrinks it to three when the variants are retired.
 
-- [ ] **Step 1: Confirm the three sites mean the same set.** `minimizer.py` uses it for angle
+- [x] **Step 1: Confirm the three sites mean the same set.** `minimizer.py` uses it for angle
   wrapping, seeding and `CustomSampler`. `xmodfit.py:2658` uses it for backend choice.
   `Fit_Routines.py:514` uses it for the initial `fiterr` walker spread. If any site is found
   to intend a *different* set, stop and report it rather than unifying.
-- [ ] **Step 2: Write the failing check.**
+- [x] **Step 2: Write the failing check.**
   - `T1`: `Fit_Routines` and `xmodfit` (import `xmodfit` with the xraydb stub and an
     offscreen `QApplication`) both hold exactly `lmfit.minimizer.PDB_FUNCNAMES`;
   - `'XLayersPDB_XPR' in xmodfit.XModFit._PDB_MCMC_FUNCS`;
   - `'XLayersPDB_box'` is in the set `Fit_Routines` tests. Read it via a module constant
     the edit introduces (`Fit_Routines.PDB_FUNCNAMES`).
-- [ ] **Step 3: Run it.** `"C:/Users/kerr/.conda/envs/cmc-py39/python.exe" validate_joint_ws1.py`
+- [x] **Step 3: Run it.** `"C:/Users/kerr/.conda/envs/cmc-py39/python.exe" validate_joint_ws1.py`
   → FAIL.
-- [ ] **Step 4: Make the three edits.** Re-run → PASS. Run `--quick` → exit 0.
-- [ ] **Step 5: Commit** — `A1.1: one PDB model-name list, imported by all three sites`.
+- [x] **Step 4: Make the three edits.** Re-run → PASS. Run `--quick` → exit 0.
+- [x] **Step 5: Commit** — `A1.1: one PDB model-name list, imported by all three sites`.
 
 ### Task 2: Footprint covariance term reachable from sidecars (B2a, 01 §6 items 2–3)
 
@@ -102,7 +102,7 @@ Baseline: `handoff/12-work-package-preaudit.md` "BASELINE (re-recorded 2026-11-0
   `load_dataset_cov(...)` passes `v` / `var_fwhm` through for the `.npz` route when present.
   The `_c_factors.txt` route is unchanged.
 
-- [ ] **Step 1: Write the failing checks (`T2`).** Into `tests/_logs/`, write three `.npz`
+- [x] **Step 1: Write the failing checks (`T2`).** Into `tests/_logs/`, write three `.npz`
   files. They use the `validate_joint_mask.py` sidecar shape (`x`, `y_corr`,
   `sigma_meas`, `k_index`, `SF_LIST`, `Sigma_logc`) for 40 points.
   - **(a)** No footprint keys. `load_dataset_cov` must have neither `v` nor `var_fwhm`, and
@@ -111,9 +111,9 @@ Baseline: `handoff/12-work-package-preaudit.md` "BASELINE (re-recorded 2026-11-0
     and `jf._L @ jf._L.T` equals `build_full_covariance(..., v=..., var_fwhm=4e-4)` to
     relative `1e-12`.
   - **(c)** Only `v`. Raises `ValueError` naming the file.
-- [ ] **Step 2: Run it** → (b) and (c) FAIL.
-- [ ] **Step 3: Implement.** Re-run → PASS. Run `--quick` → exit 0.
-- [ ] **Step 4: Commit** — `B2a: .npz sidecars carry the shared-beam footprint term into the joint fit`.
+- [x] **Step 2: Run it** → (b) and (c) FAIL.
+- [x] **Step 3: Implement.** Re-run → PASS. Run `--quick` → exit 0.
+- [x] **Step 4: Commit** — `B2a: .npz sidecars carry the shared-beam footprint term into the joint fit`.
 
 ### Task 3: Share-group mismatches and `JointFit.warnings` (01 §6.8)
 
@@ -140,7 +140,7 @@ Baseline: `handoff/12-work-package-preaudit.md` "BASELINE (re-recorded 2026-11-0
     In that case, append a warning saying the first endpoint's bounds were used.
     Compare `±inf` by equality; never `nan`.
 
-- [ ] **Step 1: Write the failing checks (`T3`).** Use the `Line` model from
+- [x] **Step 1: Write the failing checks (`T3`).** Use the `Line` model from
   `validate_joint_gls.py`, with 3 datasets sharing `a`.
   - **(a)** Same bounds, different start values → builds; exactly 1 warning, naming all
     three datasets.
@@ -151,11 +151,11 @@ Baseline: `handoff/12-work-package-preaudit.md` "BASELINE (re-recorded 2026-11-0
   - **(d)** `vary` differs → `ShareMismatchError`.
   - **(e)** Calling `build_master_params` twice → `len(jf.warnings)` does not grow.
   - **(f)** After `perform_fit` on (a), the report text contains `"Joint-fit warnings:"`.
-- [ ] **Step 2: Run** → FAIL.
-- [ ] **Step 3: Implement.** Re-run → PASS. Also run `validate_joint_gls.py`,
+- [x] **Step 2: Run** → FAIL.
+- [x] **Step 3: Implement.** Re-run → PASS. Also run `validate_joint_gls.py`,
   `validate_joint_mask.py` and `validate_jointfit_gui.py`: their joint fits must still
   build, because they seed equal bounds. Then `--quick` → exit 0.
-- [ ] **Step 4: Commit** — `01§6.8: share-group bound/vary mismatches refuse, value mismatches warn`.
+- [x] **Step 4: Commit** — `01§6.8: share-group bound/vary mismatches refuse, value mismatches warn`.
 
 ### Task 4: Warn on the two silent joint weightings (01 §6.7, §6.14)
 
@@ -176,13 +176,13 @@ Baseline: `handoff/12-work-package-preaudit.md` "BASELINE (re-recorded 2026-11-0
 - **Decision X1 (recommended, pre-ruled):** warn, do not change the weighting. Changing it
   would alter results silently. WS2's objective label states the weighting explicitly.
 
-- [ ] **Step 1: Write the failing checks (`T4`).**
+- [x] **Step 1: Write the failing checks (`T4`).**
   - **(a)** 2-dataset no-cov fit under `Linear w/o error` → the warning is present.
   - **(b)** The same fit under `Linear` → no such warning.
   - **(c)** `JointFitSpec.compile` given a `data[name]` dict with two curve keys →
     warning present, and only the first curve's points are fitted.
-- [ ] **Step 2: Run** → FAIL. **Step 3: Implement.** Re-run → PASS. Then `--quick` → exit 0.
-- [ ] **Step 4: Commit** — `01§6.7/§6.14: warn on per-max weighting and on dropped sub-curves`.
+- [x] **Step 2: Run** → FAIL. **Step 3: Implement.** Re-run → PASS. Then `--quick` → exit 0.
+- [x] **Step 4: Commit** — `01§6.7/§6.14: warn on per-max weighting and on dropped sub-curves`.
 
 ### Task 5: Joint-vs-individual chi-square on the fitted points (A1.4, 01 §6.6)
 
@@ -206,7 +206,7 @@ Baseline: `handoff/12-work-package-preaudit.md` "BASELINE (re-recorded 2026-11-0
     is evaluated on the active points only and not masked again (Review focus 3).
   - `_eval_chisqr(func, name, idx)` keeps returning `(chisqr, ndata)`.
 
-- [ ] **Step 1: Write the failing checks (`T5`).**
+- [x] **Step 1: Write the failing checks (`T5`).**
   - **(a)** Build a 2-dataset `JointFit` with per-dataset `ranges` and a mask on dataset 1.
     `active_index(1)` equals the hand-built `arange(i0, i1+1)[mask[i0:i1+1]]`.
   - **(b)** After a no-cov `Linear` fit, `chisqr_on(obj.func, ..., active_index(i))`, summed
@@ -214,10 +214,10 @@ Baseline: `handoff/12-work-package-preaudit.md` "BASELINE (re-recorded 2026-11-0
     max-normalisation cancels under `Linear`, so the sums match.
   - **(c)** With a narrower range on one dataset, the count `ndata` equals
     `len(active_index)`, not the scalar-window count.
-- [ ] **Step 2: Run** → FAIL. **Step 3: Implement**, including the `xmodfit.py` call-site
+- [x] **Step 2: Run** → FAIL. **Step 3: Implement**, including the `xmodfit.py` call-site
   change. Re-run → PASS. Run `validate_jointfit_gui.py`, which drives
   `computeModelComparison`, then `--quick` → exit 0.
-- [ ] **Step 4: Commit** — `A1.4: model comparison evaluates both models on the joint fit's own active points`.
+- [x] **Step 4: Commit** — `A1.4: model comparison evaluates both models on the joint fit's own active points`.
 
 ### Task 6: Seed scans honour the frozen column mask (A1.3)
 
@@ -238,7 +238,7 @@ Baseline: `handoff/12-work-package-preaudit.md` "BASELINE (re-recorded 2026-11-0
   `y[mask]`, `e[mask]` — the order `JointFit.residual` uses. Skip the fit-side selection
   when `yfit_masked`. `mask=None` must reproduce today's numbers exactly.
 
-- [ ] **Step 1: Write `validate_seed_mask.py`.**
+- [x] **Step 1: Write `validate_seed_mask.py`.**
   - Setup: `Data/1ubq.pdb`, `Data/i2_tim3_1000_test.txt`, a coarse orientation grid of at
     most 6×6 cells, `emcee_cores=2`, and a mask that drops a contiguous block of about 10
     points inside the window.
@@ -253,45 +253,55 @@ Baseline: `handoff/12-work-package-preaudit.md` "BASELINE (re-recorded 2026-11-0
     `slow`.
   - Read `tests/recovered/validate_parallel_seed.py` and `verify_joint_seed_worker.py`
     first for how the serial and parallel scans are driven.
-- [ ] **Step 2: Run** → (a) and (b) FAIL.
-- [ ] **Step 3: Implement.** Re-run → PASS. Run
+- [x] **Step 2: Run** → (a) and (b) FAIL.
+- [x] **Step 3: Implement.** Re-run → PASS. Run
   `tests/run_all.py --only seed --timeout 900` (the recovered seeding harnesses), then
   `--quick` → exit 0.
-- [ ] **Step 4: Commit** — `A1.3: parallel and serial seed scans apply the frozen column mask`.
+- [x] **Step 4: Commit** — `A1.3: parallel and serial seed scans apply the frozen column mask`.
+
+### Task 6b (A1.18, added in execution)
+
+Found by WS1 itself during Task 6, ruled in by the controller. With a column mask and
+`emcee_cores>1`, the parallel MCMC *sampling* objectives (`PdbLogProb`, `JointLogProb`) used
+unmasked data, a silently different likelihood from the serial path. Fixed in `bfdd234`
+(workers take the frozen window mask plus a `__masked_x__` flag; seed workers and log-probs
+share `apply_mask`/`prepare_datas`; `yfit_masked` is derived, not read from a stored flag) and
+`6ffcff9` (check (j) no longer depends on git history: the parent lnprob values are frozen in
+`tests/fixtures/seed_mask_parent_ref.json`). Regression checks: `validate_seed_mask.py` (g)-(k).
 
 ### Task 7: Bring the two stale harnesses up to date (A1.17)
 
 **Files:** `tests/recovered/smoke_fit.py`, `tests/recovered/verify_jointmcmc.py`,
 `tests/run_all.py` (`REGISTRY`), `handoff/10-fix-list.md`.
 
-- [ ] **Step 1: Confirm semantics before editing.** `GID2D.py:629` emits
+- [x] **Step 1: Confirm semantics before editing.** `GID2D.py:629` emits
   `chi2_per_N_reported_LINEAR`. Confirm it is the quantity `smoke_fit` meant by
   `chi2_per_N_reported`, read from `GID2D`'s code and history, not from the name.
   Similarly confirm that `_corner_render_data` (b953c3f) is a helper the method list in
   `verify_jointmcmc` must bind, and not a behaviour change.
   - If either is a real semantic change, keep it `known` and record why in A1.17. That is
     a finding, not a fix.
-- [ ] **Step 2: Apply the one-line updates.** Run each harness directly → PASS.
-- [ ] **Step 3: Drop both `known` entries.** Run `--quick` → exit 0 with **zero**
+- [x] **Step 2: Apply the one-line updates.** Run each harness directly → PASS.
+- [x] **Step 3: Drop both `known` entries.** Run `--quick` → exit 0 with **zero**
   KNOWN-FAIL rows.
-- [ ] **Step 4: Commit** — `A1.17: update smoke_fit and verify_jointmcmc to the current GID2D/MCMC API`.
+- [x] **Step 4: Commit** — `A1.17: update smoke_fit and verify_jointmcmc to the current GID2D/MCMC API`.
 
 ### Task 8: Record WS1
 
 **Files:** `handoff/10-fix-list.md`, `handoff/01-joint-fit.md` (§6, §7), `handoff/11-audit-plan.md`,
 `handoff/12-work-package-preaudit.md` (progress log), `handoff/14-roadmap.md` (WS1 status).
 
-- [ ] **Step 1: Full run** in the background:
+- [x] **Step 1: Full run** in the background:
   `"C:/Users/kerr/.conda/envs/cmc-py39/python.exe" tests/run_all.py`. Expected: exit 0
   with no KNOWN-FAIL rows.
-- [ ] **Step 2: Record.**
+- [x] **Step 2: Record.**
   - Mark these done with commit hashes: A1.1, A1.3, A1.4, A1.17, B2a, and 01 §6 items
     2, 3, 6, 7 (warned), 8 and 14 (warned).
   - Update the `01` §7 / `11` claims these settle: 01 #11 (masks compose identically) is
     now also covered for seed scans.
   - Add a "WS1" entry to the progress log with the full-run table.
   - Set the WS1 status line in the roadmap.
-- [ ] **Step 3: Commit** — `WS1: recorded`.
+- [x] **Step 3: Commit** — `WS1: recorded`.
 
 ---
 
@@ -299,8 +309,12 @@ Baseline: `handoff/12-work-package-preaudit.md` "BASELINE (re-recorded 2026-11-0
 
 - **X1 (Task 4):** `Linear w/o error` gets a warning, not a weighting change.
 - **X2 (Task 3):** a difference in values only warns; a difference in bounds or `vary`
-  refuses unless `on_mismatch='first'`. The GUI's `run_joint_fit` already turns an
-  exception into a message box, so a refusal surfaces there with no GUI change.
+  refuses unless `on_mismatch='first'`. **Premise corrected during execution:** the original
+  text claimed `run_joint_fit` already turned an exception into a message box. It did not
+  (no `try`, no excepthook), so a `ShareMismatchError` would have reached a Qt slot and
+  aborted the app. A minimal GUI guard was added in `9518ef9`: `ShareMismatchError` shows a
+  message box on the Fit path and on both load paths (`.jpar` and `loadParIntoJoint`), with
+  no retry dialog and no success claim. Fuller GUI handling stays in WS4.
 - **X3 (Task 1):** the single list lives in `lmfit/minimizer.py`, where four of the uses
   already are, rather than in a new module.
 - **Out of scope:** B4 (`doFit` routing; moved to WS4), A1.2 (`mkey` in `_box`; WS7 with
