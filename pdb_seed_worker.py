@@ -28,6 +28,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
+from pdb_logprob import apply_mask   # shared with the sampling objective (A1.3/A1.18)
+
 # Per-process worker state, populated by _init().
 _G = {}
 
@@ -46,21 +48,12 @@ def _scale_residual(y, fit, err, fit_scale):
 
 def _init(func, x, y, err, fit_scale, nuisance_names, start_vals, mask=None,
           yfit_masked=False):
-    x, y, err = np.asarray(x), np.asarray(y), np.asarray(err)
-    fitsel = None
-    if mask is not None:
-        # The frozen window mask (Fit.imask_for), applied in Fit.residual's order:
-        # evaluate on the whole window x[imin:imax+1], THEN select the active points
-        # of fit, y and err. A __masked_x__ model (yfit_masked) is handed only the
-        # active points instead, so its output is already active-only and must not
-        # be masked a second time.
-        mask = np.asarray(mask, bool)[:len(y)]
-        y, err = y[mask], err[mask]
-        if yfit_masked:
-            x = x[mask[:len(x)]]
-        else:
-            fitsel = mask
-    func.x = x                      # evaluate() slices func.x to the fit range
+    # The frozen window mask (Fit.imask_for), applied in Fit.residual's order:
+    # evaluate on the whole window x[imin:imax+1], THEN select the active points of
+    # fit, y and err. A __masked_x__ model (yfit_masked) is handed only the active
+    # points instead, so its output is already active-only and is not masked again.
+    x, y, err, fitsel = apply_mask(x, y, err, mask, yfit_masked)
+    func.x = x                     # evaluate() slices func.x to the fit range
     func.__fit__ = True             # matches Fit.residual; skips output_params work
     _G['func'] = func
     _G['y'] = y

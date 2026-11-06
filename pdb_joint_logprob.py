@@ -46,17 +46,46 @@ def _scale_residual_norm(y, fit, err, fit_scale):
         return (y - fit) / err
 
 
+def prepare_datas(datas):
+    """Split ``datas`` entries ``(x, y, e[, imask[, yfit_masked]])`` -- x/y/e the
+    [imin, imax+1] window, imask the objective's frozen window mask -- into the
+    ``(x, y, e)`` the models are evaluated and compared on, plus the per-dataset
+    fit-side selection. JointFit.residual's order: evaluate on the window, then
+    select the active points of fit, y and err, BEFORE the max-normalisation. A
+    ``__masked_x__`` model (yfit_masked) gets only the active x, so its output is
+    already active-only and is not selected again. imask None: unchanged."""
+    plain, fitsel = [], []
+    for d in datas:
+        x, y, e = np.asarray(d[0]), np.asarray(d[1]), np.asarray(d[2])
+        m = d[3] if len(d) > 3 else None
+        ym = bool(d[4]) if len(d) > 4 else False
+        sel = None
+        if m is not None:
+            m = np.asarray(m, bool)[:len(y)]
+            y, e = y[m], e[m]
+            if ym:
+                x = x[m[:len(x)]]
+            else:
+                sel = m
+        plain.append((x, y, e))
+        fitsel.append(sel)
+    return plain, fitsel
+
+
 def init_worker(models, datas):
     """Pool initializer: stash per-dataset models + sliced (x, y, yerr) in globals.
 
     models : list of model instances (e.g. XLayersPDB), one per dataset.
-    datas  : list of (x_slice, y_slice, yerr_slice) already sliced to [imin, imax].
+    datas  : list of (x_slice, y_slice, yerr_slice) already sliced to [imin, imax],
+             optionally extended to (..., imask, yfit_masked); see prepare_datas.
     """
-    for mdl, (x, y, e) in zip(models, datas):
-        mdl.x = np.asarray(x)
+    plain, fitsel = prepare_datas(datas)
+    for mdl, (x, y, e) in zip(models, plain):
+        mdl.x = x
         mdl.__fit__ = True
     _W['models'] = models
-    _W['datas'] = [(np.asarray(x), np.asarray(y), np.asarray(e)) for (x, y, e) in datas]
+    _W['datas'] = plain
+    _W['fitsel'] = fitsel
 
 
 class JointLogProb:
@@ -77,26 +106,29 @@ class JointLogProb:
         self.lnsigma_name = lnsigma_name
         # embedded models/data for serial/unit-test use (excluded from pickling)
         self._models = models
-        self._datas = datas
+        self._datas = None
+        self._fitsel = None
         if models is not None:
+            self._datas, self._fitsel = prepare_datas(datas)
             init_worker(models, datas)            # also warms serial use via _W
 
     def __getstate__(self):
         st = self.__dict__.copy()
         st['_models'] = None
         st['_datas'] = None
+        st['_fitsel'] = None
         return st
 
     def _resolve(self):
         if self._models is not None:
-            return self._models, self._datas
-        return _W['models'], _W['datas']
+            return self._models, self._datas, self._fitsel
+        return _W['models'], _W['datas'], _W.get('fitsel') or [None] * len(_W['datas'])
 
     def __call__(self, theta):
         theta = np.asarray(theta)
         if np.any(theta > self.bounds[:, 1]) or np.any(theta < self.bounds[:, 0]):
             return -np.inf
-        models, datas = self._resolve()
+        models, datas, fitsel = self._resolve()
         p = self.master_params
         for name, val in zip(self.var_names, theta):
             p[name].value = val
@@ -113,8 +145,10 @@ class JointLogProb:
                 lp.value = v
         # evaluate + concatenate per-curve normalised residuals
         parts = []
-        for mdl, (x, y, e) in zip(models, datas):
+        for mdl, (x, y, e), sel in zip(models, datas, fitsel):
             fit = np.asarray(mdl.y()).ravel()
+            if sel is not None:
+                fit = fit[sel]
             parts.append(_scale_residual_norm(y, fit, e, self.fit_scale))
         resid = np.concatenate(parts)
         if self.priors:

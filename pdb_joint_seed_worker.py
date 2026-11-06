@@ -26,34 +26,9 @@ if _HERE not in sys.path:
 
 # reuse the joint model-shipping + per-curve normalised residual
 from pdb_joint_logprob import init_worker, _scale_residual_norm, _W
+from pdb_joint_logprob import prepare_datas as _prepare   # (x,y,e[,imask[,yfit_masked]])
 
-_G = {}  # per-worker: the scan objective + profiled start values + fit-side masks
-
-
-def _prepare(datas):
-    """Split ``datas`` entries ``(x, y, e[, mask[, yfit_masked]])`` -- x/y/e the
-    [imin, imax+1] window, mask the objective's frozen ``imask`` -- into the
-    ``(x, y, e)`` the models are evaluated and compared on, plus the per-dataset
-    fit-side selection. JointFit.residual's order: evaluate on the window, then
-    select the active points of fit, y and err, before the max-normalisation. A
-    ``__masked_x__`` model (yfit_masked) gets only the active x, so its fit is
-    already active-only and is not selected again. mask None: unchanged."""
-    plain, fitsel = [], []
-    for d in datas:
-        x, y, e = np.asarray(d[0]), np.asarray(d[1]), np.asarray(d[2])
-        m = d[3] if len(d) > 3 else None
-        ym = bool(d[4]) if len(d) > 4 else False
-        sel = None
-        if m is not None:
-            m = np.asarray(m, bool)[:len(y)]
-            y, e = y[m], e[m]
-            if ym:
-                x = x[m[:len(x)]]
-            else:
-                sel = m
-        plain.append((x, y, e))
-        fitsel.append(sel)
-    return plain, fitsel
+_G = {}  # per-worker: the scan objective + profiled start values
 
 
 class JointSeedScan:
@@ -77,7 +52,7 @@ class JointSeedScan:
         self._fitsel = None
         if models is not None:
             self._datas, self._fitsel = _prepare(datas)
-            init_worker(models, self._datas)
+            init_worker(models, datas)
 
     def __getstate__(self):
         st = self.__dict__.copy()
@@ -89,7 +64,7 @@ class JointSeedScan:
     def _resolve(self):
         if self._models is not None:
             return self._models, self._datas, self._fitsel
-        return _W['models'], _W['datas'], _G.get('fitsel') or [None] * len(_W['datas'])
+        return _W['models'], _W['datas'], _W.get('fitsel') or [None] * len(_W['datas'])
 
     def start_vals(self):
         return np.array([self.master_params[k].value for k in self.prof_names], dtype=float)
@@ -126,8 +101,7 @@ class JointSeedScan:
 
 
 def _init(scan, models, datas):
-    plain, _G['fitsel'] = _prepare(datas)
-    init_worker(models, plain)
+    init_worker(models, datas)              # applies imask (prepare_datas)
     _G['scan'] = scan
     _G['start'] = scan.start_vals()
 

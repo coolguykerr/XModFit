@@ -44,14 +44,36 @@ def _scale_residual(y, fit, err, fit_scale):
         return (y - fit) / err
 
 
-def init_worker(model, x, y, err):
-    """Pool initializer: stash the model + sliced data in this worker's globals."""
-    model.x = np.asarray(x)     # evaluate() slices func.x to the fit range
+def apply_mask(x, y, err, mask=None, yfit_masked=False):
+    """Apply the frozen window mask (Fit.imask_for) in Fit.residual's order.
+
+    x/y/err are the [imin, imax+1] window. Returns (x_eval, y, err, fitsel): the
+    model is evaluated on x_eval (the whole window, or only the active points for
+    a __masked_x__ model, ``yfit_masked``), y/err are the active points, and
+    fitsel is the selection still to apply to the model output (None when the
+    model was already given only the active points, or when there is no mask).
+    mask=None returns the arrays unchanged."""
+    x, y, err = np.asarray(x), np.asarray(y), np.asarray(err)
+    if mask is None:
+        return x, y, err, None
+    mask = np.asarray(mask, bool)[:len(y)]
+    y, err = y[mask], err[mask]
+    if yfit_masked:
+        return x[mask[:len(x)]], y, err, None
+    return x, y, err, mask
+
+
+def init_worker(model, x, y, err, mask=None, yfit_masked=False):
+    """Pool initializer: stash the model + sliced data in this worker's globals.
+    ``mask``/``yfit_masked``: see apply_mask (A1.18)."""
+    x, y, err, fitsel = apply_mask(x, y, err, mask, yfit_masked)
+    model.x = x                 # evaluate() slices func.x to the fit range
     model.__fit__ = True        # matches Fit.residual; skips output_params work
     _W['model'] = model
-    _W['x'] = np.asarray(x)
-    _W['y'] = np.asarray(y)
-    _W['err'] = np.asarray(err)
+    _W['x'] = x
+    _W['y'] = y
+    _W['err'] = err
+    _W['fitsel'] = fitsel
 
 
 class PdbLogProb:
@@ -63,7 +85,7 @@ class PdbLogProb:
 
     def __init__(self, var_names, bounds, fit_scale, is_weighted,
                  has_lnsigma=False, lnsigma_name='__lnsigma',
-                 model=None, x=None, y=None, err=None):
+                 model=None, x=None, y=None, err=None, mask=None, yfit_masked=False):
         self.var_names = list(var_names)
         self.bounds = np.asarray(bounds, dtype=float)
         self.fit_scale = fit_scale
@@ -76,6 +98,10 @@ class PdbLogProb:
         self._x = None if x is None else np.asarray(x)
         self._y = None if y is None else np.asarray(y)
         self._err = None if err is None else np.asarray(err)
+        self._fitsel = None
+        if x is not None and y is not None and err is not None:
+            self._x, self._y, self._err, self._fitsel = apply_mask(
+                x, y, err, mask, yfit_masked)
         if self._model is not None:
             self._model.x = self._x
             self._model.__fit__ = True
@@ -85,25 +111,28 @@ class PdbLogProb:
         state = self.__dict__.copy()
         state['_model'] = None
         state['_x'] = state['_y'] = state['_err'] = None
+        state['_fitsel'] = None
         return state
 
     def _resolve(self):
         if self._model is not None:
-            return self._model, self._x, self._y, self._err
-        return _W['model'], _W['x'], _W['y'], _W['err']
+            return self._model, self._x, self._y, self._err, self._fitsel
+        return _W['model'], _W['x'], _W['y'], _W['err'], _W.get('fitsel')
 
     def __call__(self, theta):
         theta = np.asarray(theta)
         # Uniform prior: out of bounds -> -inf (compare theta to bounds, not params).
         if np.any(theta > self.bounds[:, 1]) or np.any(theta < self.bounds[:, 0]):
             return -np.inf
-        model, x, y, err = self._resolve()
+        model, x, y, err, fitsel = self._resolve()
         p = model.params
         for name, val in zip(self.var_names, theta):
             setattr(model, name, val)   # y() reads qoff/protins/cov/theta/phi as attrs
             p[name].value = val
         p.update_constraints()
         fit = np.asarray(model.y()).ravel()
+        if fitsel is not None:
+            fit = fit[fitsel]
         resid = np.asarray(_scale_residual(y, fit, err, self.fit_scale)).ravel()
         if self.has_lnsigma and not self.is_weighted:
             ls = p[self.lnsigma_name].value

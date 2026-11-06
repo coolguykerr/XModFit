@@ -1938,9 +1938,9 @@ class Minimizer:
                             costs = _psw.map_cell_costs(
                                 cells, fitobj.func, xs, ys, es, seed_scale,
                                 list(result_mesh.var_names), start_vals, seed_workers,
-                                # frozen by perform_fit; _yfit_masked is fresh from ndata above
-                                mask=fitobj.imask_for(),
-                                yfit_masked=bool(getattr(fitobj, '_yfit_masked', False)))
+                                mask=fitobj.imask_for(),   # frozen by perform_fit
+                                yfit_masked=(fitobj.imask_for() is not None and
+                                             bool(getattr(fitobj.func, '__masked_x__', False))))
                             for (ti, pi, cost) in costs:
                                 chi2mesh[ti][pi] = cost
                             parallel_ok = True
@@ -1952,7 +1952,8 @@ class Minimizer:
                             datas = [(np.asarray(o["x"])[o["imin"]:o["imax"] + 1],
                                       np.asarray(o["y"])[o["imin"]:o["imax"] + 1],
                                       np.asarray(o["yerr"])[o["imin"]:o["imax"] + 1],
-                                      o.get("imask"), bool(o.get("yfit_masked")))  # A1.3
+                                      o.get("imask"), o.get("imask") is not None and
+                                      bool(getattr(o["func"], "__masked_x__", False)))  # A1.3
                                      for o in fitobj.objectives]
                             priors = dict(getattr(fitobj, '_priors', {}) or {})
                             scan = _pjs.JointSeedScan(list(result.var_names), fitobj.param_map,
@@ -2128,7 +2129,10 @@ class Minimizer:
                     if auto_pool is not None:
                         auto_pool.terminate()
                     auto_pool = multiprocessing.get_context('spawn').Pool(
-                        workers, initializer=_plp.init_worker, initargs=(model, xs, ys, es))
+                        workers, initializer=_plp.init_worker,
+                        initargs=(model, xs, ys, es, fitobj.imask_for(),        # A1.18
+                                  fitobj.imask_for() is not None and
+                                  bool(getattr(model, '__masked_x__', False))))
                     sampler_kwargs['pool'] = auto_pool
                     sampler_kwargs.pop('args', None)
                     sampler_kwargs.pop('kwargs', None)

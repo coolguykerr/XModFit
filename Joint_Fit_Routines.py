@@ -1000,9 +1000,15 @@ class JointFit(QObject):
             var_names = [k for k in self.emcee_params if self.emcee_params[k].vary]
             bounds = [(self.emcee_params[k].min, self.emcee_params[k].max) for k in var_names]
             models = [obj["func"] for obj in self.objectives]
+            # A1.18: + the frozen imask; the model is evaluated on the window and the
+            # active points selected before the per-dataset max-normalisation
             datas = [(obj["x"][obj["imin"]:obj["imax"] + 1],
                       obj["y"][obj["imin"]:obj["imax"] + 1],
-                      obj["yerr"][obj["imin"]:obj["imax"] + 1]) for obj in self.objectives]
+                      obj["yerr"][obj["imin"]:obj["imax"] + 1],
+                      obj.get("imask"),
+                      obj.get("imask") is not None
+                      and bool(getattr(obj["func"], "__masked_x__", False)))
+                     for obj in self.objectives]
             priors = {k: v for k, v in self._priors.items()} if self._priors else {}
             obj = _pjl.JointLogProb(var_names, bounds, fit_scale, is_weighted,
                                     self.param_map, priors, self.emcee_params.copy(),

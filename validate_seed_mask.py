@@ -23,6 +23,18 @@ coarse subset of grid cells by interception, and stopped before sampling:
     (f) a __masked_x__ model (yfit already active-only) is not masked twice, in
         both workers
 
+A1.18 -- the parallel MCMC SAMPLING objectives (PdbLogProb, JointLogProb), as the
+minimizer / JointFit._attach_joint_parallel build them, against the serial
+objective (-0.5*sum(r**2) of Fit.residual / JointFit.residual) at several
+parameter vectors:
+
+    (g) single model, mask on: in-process and 2-worker-pool lnprob == serial
+    (h) joint no-cov, mask on: the same
+    (i) mask on: lnprob differs from mask off
+    (j) mask=None: lnprob == the parent commit's pdb_logprob / pdb_joint_logprob
+        (loaded from git, 63e984e), not the new code run twice
+    (k) a __masked_x__ model through both log-probs is not masked twice
+
     QT_QPA_PLATFORM=offscreen python validate_seed_mask.py
 """
 import os
@@ -285,6 +297,251 @@ def check_masked_x():
           d < REL and all(np.isfinite(c[2]) for c in b), 'max rel %.2e' % d)
 
 
+# ------------------------------------------------- A1.18: sampling objectives --
+PARENT = '63e984e'      # last commit before A1.18 touched pdb_logprob / pdb_joint_logprob
+
+
+def load_parent(modname):
+    """Import the parent commit's copy of `modname` under a private name, or None."""
+    import subprocess
+    import importlib.util
+    import tempfile
+    try:
+        src = subprocess.run(['git', 'show', '%s:%s.py' % (PARENT, modname)], cwd=ROOT,
+                             capture_output=True, check=True).stdout
+    except Exception as exc:                                  # no git / no history
+        print('parent %s unavailable: %s' % (modname, exc))
+        return None
+    d = tempfile.mkdtemp(prefix='seedmask_')
+    path = os.path.join(d, '_parent_%s.py' % modname)
+    with open(path, 'wb') as fh:
+        fh.write(src)
+    spec = importlib.util.spec_from_file_location('_parent_%s' % modname, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class _FakePool:
+    def terminate(self):
+        pass
+
+
+def capture_single_logprob(fit):
+    """Run the real Minimizer.emcee for `fit` at emcee_cores=2 up to the point it
+    builds the parallel PdbLogProb + its Pool initializer, and return
+    (logprob_fn, initializer, initargs). No process is started: the minimizer's
+    multiprocessing is shimmed and the seed scan returns a flat cost map."""
+    import multiprocessing
+    import lmfit.minimizer as MZ
+    import pdb_seed_worker as PSW
+    import pdb_logprob as PLP
+    rec = {}
+
+    class _Ctx:
+        def Pool(self, n, initializer=None, initargs=()):
+            rec['init'] = (initializer, initargs)
+            raise _Stop()
+
+    shim = types.SimpleNamespace(Pool=lambda *a, **k: _FakePool(),
+                                 get_context=lambda m: _Ctx(),
+                                 cpu_count=multiprocessing.cpu_count)
+    orig_mp, orig_mcc, orig_plp = MZ.multiprocessing, PSW.map_cell_costs, PLP.PdbLogProb
+
+    def plp(*a, **k):
+        rec['obj'] = orig_plp(*a, **k)
+        return rec['obj']
+
+    MZ.multiprocessing = shim
+    PSW.map_cell_costs = lambda cells, *a, **k: [(c[0], c[1], 1.0) for c in cells]
+    PLP.PdbLogProb = plp
+    try:
+        run_fit_emcee(fit, 2)()
+    except _Stop:
+        pass
+    finally:
+        MZ.multiprocessing, PSW.map_cell_costs, PLP.PdbLogProb = orig_mp, orig_mcc, orig_plp
+    return rec.get('obj'), rec.get('init', (None, ()))[0], rec.get('init', (None, ()))[1]
+
+
+def capture_joint_logprob(jf):
+    """JointFit.perform_fit's emcee set-up, up to the attached parallel objective."""
+    jf._set_ranges(XMIN, XMAX)
+    jf._L = None
+    fitter = jf.set_emcee_minimizer(fit_scale=SCALE, emcee_walkers=10, emcee_steps=1,
+                                    emcee_cores=2)
+    init = getattr(fitter, '_ext_obj_init', (None, ()))
+    return getattr(fitter, '_ext_objective', None), init[0], init[1]
+
+
+def lnprob_inproc(obj, init, initargs, thetas):
+    init(*initargs)
+    return [float(obj(t)) for t in thetas]
+
+
+def lnprob_pool(obj, init, initargs, thetas):
+    import multiprocessing as mp
+    with mp.get_context('spawn').Pool(2, initializer=init, initargs=initargs) as pool:
+        return [float(v) for v in pool.map(obj, thetas)]
+
+
+def theta_vectors(params, var_names):
+    base = np.array([params[k].value for k in var_names], dtype=float)
+    out = [base.copy()]
+    for (dth, dph, f) in ((25.0, -40.0, 1.03), (-15.0, 95.0, 0.97), (60.0, 200.0, 1.05)):
+        t = base.copy()
+        for i, k in enumerate(var_names):
+            if k.endswith('theta'):
+                t[i] += dth
+            elif k.endswith('phi'):
+                t[i] += dph
+            elif k.endswith('cov'):
+                t[i] = min(0.95, t[i] * f)
+            else:
+                t[i] *= f
+        out.append(t)
+    return out
+
+
+def serial_lnprob(resid_fn, params, var_names, thetas):
+    vals = []
+    for t in thetas:
+        p = params.copy()
+        for k, v in zip(var_names, t):
+            p[k].value = v
+        p.update_constraints()
+        r = np.asarray(resid_fn(p, SCALE), dtype=float)
+        vals.append(float(-0.5 * np.sum(r * r)))
+    return vals
+
+
+def rel_list(a, b):
+    if a is None or b is None or len(a) != len(b) or not len(a):
+        return np.inf
+    return max(abs(x - y) / max(1.0, abs(x)) for x, y in zip(a, b))
+
+
+def check_sampling(x, y, e, imin, n, masks_joint):
+    # ---------------------------------------------------------- single model --
+    mask = block_mask(n, imin, start=30)
+    fit = make_fit(x, y, e, mask)
+    obj, init, iargs = capture_single_logprob(fit)
+    if obj is None:
+        check("(g) minimizer built a parallel PdbLogProb", False, 'not captured')
+        return
+    vn = list(obj.var_names)
+    thetas = theta_vectors(fit.emcee_params, vn)
+    ser = serial_lnprob(fit.residual, fit.emcee_params, vn, thetas)
+    inp = lnprob_inproc(obj, init, iargs, thetas)
+    pol = lnprob_pool(obj, init, iargs, thetas)
+    print('single lnprob serial  ', ['%.6f' % v for v in ser])
+    print('single lnprob parallel', ['%.6f' % v for v in inp])
+    check("(g) single model, mask on: in-process PdbLogProb == serial Fit.residual lnprob",
+          rel_list(inp, ser) < REL, 'max rel %.3e over %d vectors' % (rel_list(inp, ser), len(thetas)))
+    check("(g) single model, mask on: 2-worker pool PdbLogProb == serial lnprob",
+          rel_list(pol, ser) < REL, 'max rel %.3e' % rel_list(pol, ser))
+
+    fit_off = make_fit(x, y, e, None)
+    obj0, init0, iargs0 = capture_single_logprob(fit_off)
+    off = lnprob_inproc(obj0, init0, iargs0, thetas)
+    d = rel_list(inp, off)
+    check("(i) single model: mask-on lnprob differs from mask-off",
+          np.isfinite(d) and d > 1e-6, 'max rel diff %.3e' % d)
+    ser0 = serial_lnprob(fit_off.residual, fit_off.emcee_params, vn, thetas)
+    check("(i) single model, mask off: parallel == serial lnprob",
+          rel_list(off, ser0) < REL, 'max rel %.3e' % rel_list(off, ser0))
+    old = load_parent('pdb_logprob')
+    if old is not None:
+        model, xs, ys, es = iargs0[:4]
+        ref = old.PdbLogProb(vn, obj0.bounds, obj0.fit_scale, obj0.is_weighted,
+                             has_lnsigma=obj0.has_lnsigma, model=model, x=xs, y=ys, err=es)
+        refv = [float(ref(t)) for t in thetas]
+        check("(j) single model, mask=None: lnprob == parent commit's PdbLogProb (exact)",
+              rel_list(off, refv) == 0.0 and (len(iargs0) <= 4 or iargs0[4] is None),
+              'max rel %.3e' % rel_list(off, refv))
+    else:
+        check("(j) single model: parent pdb_logprob loadable", False, 'git show failed')
+
+    # --------------------------------------------------------- joint, no cov --
+    jf = make_joint(x, y, e, masks_joint)
+    jobj, jinit, jargs = capture_joint_logprob(jf)
+    if jobj is None:
+        check("(h) JointFit attached a parallel JointLogProb", False, 'not attached')
+        return
+    vn = list(jobj.var_names)
+    thetas = theta_vectors(jf.emcee_params, vn)
+    ser = serial_lnprob(jf.residual, jf.emcee_params, vn, thetas)
+    inp = lnprob_inproc(jobj, jinit, jargs, thetas)
+    pol = lnprob_pool(jobj, jinit, jargs, thetas)
+    check("(h) joint, mask on: in-process JointLogProb == serial JointFit.residual lnprob",
+          rel_list(inp, ser) < REL, 'max rel %.3e over %d vectors' % (rel_list(inp, ser), len(thetas)))
+    check("(h) joint, mask on: 2-worker pool JointLogProb == serial lnprob",
+          rel_list(pol, ser) < REL, 'max rel %.3e' % rel_list(pol, ser))
+
+    jf_off = make_joint(x, y, e, [None, None])
+    jobj0, jinit0, jargs0 = capture_joint_logprob(jf_off)
+    off = lnprob_inproc(jobj0, jinit0, jargs0, thetas)
+    d = rel_list(inp, off)
+    check("(i) joint: mask-on lnprob differs from mask-off",
+          np.isfinite(d) and d > 1e-6, 'max rel diff %.3e' % d)
+    oldj = load_parent('pdb_joint_logprob')
+    if oldj is not None:
+        models, datas = jargs0
+        ref = oldj.JointLogProb(vn, jobj0.bounds, jobj0.fit_scale, jobj0.is_weighted,
+                                jobj0.param_map, jobj0.priors, jf_off.emcee_params.copy(),
+                                has_lnsigma=jobj0.has_lnsigma,
+                                models=models, datas=[tuple(dd[:3]) for dd in datas])
+        refv = [float(ref(t)) for t in thetas]
+        check("(j) joint, mask=None: lnprob == parent commit's JointLogProb (exact)",
+              rel_list(off, refv) == 0.0 and all(len(dd) == 3 or dd[3] is None for dd in datas),
+              'max rel %.3e' % rel_list(off, refv))
+    else:
+        check("(j) joint: parent pdb_joint_logprob loadable", False, 'git show failed')
+
+
+def check_masked_x_logprob():
+    import pdb_logprob as PLP
+    import pdb_joint_logprob as PJL
+    from lmfit import Parameters
+    x = np.linspace(0.1, 2.0, 60)
+    rng = np.random.RandomState(2)
+    y = 1.2 * (1 + 0.7 * np.cos(0.9) * x + 0.4 * np.sin(1.4) * x ** 2) + 0.01 * rng.randn(60)
+    y[25] = 50.0
+    e = 0.01 * np.ones_like(x)
+    m = np.ones(60, bool); m[20:30] = False
+    thetas = [np.array([20.0, 40.0, 1.1]), np.array([70.0, 120.0, 0.9])]
+    bnd = [(-np.inf, np.inf)] * 3
+    plain, mx = _Pointwise(), _PointwiseMasked()
+    mx.expect_len = int(m.sum())
+    a = [PLP.PdbLogProb(['theta', 'phi', 's'], bnd, 'Log', True, model=plain, x=x, y=y,
+                        err=e, mask=m, yfit_masked=False)(t) for t in thetas]
+    b = [PLP.PdbLogProb(['theta', 'phi', 's'], bnd, 'Log', True, model=mx, x=x, y=y,
+                        err=e, mask=m, yfit_masked=True)(t) for t in thetas]
+    check("(k1) PdbLogProb: __masked_x__ model not masked twice",
+          rel_list(a, b) < REL and all(v > -1e99 for v in b), 'max rel %.2e' % rel_list(a, b))
+
+    mp_ = Parameters()
+    mp_.add('theta', value=40.0); mp_.add('phi', value=70.0)
+    mp_.add('d0_s', value=1.0); mp_.add('d1_s', value=1.0)
+    pmap = {'theta': [(0, 'theta'), (1, 'theta')], 'phi': [(0, 'phi'), (1, 'phi')],
+            'd0_s': [(0, 's')], 'd1_s': [(1, 's')]}
+    vn = ['theta', 'phi', 'd0_s', 'd1_s']
+    jt = [np.array([20.0, 40.0, 1.1, 1.6]), np.array([70.0, 120.0, 0.9, 1.4])]
+
+    def joint(models, ym):
+        datas = [(x, y, e, m, ym), (x, 1.5 * y, 1.5 * e, m, ym)]
+        o = PJL.JointLogProb(vn, [(-np.inf, np.inf)] * 4, 'Log', True, pmap, {}, mp_.copy(),
+                             models=models, datas=datas)
+        return [o(t) for t in jt]
+
+    a = joint([_Pointwise(), _Pointwise()], False)
+    m0, m1 = _PointwiseMasked(), _PointwiseMasked()
+    m0.expect_len = m1.expect_len = int(m.sum())
+    b = joint([m0, m1], True)
+    check("(k2) JointLogProb: __masked_x__ models not masked twice",
+          rel_list(a, b) < REL and all(v > -1e99 for v in b), 'max rel %.2e' % rel_list(a, b))
+
+
 # ------------------------------------------------------------------ main --
 def main():
     global SUB, SUBKEY, SUBVAL
@@ -427,6 +684,19 @@ def main():
         check_masked_x()
     except Exception as exc:
         check("(f) __masked_x__ checks ran", False, '%s: %s' % (type(exc).__name__, exc))
+
+    # ------------------------------------------- (g)-(k) A1.18 sampling objectives --
+    t0 = time.time()
+    try:
+        check_sampling(x, y, e, imin, n, masks)
+    except Exception as exc:
+        import traceback; traceback.print_exc()
+        check("(g)-(j) sampling checks ran", False, '%s: %s' % (type(exc).__name__, exc))
+    try:
+        check_masked_x_logprob()
+    except Exception as exc:
+        check("(k) __masked_x__ log-prob checks ran", False, '%s: %s' % (type(exc).__name__, exc))
+    print('sampling sections %.1f s' % (time.time() - t0))
     print('total %.1f s' % (time.time() - t00))
 
 
