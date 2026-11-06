@@ -200,7 +200,7 @@ def load_bundle_npz(path, datasets=None):
 def load_cov_npz(path):
     """Load a ``*_corrected_cov.npz`` sidecar into the common cov dict."""
     z = np.load(path, allow_pickle=True)
-    return {
+    out = {
         "x": np.asarray(z["x"], dtype=float),
         "y_corr": np.asarray(z["y_corr"], dtype=float),
         "sigma_meas": np.asarray(z["sigma_meas"], dtype=float),
@@ -209,6 +209,14 @@ def load_cov_npz(path):
         "Sigma_logc": np.asarray(z["Sigma_logc"], dtype=float),
         "c": np.asarray(z["c"], dtype=float) if "c" in z else None,
     }
+    # shared-beam footprint term: both keys or neither (half-on is a silent error)
+    has_v, has_var = "v" in z, "var_fwhm" in z
+    if has_v != has_var:
+        raise ValueError("%s: footprint needs both 'v' and 'var_fwhm'" % path)
+    if has_v:
+        out["v"] = np.asarray(z["v"], dtype=float)
+        out["var_fwhm"] = float(z["var_fwhm"])
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -290,11 +298,14 @@ def load_dataset_cov(sidecar_path, x=None, raw_path=None, atol_x=1e-8):
         if x is not None and (len(z["x"]) != len(x)
                               or not np.allclose(z["x"], x, atol=atol_x, rtol=1e-9)):
             raise ValueError("cov .npz x-axis does not match dataset x-axis")
-        return {
+        out = {
             "y_corr": z["y_corr"], "sigma_meas": z["sigma_meas"],
             "k_index": z["k_index"], "SF_LIST": z["SF_LIST"],
             "Sigma_logc": z["Sigma_logc"], "c": z["c"],
         }
+        if "v" in z:                       # load_cov_npz guarantees var_fwhm too
+            out["v"], out["var_fwhm"] = z["v"], z["var_fwhm"]
+        return out
     # c_factors text route
     cfac = load_c_factors(p)
     if raw_path is None:
