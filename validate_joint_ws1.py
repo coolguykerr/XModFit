@@ -179,7 +179,7 @@ def test_t3():
     jf._add_run_warning('stale run-time note')
     jf.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq')
     check("T3f perform_fit drops its previous run-time warnings only",
-          jf.warnings == [w for w in jf.warnings if 'stale' not in w]
+          not any('stale' in w for w in jf.warnings)
           and len(jf.warnings) == 1, jf.warnings)
     jf.clear()
     check("T3 clear() resets warnings", jf.warnings == [], jf.warnings)
@@ -192,6 +192,18 @@ def test_t3():
         s = str(ex)
         check("T3b ShareMismatchError names 'a' and the dataset",
               "'a'" in s and 'DS_two' in s and isinstance(ex, ValueError), s)
+
+    # a refused rebuild leaves the object as it was (check before mutate)
+    jf, grp = build(starts=(2.5, 3.0, 3.5))
+    mp0, pm0, w0 = jf.master_params, jf.param_map, list(jf.warnings)
+    jf.objectives[1]['func'].params['a'].set(max=10.0)
+    try:
+        jf.build_master_params(groups=[grp])
+        check("T3b refused rebuild raises", False, 'no exception')
+    except ShareMismatchError:
+        check("T3b refused rebuild leaves master_params/param_map/warnings intact",
+              jf.master_params is mp0 and jf.param_map is pm0 and jf.warnings == w0,
+              jf.warnings)
 
     # (c) on_mismatch='first' -> builds, master max == inf, one warning
     try:
@@ -247,9 +259,80 @@ def test_t3():
     except Exception as ex:
         check("T3 compile(on_mismatch='first') builds", False, repr(ex))
 
+def test_t3_gui():
+    """The GUI surfaces a ShareMismatchError instead of dying in a Qt slot."""
+    import numpy as np
+    import xmodfit
+    from PyQt5.QtCore import Qt
+    import joint_fit_io
+    calls = {'warning': [], 'information': []}
+
+    class _MB:
+        Ok = Yes = No = 0
+        warning = staticmethod(lambda *a, **k: calls['warning'].append(a) or 0)
+        information = staticmethod(lambda *a, **k: calls['information'].append(a) or 0)
+        question = staticmethod(lambda *a, **k: 0)
+    saved = (xmodfit.QMessageBox, joint_fit_io.parse_par, joint_fit_io.apply_block)
+    xmodfit.QMessageBox = _MB
+    try:
+        w = xmodfit.XModFit()
+        d = os.path.join(ROOT, 'tests', '_logs')
+        os.makedirs(d, exist_ok=True)
+        q = np.linspace(0.02, 0.30, 40)
+        paths = [os.path.join(d, 'ws1_t3_ds%d.txt' % i) for i in (1, 2)]
+        for p, amp in zip(paths, (1.0, 2.0)):
+            np.savetxt(p, np.c_[q, amp * np.exp(-((q - 0.1) ** 2) / 0.002) + 0.01,
+                                np.full_like(q, 0.02)], header="x y yerr")
+        w.addData(fnames=paths)
+        w.categoryListWidget.setCurrentItem(
+            w.categoryListWidget.findItems("XRR", Qt.MatchExactly)[0])
+        w.funcListWidget.setCurrentItem(
+            w.funcListWidget.findItems("XLayers", Qt.MatchExactly)[0])
+        w.dataListWidget.clearSelection()
+        for i in range(w.dataListWidget.count()):
+            w.dataListWidget.item(i).setSelected(True)
+        w.jointFitPanel.add_selected_datasets()
+        spec = w.jointFitPanel.spec
+        check("T3gui two datasets in the joint spec", len(spec.datasets) == 2)
+        for i, e in enumerate(spec.datasets):
+            e.model.params['qoff'].set(vary=1, max=(0.5 if i == 1 else np.inf))
+        spec.set_shared('qoff')
+        w.fitIterationLineEdit.setText("5")
+        w.jointFitEnabled = True
+        fit0, jf0 = w.fit, getattr(w, 'jointFit', None)
+        try:
+            w.run_joint_fit()
+            raised = None
+        except Exception as ex:
+            raised = ex
+        check("T3gui run_joint_fit returns without raising", raised is None, repr(raised))
+        check("T3gui the refusal is shown in a warning box",
+              len(calls['warning']) == 1 and 'qoff' in str(calls['warning'][0][2]),
+              calls['warning'])
+        check("T3gui self.fit / self.jointFit unchanged",
+              w.fit is fit0 and getattr(w, 'jointFit', None) is jf0)
+
+        # .par-into-joint load path: refusal shown, no success box
+        par = os.path.join(d, 'ws1_t3_dummy.par')
+        open(par, 'w').write('')
+        joint_fit_io.parse_par = lambda txt: {}
+        joint_fit_io.apply_block = lambda *a, **k: None
+        del calls['warning'][:], calls['information'][:]
+        try:
+            w.loadParIntoJoint(fname=par)
+            raised = None
+        except Exception as ex:
+            raised = ex
+        check("T3gui loadParIntoJoint shows the refusal, no success box",
+              raised is None and len(calls['warning']) == 1
+              and not calls['information'], (repr(raised), calls))
+    finally:
+        xmodfit.QMessageBox, joint_fit_io.parse_par, joint_fit_io.apply_block = saved
+
+
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
-    for t in (test_t1, test_t2, test_t3):
+    for t in (test_t1, test_t2, test_t3, test_t3_gui):
         try:
             t()
         except Exception as ex:

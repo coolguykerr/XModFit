@@ -7095,7 +7095,13 @@ class XModFit(QWidget):
         separate, deferred step."""
         import numpy as _np
         spec = self.jointFitPanel.spec
-        self.fit = spec.compile(self.data, masks=self._joint_masks(spec))  # fresh JointFit
+        from Joint_Fit_Routines import ShareMismatchError
+        try:
+            _jf = spec.compile(self.data, masks=self._joint_masks(spec))
+        except ShareMismatchError as ex:   # unhandled in a slot would abort the app
+            QMessageBox.warning(self, 'Joint fit', str(ex))
+            return
+        self.fit = _jf                      # fresh JointFit
         self.jointFit = self.fit            # persist so switching to an individual
                                             # dataset view and back retains joint results
         # enforce shared fixed params (incl. the PDB) across all datasets
@@ -7430,6 +7436,8 @@ class XModFit(QWidget):
         if s.get('fit_iterations'):
             self.fitIterationLineEdit.setText(s['fit_iterations'])
         incomplete = bool(skipped or not_found)
+        from Joint_Fit_Routines import ShareMismatchError
+        refused = False
         try:
             if len(spec.datasets) >= 2:
                 self.jointFit = spec.compile(self.data, masks=self._joint_masks(spec))
@@ -7440,6 +7448,9 @@ class XModFit(QWidget):
                 # flagged so the Model Comparison tells the user to re-run the joint fit.
                 self.jointFit._is_fitted = not incomplete
                 self.jointFit._jpar_incomplete = incomplete
+        except ShareMismatchError as ex:
+            refused = True
+            QMessageBox.warning(self, 'Joint fit', str(ex))
         except Exception:
             traceback.print_exc()
         self.jointFitEnabled = True
@@ -7457,7 +7468,8 @@ class XModFit(QWidget):
         if skipped:
             msg += ('\n\nSkipped (not loaded in the Data list):\n'
                     + '\n'.join('  ' + os.path.basename(s.split('  ')[0]) for s in skipped))
-        QMessageBox.information(self, 'Joint fit', msg)
+        if not refused:
+            QMessageBox.information(self, 'Joint fit', msg)
 
     def loadParIntoJoint(self, fname=None):
         """Apply one stock .par's values to EVERY dataset in the joint fit (datasets
@@ -7491,10 +7503,15 @@ class XModFit(QWidget):
                 applied += 1
             except Exception:
                 traceback.print_exc()
+        from Joint_Fit_Routines import ShareMismatchError
+        refused = False
         try:
             if len(spec.datasets) >= 2:
                 self.jointFit = spec.compile(self.data, masks=self._joint_masks(spec))
                 self.fit = self.jointFit
+        except ShareMismatchError as ex:
+            refused = True
+            QMessageBox.warning(self, 'Joint fit', str(ex))
         except Exception:
             traceback.print_exc()
         try:
@@ -7505,7 +7522,8 @@ class XModFit(QWidget):
         if mismatch:
             msg += ('\n\nSkipped (model function differs from the .par):\n'
                     + ', '.join(mismatch))
-        QMessageBox.information(self, 'Joint fit', msg)
+        if not refused:
+            QMessageBox.information(self, 'Joint fit', msg)
 
     # ---- Model Comparison (joint vs individual fits) ---------------------- #
     def create_compareDock(self):

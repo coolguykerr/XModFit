@@ -95,7 +95,7 @@ class _RunWarning(str):
 
 
 def _fmt_num(v):
-    return '%g' % v
+    return '%.10g' % v
 
 
 class JointFit(QObject):
@@ -247,6 +247,7 @@ class JointFit(QObject):
 
     def _check_share_group(self, mkey, members, on_mismatch):
         """Compare every endpoint of one share-group to the first (01 6.8).
+        Returns the group's warnings; mutates nothing.
 
         value differs        -> one build-time warning for the group.
         min/max/vary differs -> ShareMismatchError, or a warning if
@@ -256,8 +257,9 @@ class JointFit(QObject):
         ps = [(names[idx], lk, self.objectives[idx]["func"].params[lk])
               for (idx, lk) in members]
         d0, lk0, p0 = ps[0]
+        out = []
         if any(float(p.value) != float(p0.value) for (_, _, p) in ps[1:]):
-            self.warnings.append(
+            out.append(
                 "shared %s: endpoints start at different values (%s); using %s=%s"
                 % (mkey, ', '.join('%s=%s' % (d, _fmt_num(p.value)) for (d, _, p) in ps),
                    d0, _fmt_num(p0.value)))
@@ -265,7 +267,7 @@ class JointFit(QObject):
         def bounds(p):
             return (float(p.min), float(p.max), bool(p.vary))
         if all(bounds(p) == bounds(p0) for (_, _, p) in ps[1:]):
-            return
+            return out
         listing = ', '.join('(%s %r: min=%s, max=%s, vary=%s)'
                             % (d, lk, _fmt_num(bounds(p)[0]), _fmt_num(bounds(p)[1]),
                                bounds(p)[2])
@@ -275,9 +277,10 @@ class JointFit(QObject):
                 "shared %r (local %r): endpoints disagree on min/max/vary: %s. "
                 "Make them agree, or pass on_mismatch='first' to use the first "
                 "endpoint's." % (mkey, lk0, listing))
-        self.warnings.append(
+        out.append(
             "shared %s: endpoints disagree on min/max/vary %s; using the first "
             "endpoint's (%s) bounds and vary" % (mkey, listing, d0))
+        return out
 
     def _register_shared_sigma(self, Sigma_logc):
         Sigma_logc = np.asarray(Sigma_logc, dtype=float)
@@ -392,30 +395,35 @@ class JointFit(QObject):
         if on_mismatch not in ('raise', 'first'):
             raise ValueError("on_mismatch must be 'raise' or 'first', got %r"
                              % (on_mismatch,))
-        self.warnings = []
         specs = []
         for nm in (shared or []):
             specs.append(self.share_all(nm))
         for g in (groups or []):
             specs.append(dict(g))
 
+        # 0) resolve + check every group BEFORE mutating any state, so a
+        #    refused build (ShareMismatchError) leaves the object as it was
+        resolved, warnings, used_names = [], [], set()
+        for gid, spec in enumerate(specs):
+            members = [(self._resolve_idx(i) if not isinstance(i, int) else i, lk)
+                       for (i, lk) in spec["members"]]
+            if not members:
+                continue
+            mkey = spec.get("name") or self._group_master_key(
+                gid, members[0][1], bare=spec.get("bare", False), used=used_names)
+            used_names.add(mkey)
+            warnings += self._check_share_group(mkey, members, on_mismatch)
+            resolved.append((mkey, members))
+
+        self.warnings = warnings
         self.shared = [nm for nm in (shared or [])]
         self.master_params = Parameters()
         self.param_map = {}
 
         # 1) claimed endpoints -> group master keys
         claimed = {}                       # (idx, lkey) -> master key
-        used_names = set()
-        for gid, spec in enumerate(specs):
-            members = [(self._resolve_idx(i) if not isinstance(i, int) else i, lk)
-                       for (i, lk) in spec["members"]]
-            if not members:
-                continue
+        for mkey, members in resolved:
             first_idx, first_lk = members[0]
-            mkey = spec.get("name") or self._group_master_key(
-                gid, first_lk, bare=spec.get("bare", False), used=used_names)
-            used_names.add(mkey)
-            self._check_share_group(mkey, members, on_mismatch)
             p0 = self.objectives[first_idx]["func"].params[first_lk]
             self.master_params.add(mkey, value=p0.value, vary=p0.vary,
                                    min=p0.min, max=p0.max, expr=None,
