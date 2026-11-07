@@ -314,7 +314,10 @@ share `apply_mask`/`prepare_datas`; `yfit_masked` is derived, not read from a st
   (no `try`, no excepthook), so a `ShareMismatchError` would have reached a Qt slot and
   aborted the app. A minimal GUI guard was added in `9518ef9`: `ShareMismatchError` shows a
   message box on the Fit path and on both load paths (`.jpar` and `loadParIntoJoint`), with
-  no retry dialog and no success claim. Fuller GUI handling stays in WS4.
+  no retry dialog and no success claim. Fuller GUI handling stays in WS4. **Final fix wave
+  (`3c3fd71`):** the guard now catches any `ValueError` (I3), and a `ShareMismatchError`
+  asks Yes/No to apply the first dataset's bounds/vary and recompile with
+  `on_mismatch='first'` (I4), which now unifies the local bounds so nothing clips (I1).
 - **X3 (Task 1):** the single list lives in `lmfit/minimizer.py`, where four of the uses
   already are, rather than in a new module.
 - **Out of scope:** B4 (`doFit` routing; moved to WS4), A1.2 (`mkey` in `_box`; WS7 with

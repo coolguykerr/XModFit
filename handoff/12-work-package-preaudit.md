@@ -683,6 +683,7 @@ New fix-list ID: A1.18 (done). A1.17 completed. Premise corrections: decision X2
 
 Consequences for the user:
 - Discard any `.h5` MCMC backend from a pre-A1.18 parallel run (`emcee_cores>1`) that used a column mask: it was sampled under the unmasked likelihood but carries a matching fingerprint.
+- (B2a) Discard any `.h5` MCMC backend from a covariance joint fit whose sidecars carried `v`/`var_fwhm`: B2a now includes the footprint term those keys were dropped from, so the likelihood changed, and `_mcmc_fingerprint` does not hash the covariance or footprint state, so the old backend resumes without a mismatch.
 - `tests/fixtures/make_seed_mask_parent_ref.py` pins `PARENT=63e984e`; re-point it after the A0.6 history rewrite (dropping `7942458`) before regenerating `tests/fixtures/seed_mask_parent_ref.json`.
 
 #### WS1 deferred minors
@@ -710,3 +711,18 @@ One line each, from the review ledger; the final review will triage them.
 - T6b: the `yfit_masked=True` sampling branch is tested only with synthetic models (no PDB `__masked_x__` model exists).
 - T6b: `mask[:len(y)]` truncation hides a length mismatch (inherited convention).
 - T7: `verify_jointmcmc` does not exercise the stride-thinning branch of `_corner_render_data`.
+
+Final review (`.superpowers/sdd/16-plan-ws1-joint-correctness/final-review.md`) made three of these
+load-bearing; the final fix wave closed them and the T4 whitespace / T5 window-edge minors: T3 refused-load
+recovery (now a Yes/No prompt, I4), T3 `.jpar` headless test (T3gui round trip), T5 load-path wiring (I2),
+T5 window edge (M1), T4 whitespace (M3); `_joint_range` is live again.
+
+### 2026-11-06 -- WS1 final fix wave
+
+Final review I1-I4 and M1-M3 fixed in `3c3fd71`; `validate_xpr.py` registry timeout 1500 s in `29e4d55`; docs in
+this commit. I1: `on_mismatch='first'` unifies local bounds/vary so `push_params` cannot clip. I2: load paths
+freeze ranges/masks. I3/I4: `XModFit._compile_joint_guarded` (Yes/No on `ShareMismatchError`, warning box on
+any other `ValueError`). M1: `chisqr_on(imin=, imax=)`. M2: the B2a backend note above. M3: whitespace.
+Verification: `validate_joint_ws1.py` 66/66, `validate_seed_mask.py` 27/27, `tests/run_all.py --quick`
+**54 PASS, 7 SKIP (the slow/external rows), 0 FAIL**, exit 0. `validate_xpr.py` was not re-run here (skipped by
+`--quick`); its new 1500 s timeout is untested in a full run.

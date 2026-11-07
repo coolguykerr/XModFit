@@ -154,7 +154,8 @@ true while no column limit is active — and the two features were never exercis
 The joint-vs-individual model comparison masks with the scalar Xrange only, so the two
 chi2 values are computed on different point sets whenever `#FitRange=` or a column limit
 is in use. *Fix:* route it through the same `imask_for`/`active_index` path as the fit.
-*Done:* `JointFit.active_index(i)` and module function `chisqr_on`; `_eval_chisqr` evaluates both models on the joint fit's own active points. Under covariance the comparison scores both models on raw `y`/`yerr` (a plain chi-square), not `y_corr`/`sigma_meas`; that was already the case and is intended (see `01-joint-fit.md` §6.6). `xmodfit._joint_range` is now dead code. Regression: `validate_joint_ws1.py` T5. Superseded by WS2 §2.1 when that lands.
+*Done:* `JointFit.active_index(i)` and module function `chisqr_on`; `_eval_chisqr` evaluates both models on the joint fit's own active points. Under covariance the comparison scores both models on raw `y`/`yerr` (a plain chi-square), not `y_corr`/`sigma_meas`; that was already the case and is intended (see `01-joint-fit.md` §6.6). Regression: `validate_joint_ws1.py` T5. Superseded by WS2 §2.1 when that lands.
+*Final fix wave (`3c3fd71`):* the `.jpar` and `.par`-into-joint load paths now freeze the fit ranges and column masks after compile (`XModFit._apply_joint_ranges` -> `JointFit._set_ranges`, same arguments as `run_joint_fit`), so a loaded, never re-fitted joint fit is compared on its own `#FitRange=` / column-limit points too; before this, `active_index` there was the whole dataset (a regression from the pre-WS1 scalar `_joint_range()`). `chisqr_on` now evaluates on the objective's `[imin, imax]` window (M1). `xmodfit._joint_range` is live again (used by `run_joint_fit` and the load paths). Regression: `validate_joint_ws1.py` T5e and the T3gui `.jpar` round trip.
 
 **A1.5 Mask + `__masked_x__` breaks the 1-D plot.** [crash, modal dialog]
 With both active, `self.fit.yfit` is shorter than `self.fit.x[imin:imax+1]`, but
@@ -431,6 +432,13 @@ Three gaps:
 `_use_footprint` needs `cov['v']`/`cov['var_fwhm']`, which only `load_bundle_npz` returns,
 while the panel loads sidecars via `load_dataset_cov`, and `load_cov_npz` drops those keys
 even when the `.npz` contains them;
+**(a) DONE 2026-11-06 (WS1 B2a, `1b83aae`).** *Consequence to act on:* **discard old `.h5`
+backends from covariance joint fits whose sidecars carried `v`/`var_fwhm`.** Before B2a those
+keys were dropped at load, so such a fit ran without the footprint term; after B2a a re-run
+includes it, so the likelihood changed. `_mcmc_fingerprint` does not hash the covariance or
+the footprint state, so an old backend resumes under the new likelihood without a mismatch
+(covariance joint MCMC is serial, so this is the serial `.h5`). Delete such backends and
+re-run. Same category as the A1.18 note.
 (b) covariance/GLS joint **MCMC is still serial** — `JointLogProb` has no whitened
 residual, so `_attach_joint_parallel` is gated on `not self._use_cov`;
 (c) the real-data regression leaves with the campaign (A2.5), so the cross-dataset GLS

@@ -379,9 +379,11 @@ which upstream also touched for its new MCMC framework (`merge-with-upstream-dev
    `jcov.load_dataset_cov`, which returns neither key for either flavour
    (`joint_covariance.py:277-309`). So a GUI joint fit can use the scale-factor covariance
    but never the shared-beam term; the bilayer campaign gets it via a script.
-3. **`load_cov_npz` drops `v`/`var_fwhm` even if present** **FIXED 2026-11-06 (`1b83aae`); a sidecar with only one of the two keys now raises `ValueError` at load rather than turning the footprint term half-on.** in the `.npz`
-   (`joint_covariance.py:200-211`) — a one-line fix would make (2) reachable for the npz
-   flavour.
+3. **`load_cov_npz` drops `v`/`var_fwhm` even if present in the `.npz`.** **FIXED 2026-11-06
+   (`1b83aae`): both keys are carried through; a sidecar with only one of the two now
+   raises `ValueError` at load rather than turning the footprint term half-on. The text
+   below is the pre-fix state.** `load_cov_npz` (`joint_covariance.py:200-211`) returned
+   neither key, which is why (2) was unreachable for the npz flavour.
 4. **`doFit`'s individual-fit guards run before the joint branch.** `self.sfnames` and a
    function-list selection must be non-empty for a joint fit via the main Fit button, even
    though a joint view has no Data-list selection. This is survivable only because
@@ -392,18 +394,44 @@ which upstream also touched for its new MCMC framework (`merge-with-upstream-dev
    Per-dataset windows come only from the panel's range table / `.jpar` `#FitRange=`.
    Editing the Xrange box while an individual dataset is selected does not change a joint
    fit's window for that dataset unless you also set its row in the range table.
-6. **`_eval_chisqr` (model comparison) ignores per-dataset ranges and column masks** **FIXED 2026-11-06 (WS1 A1.4, `e1e8b9f`): both models are scored on `JointFit.active_index(i)`. Under covariance the comparison scores both models on raw `y`/`yerr`, a plain chi-square, not `y_corr`/`sigma_meas`; that was already so and is intended.**
-   (`xmodfit.py:7532-7551`): it masks with the scalar `_joint_range()` only. A joint fit
+6. **`_eval_chisqr` (model comparison) ignores per-dataset ranges and column masks.**
+   **FIXED 2026-11-06 (WS1 A1.4, `e1e8b9f`): both models are scored on
+   `JointFit.active_index(i)`, the model evaluated on the objective's own `[imin, imax]`
+   window (`chisqr_on(..., imin=, imax=)`, final fix wave M1). A `.jpar` or `.par` loaded
+   into the joint fit and never re-fitted now has its fit ranges and column masks frozen
+   at load (`XModFit._apply_joint_ranges`, which calls `JointFit._set_ranges` with the same
+   arguments as `run_joint_fit`; final fix wave I2), so the comparison honours
+   `#FitRange=` and the column limits there too. Under covariance the comparison scores
+   both models on raw `y`/`yerr`, a plain chi-square, not `y_corr`/`sigma_meas`; that was
+   already so and is intended. The text below is the pre-fix state.**
+   `_eval_chisqr` (`xmodfit.py:7532-7551`) masked with the scalar `_joint_range()` only. A joint fit
    using per-dataset windows will be compared against individuals over a different point
    set; the comparison already warns when point counts differ, but the joint side itself is
    computed on the wrong window.
-7. **`'Linear w/o error'` scale weights datasets by their own maximum.** **WARNED 2026-11-06 (`6b727d0`): the weighting is unchanged (decision X1), and `perform_fit` adds a `jf.warnings` entry for >=2 datasets without covariance.** In the no-cov
+7. **`'Linear w/o error'` scale weights datasets by their own maximum.** **WARNED 2026-11-06 (`6b727d0`): the weighting is unchanged (decision X1), and `perform_fit` adds a `jf.warnings` entry for >=2 datasets without covariance. The text below is the pre-fix state, and still describes the weighting.** In the no-cov
    branch each dataset is divided by its own `np.max(data)`; the factor cancels in `Log`,
    `Log w/o error` and `Linear` (via `err`), but NOT in `Linear w/o error`, where the
    relative weight between datasets becomes `1/maxd`.
-8. **A share-group inherits value/bounds/vary from its FIRST endpoint only.** **FIXED 2026-11-06 (`e177e2f`, `9518ef9`): differing start values warn (one `jf.warnings` entry per group); differing `min`/`max`/`vary` raise `ShareMismatchError` unless `build_master_params(on_mismatch='first')`, which warns instead. `±inf` bounds compare by equality. Premise correction: `run_joint_fit` did NOT catch exceptions, so `9518ef9` adds a minimal GUI guard (message box on the Fit path and on both load paths) rather than relying on one.** If two
-   datasets disagree on a shared parameter's starting value or bounds, the second is silently
-   discarded (`Joint_Fit_Routines.py:339-346`).
+8. **A share-group inherits value/bounds/vary from its FIRST endpoint only.** **FIXED
+   2026-11-06 (`e177e2f`, `9518ef9`, final fix wave): differing start values warn (one
+   `jf.warnings` entry per group); differing `min`/`max`/`vary` raise `ShareMismatchError`
+   unless `build_master_params(on_mismatch='first')`. `'first'` copies the first
+   endpoint's `min`/`max`/`vary` onto every other endpoint's local Parameter
+   (`_unify_share_group`), so `push_params` can no longer clip a later endpoint, and adds a
+   warning saying the bounds were unified. `±inf` bounds compare by equality. Premise
+   correction: `run_joint_fit` did NOT catch exceptions. The GUI now compiles through
+   `XModFit._compile_joint_guarded` on the Fit path and on both load paths: a
+   `ShareMismatchError` asks Yes/No ("Apply the first dataset's bounds/vary to all members
+   of each share group and continue?"; Yes recompiles with `on_mismatch='first'`, No
+   leaves everything as it was), and any other `ValueError` (e.g. a covariance sidecar
+   problem) is shown in a warning box instead of reaching the Qt slot. A refused load shows
+   no success box. The text below is the pre-fix state.** If two datasets disagreed on a
+   shared parameter's starting value or bounds, the master took the first endpoint's, and
+   the push wrote that value into each later endpoint's own local Parameter, whose
+   narrower bounds clipped it silently (lmfit's value setter). That dataset was then
+   evaluated at a different value from the one the master reported (`build_master_params`
+   step 1 and `push_params`, `Joint_Fit_Routines.py:475-486` and `:576` at the final fix
+   wave).
 9. **`remove_dataset` on the engine renumbers every later dataset's master keys**, so the
    caller must re-run `build_master_params`; the GUI never does this, it edits the spec and
    recompiles instead (which is why engine-level `remove_dataset` is nearly dead code).
