@@ -382,6 +382,12 @@ def test_t4():
     msgs = [str(r.message) for r in rec]
     check("T4c' bare _primary_curve: warnings.warn once, for the multi-curve dataset",
           len(msgs) == 1 and msgs[0].startswith('dataset M_one has 2 curves'), msgs)
+    with _w.catch_warnings(record=True) as rec:
+        _w.simplefilter('always')
+        JO._primary_curve(data['M_one'])
+    msgs = [str(r.message) for r in rec]
+    check("T4c' bare _primary_curve without name=: labelled by its curve keys, not '?'",
+          len(msgs) == 1 and '?' not in msgs[0] and 'curveA, curveB' in msgs[0], msgs)
 
 def test_t5():
     """A1.4 (01 6.6): joint-vs-individual chi-square on the joint fit's own points."""
@@ -618,6 +624,24 @@ def test_n2():
     rep = jf._report()
     check("N2b two derived blocks (P0/P1 collapsed, P2 separate)",
           rep.count('[[Derived]]') == 2 and '(P2)' in rep, rep.count('[[Derived]]'))
+
+    # (b') mixed share (review F7): protins shared by all, theta/phi per dataset.
+    # Every dataset then has its own block, keyed by the shared protins and its own
+    # d{i}_theta / d{i}_phi.
+    def mixed(sp, k, names):
+        if k == 'protins':
+            sp.set_shared(k)
+    jf = build(2, mixed)
+    km = jf._derived_keymaps()
+    check("N2b' mixed share: keymap points at master keys that exist",
+          all(v in jf.master_params for m in km for v in m.values()), km)
+    check("N2b' mixed share: protins shared, theta/phi per dataset",
+          km[0]['protins'] == km[1]['protins']
+          and km[0]['theta'] != km[1]['theta'] and km[0]['phi'] != km[1]['phi'], km)
+    rep = jf._report()
+    check("N2b' mixed share: one derived block per dataset",
+          rep.count('[[Derived]]') == 2 and '(P0)' in rep and '(P1)' in rep,
+          rep.count('[[Derived]]'))
 
     # (c) the legacy scripted shared= path is unchanged
     from Joint_Fit_Routines import JointFit

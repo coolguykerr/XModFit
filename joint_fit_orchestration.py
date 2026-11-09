@@ -39,12 +39,15 @@ import joint_covariance as jcov
 
 
 def _multi_curve_msg(name, dataset):
-    """The joint_fit_spec wording (01 6.14) for a dataset with several sub-curves."""
+    """The joint_fit_spec wording (01 6.14) for a dataset with several sub-curves.
+    Without a name the curve keys identify the dataset."""
+    if name is None:
+        name = 'with curves (%s)' % ', '.join(map(str, dataset))
     return ("dataset %s has %d curves; only the first (%s) enters the joint fit"
             % (name, len(dataset), next(iter(dataset))))
 
 
-def _primary_curve(dataset, warn=True, name='?'):
+def _primary_curve(dataset, warn=True, name=None):
     """XModFit stores data as data[fname][curve_key] -> {'x','y','yerr',...}.
     Return the first curve's arrays (Axis-2 datasets are single-curve).
 
