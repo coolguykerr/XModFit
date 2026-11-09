@@ -30,15 +30,29 @@ user has ticked a "Joint fit selected datasets" box::
 tracks the chosen function).  For Axis-2 correlated-error work it is XLayers.
 """
 
+import warnings
+
 import numpy as np
 
 from Joint_Fit_Routines import JointFit
 import joint_covariance as jcov
 
 
-def _primary_curve(dataset):
+def _multi_curve_msg(name, dataset):
+    """The joint_fit_spec wording (01 6.14) for a dataset with several sub-curves."""
+    return ("dataset %s has %d curves; only the first (%s) enters the joint fit"
+            % (name, len(dataset), next(iter(dataset))))
+
+
+def _primary_curve(dataset, warn=True, name='?'):
     """XModFit stores data as data[fname][curve_key] -> {'x','y','yerr',...}.
-    Return the first curve's arrays (Axis-2 datasets are single-curve)."""
+    Return the first curve's arrays (Axis-2 datasets are single-curve).
+
+    The later sub-curves are dropped; with ``warn`` that is reported through
+    ``warnings.warn`` (01 6.14). ``build_jointfit_from_selection`` passes
+    ``warn=False`` and records it in ``JointFit.warnings`` instead."""
+    if warn and len(dataset) > 1:
+        warnings.warn(_multi_curve_msg(name, dataset), stacklevel=2)
     key = list(dataset.keys())[0]
     d = dataset[key]
     return (np.asarray(d["x"], dtype=float),
@@ -70,8 +84,11 @@ def build_jointfit_from_selection(data, fnames, funcClass,
     funcs = funcs or {}
 
     jf = JointFit()
+    multi_curve = []
     for fname in fnames:
-        x, y, yerr = _primary_curve(data[fname])
+        x, y, yerr = _primary_curve(data[fname], warn=False)
+        if len(data[fname]) > 1:
+            multi_curve.append(_multi_curve_msg(fname, data[fname]))
         cov = None
         cp = cov_paths.get(fname)
         if cp:
@@ -82,6 +99,9 @@ def build_jointfit_from_selection(data, fnames, funcClass,
         else:
             jf.add_dataset(fname, funcClass=funcClass, x=x, y=y, yerr=yerr, cov=cov)
     jf.build_master_params(shared=shared)
+    # 01 6.14, as in JointFitSpec.compile: appended after build_master_params,
+    # which resets the build-time warnings.
+    jf.warnings.extend(multi_curve)
     return jf
 
 

@@ -353,6 +353,34 @@ def test_t4():
     check("T4c single-curve datasets -> no multi-curve warning",
           not any('curves' in w for w in sp1.compile(one).warnings))
 
+    # (c') audit gap: the script orchestrator (joint_fit_orchestration) dropped the
+    # later sub-curves silently. build_jointfit_from_selection now records the
+    # same message in JointFit.warnings; a bare _primary_curve uses warnings.warn.
+    import warnings as _w
+    import joint_fit_orchestration as JO
+    with _w.catch_warnings(record=True) as rec:
+        _w.simplefilter('always')
+        jo = JO.build_jointfit_from_selection(data, list(names), Line, shared=['a'])
+    wo = list(jo.warnings)
+    check("T4c' build_jointfit_from_selection warns for each multi-curve dataset",
+          all(any(w.startswith('dataset %s has 2 curves; only the first (curveA) '
+                               'enters the joint fit' % nm) for w in wo)
+              for nm in names), wo)
+    check("T4c' ... in JointFit.warnings only (no duplicate warnings.warn)",
+          not any('curves' in str(r.message) for r in rec), [str(r.message) for r in rec])
+    check("T4c' ... and fits the first curve only",
+          all(len(o['x']) == len(X) for o in jo.objectives))
+    jo1 = JO.build_jointfit_from_selection(one, list(names), Line, shared=['a'])
+    check("T4c' single-curve selection -> no multi-curve warning",
+          not any('curves' in w for w in jo1.warnings), list(jo1.warnings))
+    with _w.catch_warnings(record=True) as rec:
+        _w.simplefilter('always')
+        JO._primary_curve(data['M_one'], name='M_one')
+        JO._primary_curve(one['M_one'], name='M_one')
+    msgs = [str(r.message) for r in rec]
+    check("T4c' bare _primary_curve: warnings.warn once, for the multi-curve dataset",
+          len(msgs) == 1 and msgs[0].startswith('dataset M_one has 2 curves'), msgs)
+
 def test_t5():
     """A1.4 (01 6.6): joint-vs-individual chi-square on the joint fit's own points."""
     import numpy as np
