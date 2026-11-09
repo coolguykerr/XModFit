@@ -38,3 +38,7 @@ mesh.txt
 # Note: .idea/ is deliberately NOT ignored -- two files in it are tracked upstream.
 # They are currently modified to encode one machine's conda path; see 10-fix-list.md A0.5.
 tests/_logs/
+
+# Agent review / audit output (WS0/WS1 audit 2026-11-09, item N5). Kept on disk,
+# never committed by accident.
+.superpowers/
