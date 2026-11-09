@@ -2155,6 +2155,11 @@ class Minimizer:
                             pass
                     pdb_step_cb = _step_cb
             except Exception:
+                # Not silent: building the parallel objective failed, which is a bug
+                # to see, not a choice. The serial fallback itself is unchanged.
+                import traceback; traceback.print_exc()
+                print('emcee: parallel PDB log-prob setup failed (above); '
+                      'falling back to serial sampling.', flush=True)
                 logprob_fn = self._lnprob
                 sampler_kwargs['pool'] = None  # safe serial fallback
 
