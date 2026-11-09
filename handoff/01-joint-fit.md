@@ -449,6 +449,9 @@ which upstream also touched for its new MCMC framework (`merge-with-upstream-dev
 14. **WARNED 2026-11-06 (`6b727d0`): `compile()` adds a `jf.warnings` entry when a dataset has more than one curve.** `_primary_curve` (both in `joint_fit_spec.py:290-294` and
     `joint_fit_orchestration.py:39-46`) takes only the FIRST sub-curve of a dataset. A
     multi-curve dataset silently contributes one curve to a joint fit.
+    **2026-11-09 (audit gap AG.4, `3ba60b4`):** the orchestration copy warns too, into
+    `JointFit.warnings` from `build_jointfit_from_selection`, or through `warnings.warn`
+    from a bare `_primary_curve` call (`validate_joint_ws1.py` T4c').
 
 ## 7. Claims to verify (audit hooks)
 

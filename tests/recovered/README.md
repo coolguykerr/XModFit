@@ -76,6 +76,13 @@ computed a verdict but only printed it or kept it in a local flag, now on `tests
 exits 0 (registry `smoke: true`, no invented checks); **known** = expected to fail (registry
 `known:` carries the reason).
 
+Since the 2026-11-09 audit-gap fixes the runner also marks a row FAIL when its exit code is 0
+but its log contains `Traceback (most recent call last)`: pyqtgraph replaces `sys.excepthook`
+once xmodfit is imported, so an exception in a Qt slot is printed and swallowed. Registry
+`expected_tracebacks` (True, or a substring every traceback's exception line must contain)
+exempts a harness that prints one on purpose; only `test_joint_abort` (`'AbortFitException'`)
+uses it. `tests.harness` also counts such an exception as a failed check.
+
 | harness | batch | status | kind | note |
 |---|---|---|---|---|
 | `verify_joint_orient` | a | PASS | assert | |
@@ -90,8 +97,8 @@ exits 0 (registry `smoke: true`, no invented checks); **known** = expected to fa
 | `verify_jointmcmc` | a | PASS | assert | A1.17: `_corner_render_data` (b953c3f) and `_CORNER_MAX_SAMPLES` now bound onto the `Fake` |
 | `verify_jointwindow` | a | PASS | assert | |
 | `repro_full` | a | PASS | assert | |
-| `repro_switch` | a | PASS | assert | |
-| `repro_backend` | a | PASS | smoke | prints backend state, no assertion |
+| `repro_switch` | a | PASS | assert | 2026-11-09: no longer raises `AttributeError` in `functionChanged` (signals blocked while the fake function item is added) |
+| `repro_backend` | a | PASS | converted | 2026-11-09 (audit W0.3): checks the backend is attached to the chosen file; was smoke |
 | `validate_parallel_seed` | b | PASS | converted | parallel == serial, costs finite; tim3 minima numbers (chi2 148.9 / 157.2) no longer asserted |
 | `validate_parallel_sampling` | b | PASS | converted | objective identity, finite chains, progress hook, abort; ~121 s |
 | `compare_models` | b | PASS | smoke | no assertions (registered `smoke`); exercises `XLayersPDB_dev_smooth`, retired under D1; slow, timeout 900 |
@@ -110,13 +117,13 @@ exits 0 (registry `smoke: true`, no invented checks); **known** = expected to fa
 | `verify_joint_parallel_sample` | c | PASS | assert | |
 | `verify_joint_parallel_edge` | c | PASS | assert | |
 | `verify_joint_4ds_parallel` | c | PASS | assert | |
-| `test_gui_construct` | d | PASS | smoke | needed the conditional `xraydb` stub; prints CONSTRUCT_OK |
+| `test_gui_construct` | d | PASS | converted | needed the conditional `xraydb` stub; 2026-11-09 (audit W0.3): checks the helpers and category list; was smoke |
 | `test_gui_switch` | d | PASS | assert | |
 | `test_pdb_persist` | d | PASS | converted | |
 | `test_phase1` | d | PASS | converted | |
-| `smoke_fit` | e | PASS | smoke-shaped | A1.17: reads the `_LINEAR` scaler keys GID2D has always emitted |
-| `repro_raw` | e | PASS | smoke | rebuilds the raw map in `tests/_logs`, no longer writes into `Data/` |
-| `repro_tab` | e | PASS | smoke | |
+| `smoke_fit` | e | PASS | smoke | A1.17: reads the `_LINEAR` scaler keys GID2D has always emitted; registered `smoke` 2026-11-09 (audit W0.3) |
+| `repro_raw` | e | PASS | converted | rebuilds the raw map in `tests/_logs`, no longer writes into `Data/`; 2026-11-09 (audit W0.3): checks the RAW-file coverage warning; was smoke |
+| `repro_tab` | e | PASS | converted | 2026-11-09 (audit W0.3): checks map2d mode, the 2D tab, the auto-selected maps and coverage; was smoke |
 | `test_xpr_stage1` | f | PASS | converted | `cmcars`, external `XPR-main/test_data`; ~44 s |
 | `test_xpr_fitting` | f | PASS | converted | `cmcars`, external, slow, 232 s, timeout 900 |
 | `test_gui_listing` | f | PASS | assert | `cmcars` |

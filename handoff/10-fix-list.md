@@ -286,6 +286,83 @@ Found by WS1 while fixing A1.3. With a column mask and `emcee_cores>1`, the para
 - **Re-point the fixture generator after A0.6.** `tests/fixtures/make_seed_mask_parent_ref.py` pins `PARENT=63e984e`. Dropping `7942458` (A0.6) rewrites that hash, so re-point `PARENT` before anyone regenerates the fixture. The committed fixture itself is unaffected.
 - Open: the `yfit_masked=True` sampling branch is only tested with synthetic models (no PDB model declares `__masked_x__`); `mask[:len(y)]` truncation hides a length mismatch (inherited convention).
 
+## A1a. Gaps found by the WS0/WS1 audit (2026-11-09)
+
+The independent audit (`.superpowers/review/ws0-ws1-audit.md`, git-ignored) found 12 of 15
+WS0/WS1 items resolved, 3 partial, and five new problems (N1-N5). All are closed below.
+Every new check was shown to fail against a scratch copy with the fix reverted or broken;
+the repo tree was never the mutant.
+
+**AG.1 (audit N1) Qt-slot exceptions never failed a harness.** [safety net, high] **DONE 2026-11-09 (`7c37f8f`).**
+pyqtgraph replaces `sys.excepthook` when xmodfit is imported, so PyQt5 prints an exception
+raised in a slot and carries on; the harness still exits 0.
+*Done:* `tests/run_all.py` marks an exit-0 row FAIL when its log contains
+`Traceback (most recent call last)`, with a note naming the exception. This covers
+subprocesses and pool workers too. The registry key `expected_tracebacks` (True, or a
+substring that every traceback's exception line must contain) is used once:
+`test_joint_abort`, whose emcee wrapper prints the deliberate `AbortFitException`.
+`tests/harness.py` also installs a counting excepthook at import; pyqtgraph leaves a
+non-default hook alone. `check()`/`finish()` re-install it, chained, if something replaced
+it. Each slot exception counts as one failed check.
+The `AttributeError: 'XModFit' object has no attribute 'curr_category'` at
+`functionChanged` (repro_switch, verify_seed_gui) was harness-made, not an app bug. Both
+harnesses added a function item with no category selected, and in the app the function
+list is only populated by `update_functions`, which sets `curr_category` first. Both
+harnesses now block the list's signals while they fake the current item.
+*Proof:* the self-tests (`tests/test_run_all.py` fixtures `tb_exit0`, `tb_allowed`,
+`tb_not_allowed`, `slot_exc`; `tests/test_harness.py` cases `slot_exception`,
+`slot_exception_late_hook`) fail 9 + 2 checks against the HEAD runner/harness. A scratch
+copy of the audit's `chk_hook.py`, and a harness repeating the pre-fix repro_switch
+pattern, both come out FAIL.
+
+**AG.2 (audit A1.4 partial) no regression guard on the model-comparison call site.** **DONE 2026-11-09 (`b190c27`).**
+*Done:* `validate_joint_ws1.py` T5f drives the real `XModFit.computeModelComparison`, and
+`_eval_chisqr` through it, on a joint fit with per-dataset ranges and a mask. It asserts
+N = 51 active points (not 80) and that the joint and individual chi-squares match.
+*Proof:* the audit's `ed_a14` mutant (scalar window, no mask) fails all three T5f checks.
+The "covered only through `validate_jointfit_gui`" note in `12-work-package-preaudit.md`
+was false and is corrected.
+
+**AG.3 (audit W0.3) trivially-passing rows.** **DONE 2026-11-09 (`7c37f8f`, `b4ec7ac`).**
+*Done:* `smoke_fit.py` is registered `smoke`. `validate_fastscan_gui.py` returns 77 (SKIP)
+when Julia is unavailable, and takes `ROOT` from `__file__` instead of a hard-coded path.
+`repro_backend`, `repro_raw`, `repro_tab` and `test_gui_construct` gained `tests.harness`
+checks on what each was written to show, and are no longer smoke. Still smoke, with the
+reason in the registry: `test_pickle_fit` (a diagnostic probe), `test_autocorr_window`
+(timing), `compare_models`, `check_aproj`, `smoke_fit`.
+*Proof:* one mutant per harness: backend never attached (2 FAIL), 2D tab hidden (1),
+RAW-file warning suppressed (2), `_clone_fit` renamed (1). `julia_available` forced False
+gives rc 77 here and rc 0 at HEAD.
+
+**AG.4 (audit 01 §6.14 partial) the orchestration path dropped sub-curves silently.** **DONE 2026-11-09 (`3ba60b4`).**
+*Done:* `build_jointfit_from_selection` records the spec path's message in
+`JointFit.warnings`. A bare `_primary_curve` call (no JointFit) uses `warnings.warn`.
+*Proof:* `validate_joint_ws1.py` T4c' fails against the pre-fix module.
+
+**AG.5 (audit N2) the report's derived-quantity keymap ignored share-groups.** [silent omission, medium] **DONE 2026-11-09 (`7ed2ec7`).**
+`JointFit._report` keyed `derived_report` through `_master_key`, which knows only the legacy
+`shared=` list. For any spec/GUI joint fit with a shared pose the XPR `protins_top` block was
+silently missing.
+*Done:* `JointFit._derived_keymaps` is a reverse lookup of `param_map`, falling back to
+`_master_key`.
+*Proof:* `validate_joint_ws1.py` N2 runs the real `XLayersPDB_XPR.derived_report` (pure
+Python, no Julia) on a synthetic pose model in three cases: shared bare, shared by a subset
+(`g{n}_` keys), and legacy `shared=`. The pre-fix keymap fails 6 checks.
+`05-xpr-julia.md` §3 is corrected.
+
+**AG.6 (audit N3) `run_all.py --only <typo>` ran nothing and exited 0.** **DONE 2026-11-09 (`7c37f8f`).**
+*Done:* it prints "no harness matched" and exits 2. Checked in `tests/test_run_all.py`.
+
+**AG.7 (audit N4) the no-cov `Log w/o error` / `Linear w/o error` joint residuals were unpinned.** **DONE 2026-11-09 (`cd613b4`).**
+*Done:* `validate_joint_ws1.py` N4 compares `JointFit.residual`, evaluated off the optimum,
+with hand-computed `log10(y) - log10(f)` and `(y - f)/max(y)`.
+*Proof:* the audit's `mut_lwo` fails the Log check. An analogous mutant that drops the
+`max(y)` normalisation fails the Linear check. Each mutant touches one scale, so each fails
+only its own check.
+
+**AG.8 (audit N5) the audit output path was not ignored.** **DONE 2026-11-09 (`3b58055`).**
+`.superpowers/` is in `.gitignore`; the audit file is kept on disk.
+
 ## A2. Data folder
 
 **A2.1 Remove testing artefacts.** The untracked `Data/*.h5` (A0.3), the 3.9 MB

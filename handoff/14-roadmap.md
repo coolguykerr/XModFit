@@ -86,6 +86,8 @@ Each item is specified in the fix list. All are small.
 
 **Status: Done 2026-11-06 (A1.1, A1.3, A1.4, A1.17, B2a, 01 §6.2/3/6/7/8/14, plus A1.18 found during execution); full-run table in `12-work-package-preaudit.md`. Full run: 60 PASS, 0 FAIL, 0 KNOWN-FAIL, 1 TIMEOUT (`validate_xpr.py` at the 600 s default under a slow machine; PASS alone in 622 s).**
 
+**Audit gaps closed 2026-11-09** (`10-fix-list.md` §A1a, AG.1-AG.8: Qt-slot tracebacks now fail a row, A1.4 call-site guard, W0.3 smoke rows given checks, §6.14 orchestration warning, N2 share-group keymap, N3/N4/N5). Full run at `3b58055`, one uninterrupted run: **61 PASS, exit 0** (`tests/_logs/gapfix_full_run.txt`).
+
 ## WS2 — The reporting contract: statistics the program computes for the user
 
 New module **`joint_fit_stats.py`** (Qt-free). It consumes a fitted `JointFit`. Every
@@ -343,7 +345,9 @@ In order of value to joint fits:
    capability (duck-typed `dydp`/`parameter_columns`), keep the measured `nvarys ≥ 4` gate,
    and keep `expr` unsupported. Feeds WS2 §2.5.2 exact Fisher information.
 2. **Generic derived-report keymap.** Pass each objective's full `{local_key: master_key}`
-   to `derived_report`, instead of the hard-coded protins/theta/phi.
+   to `derived_report`, instead of the hard-coded protins/theta/phi. (The three-key keymap
+   was also *wrong* for spec/GUI share-groups; fixed 2026-11-09 as audit gap AG.5 by reading
+   it off `param_map`. What remains here is the generalisation beyond the three keys.)
 3. **Profile likelihood** per master parameter: pin one, refit the rest by continuation,
    and report the profile alongside the Hessian stderr.
 4. **Hessian certification** of a joint endpoint (MIN / SADDLE / DEGENERATE, bound-aware,
