@@ -297,10 +297,16 @@ the repo tree was never the mutant.
 pyqtgraph replaces `sys.excepthook` when xmodfit is imported, so PyQt5 prints an exception
 raised in a slot and carries on; the harness still exits 0.
 *Done:* `tests/run_all.py` marks an exit-0 row FAIL when its log contains
-`Traceback (most recent call last)`, with a note naming the exception. This covers
-subprocesses and pool workers too. The registry key `expected_tracebacks` (True, or a
-substring that every traceback's exception line must contain) is used once:
-`test_joint_abort`, whose emcee wrapper prints the deliberate `AbortFitException`.
+`Traceback (most recent call last)`, with a note naming the exception. It also covers
+child processes that print to the inherited stderr. A `multiprocessing.Pool` worker's
+exception is pickled back to the parent, so it is seen only if the parent prints it or
+dies of it. The known blind spot was the serial fallback in `Minimizer.emcee`
+(`lmfit/minimizer.py`, the parallel PDB log-prob setup's `except Exception:`), which
+swallowed the error; since the review round it prints the traceback and a "falling back
+to serial sampling" line, with the fallback itself unchanged. The registry key
+`expected_tracebacks` (True, or an exception type, optionally module-qualified in the
+log) is used once: `test_joint_abort`, whose emcee wrapper prints the deliberate
+`AbortFitException`.
 `tests/harness.py` also installs a counting excepthook at import; pyqtgraph leaves a
 non-default hook alone. `check()`/`finish()` re-install it, chained, if something replaced
 it. Each slot exception counts as one failed check.
@@ -314,6 +320,26 @@ harnesses now block the list's signals while they fake the current item.
 `slot_exception_late_hook`) fail 9 + 2 checks against the HEAD runner/harness. A scratch
 copy of the audit's `chk_hook.py`, and a harness repeating the pre-fix repro_switch
 pattern, both come out FAIL.
+
+*Review round (2026-11-09, F1-F8):*
+- The allowance matches the exception TYPE (`^(?:[\w.]+\.)?AbortFitException(?::|$)`), so
+  `TypeError: cannot pickle 'AbortFitException'` and `KeyError: 'AbortFitException'` are
+  not allowed. The row note counts allowed tracebacks (`2 allowed tracebacks` for
+  test_joint_abort).
+- The exception line is the one that ends the traceback block at the header's own
+  indentation, so an indented (embedded) traceback is read correctly. A UTF-16 log is
+  decoded too.
+- SKIP rows are scanned as well. `tests.harness.skip()` exits 1 if a check failed or a
+  slot exception was counted before the skip.
+- The hook says "uncaught exception". Under `XMF_CHECK_RAISE=1` a failed check raised in a
+  slot is counted once.
+- The runner is the gate. A harness run directly with `python` that does not use
+  `tests.harness` (about 25 of them, bare `assert`) still exits 0 on a slot exception.
+- Proof: against `f954a8d` the new runner self-tests fail 11 of 34 and the harness
+  self-tests fail 3 cases. With the parallel setup forced to raise,
+  `validate_parallel_sampling` alone still reports ALL PASS (5 checks) on the old
+  fallback, its "parallel" chain having silently run serial. Through the new fallback
+  the runner row is FAIL naming the RuntimeError.
 
 **AG.2 (audit A1.4 partial) no regression guard on the model-comparison call site.** **DONE 2026-11-09 (`b190c27`).**
 *Done:* `validate_joint_ws1.py` T5f drives the real `XModFit.computeModelComparison`, and

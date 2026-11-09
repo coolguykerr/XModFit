@@ -192,10 +192,15 @@ Exit code 1 on any FAIL or TIMEOUT, 2 when `--only` matches nothing. A row that 
 but whose log contains `Traceback (most recent call last)` is FAIL, with a note naming the
 exception: pyqtgraph replaces `sys.excepthook` when xmodfit is imported, so an exception in a
 Qt slot is printed and the process carries on (WS0/WS1 audit N1). `tests/harness.py` also
-installs a counting excepthook, so such an exception is a failed check. Registry fields:
+installs a counting excepthook, so such an exception is a failed check. **The runner is
+the gate:** a harness run directly with `python file.py` that does not use `tests.harness`
+(the bare-`assert` ones) can still exit 0 on a slot exception; only the runner's log scan
+catches it. SKIP rows are scanned too, and a `multiprocessing.Pool` worker's exception is
+seen only if the parent prints it. Registry fields:
 `interp`, `external`, `slow`, `known` (expected to fail, with a fix-list ID), `smoke`
-(assertion-free script), `timeout`, `expected_tracebacks` (True, or a substring every
-traceback's exception line must contain; only `test_joint_abort` uses it).
+(assertion-free script), `timeout`, `expected_tracebacks` (True, or the exception type
+every traceback must end with, optionally module-qualified; only `test_joint_abort` uses
+it, and the row note counts the allowed tracebacks).
 Flags: `--only SUBSTR`, `--timeout SEC`, `--dir DIR`, `--registry PATH`, and `--quick`,
 which skips every `slow` and `external` entry. **`--quick` is the before-and-after-every-change
 command for WS1** (about 8.5 min); the full run takes about 33 min. The recorded baseline is in

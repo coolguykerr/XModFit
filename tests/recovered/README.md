@@ -77,11 +77,13 @@ exits 0 (registry `smoke: true`, no invented checks); **known** = expected to fa
 `known:` carries the reason).
 
 Since the 2026-11-09 audit-gap fixes the runner also marks a row FAIL when its exit code is 0
-but its log contains `Traceback (most recent call last)`: pyqtgraph replaces `sys.excepthook`
-once xmodfit is imported, so an exception in a Qt slot is printed and swallowed. Registry
-`expected_tracebacks` (True, or a substring every traceback's exception line must contain)
-exempts a harness that prints one on purpose; only `test_joint_abort` (`'AbortFitException'`)
-uses it. `tests.harness` also counts such an exception as a failed check.
+(or 77) but its log contains `Traceback (most recent call last)`: pyqtgraph replaces
+`sys.excepthook` once xmodfit is imported, so an exception in a Qt slot is printed and
+swallowed. Registry `expected_tracebacks` (True, or the exception type every traceback must
+end with) exempts a harness that prints one on purpose; only `test_joint_abort`
+(`'AbortFitException'`) uses it. `tests.harness` also counts such an exception as a failed
+check, but the **assert**-kind harnesses here do not use it: run directly with `python`, they
+can still exit 0 on a slot exception. The runner is the gate.
 
 | harness | batch | status | kind | note |
 |---|---|---|---|---|
