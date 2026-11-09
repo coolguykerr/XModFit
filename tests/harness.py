@@ -24,10 +24,12 @@ def _counting_excepthook(etype, value, tb):
     if _counting_excepthook.active:      # a hook we chained to wrapped us: do not loop
         sys.__excepthook__(etype, value, tb)
         return
-    _n_checks += 1
-    _n_fail += 1
-    print('FAIL - uncaught exception (Qt slot or callback) | %s: %s'
-          % (getattr(etype, '__name__', etype), value), flush=True)
+    # A failed check raised under XMF_CHECK_RAISE=1 was already counted by check().
+    if not getattr(value, '_xmf_counted', False):
+        _n_checks += 1
+        _n_fail += 1
+        print('FAIL - uncaught exception | %s: %s'
+              % (getattr(etype, '__name__', etype), value), flush=True)
     nxt = _counting_excepthook.chained
     _counting_excepthook.active = True
     try:
@@ -65,7 +67,9 @@ def check(name, cond, detail=''):
     if not ok:
         _n_fail += 1
         if os.environ.get('XMF_CHECK_RAISE') == '1':
-            raise AssertionError(name)
+            err = AssertionError(name)
+            err._xmf_counted = True          # the excepthook must not count it again
+            raise err
     return ok
 
 
@@ -78,7 +82,14 @@ def check_close(name, got, want, tol):
 
 
 def skip(reason):
-    """Print SKIP and exit 77."""
+    """Print SKIP and exit 77 -- unless a check already failed or an uncaught
+    (e.g. Qt-slot) exception was counted: then the skip must not hide it, and
+    this exits 1."""
+    if _n_fail:
+        print('SKIP - %s' % reason)
+        print('FAILURES PRESENT (%d of %d) before the skip: exiting as a failure'
+              % (_n_fail, _n_checks))
+        sys.exit(1)
     print('SKIP - %s' % reason)
     sys.exit(77)
 

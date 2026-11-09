@@ -39,16 +39,26 @@ want = [('ok', 'PASS'), ('bad', 'FAIL'), ('skip', 'SKIP'), ('hang', 'TIMEOUT'),
         ('fixed', 'KNOWN-FAIL NOW PASSES'), ('smoke', 'PASS'),
         # audit N1: exit 0 with a traceback in the log is FAIL unless the registry allows it
         ('tb_exit0', 'FAIL'), ('tb_allowed', 'PASS'), ('tb_not_allowed', 'FAIL'),
-        ('slot_exc', 'FAIL')]
+        ('slot_exc', 'FAIL'),
+        # review F1-F3: the allowance is the exception TYPE; indented tracebacks; skips
+        ('tb_msg_mentions', 'FAIL'), ('tb_key_named', 'FAIL'), ('tb_indented', 'FAIL'),
+        ('tb_qualified', 'PASS'), ('tb_skip', 'FAIL')]
 for name, st in want:
     got = rows.get(name, (None, ''))[0]
     check('status of %s' % name, got == st, 'got %r want %r' % (got, st))
 check('smoke note says smoke', 'smoke' in rows.get('smoke', ('', ''))[1])
-for name in ('tb_exit0', 'tb_not_allowed', 'slot_exc'):
+for name in ('tb_exit0', 'tb_not_allowed', 'slot_exc', 'tb_msg_mentions', 'tb_key_named',
+             'tb_indented', 'tb_skip'):
     check('%s note explains the traceback' % name,
           'traceback in log' in rows.get(name, ('', ''))[1], rows.get(name, ('', ''))[1])
 check('slot_exc note names the slot exception',
       'AssertionError' in rows.get('slot_exc', ('', ''))[1])
+check('tb_indented note names the indented ValueError, not the later line',
+      'ValueError: indented' in rows.get('tb_indented', ('', ''))[1],
+      rows.get('tb_indented', ('', ''))[1])
+for name in ('tb_allowed', 'tb_qualified'):
+    check('%s note counts the allowed traceback' % name,
+          '1 allowed traceback' in rows.get(name, ('', ''))[1], rows.get(name, ('', ''))[1])
 check('runner exit code is 1', p.returncode == 1, 'rc %s' % p.returncode)
 
 alive = None

@@ -11,20 +11,24 @@ Statuses: PASS, FAIL, SKIP (exit 77 or --quick), TIMEOUT, KNOWN-FAIL,
 KNOWN-FAIL NOW PASSES. Exit code 1 if any FAIL or TIMEOUT, 2 if --only matched no
 harness, else 0.
 
-A harness that exits 0 but whose log contains a Python traceback is FAIL, with a note.
-pyqtgraph replaces sys.excepthook when xmodfit is imported, so an exception raised in a
-Qt slot (signal handler, timer, cell edit) is printed and swallowed and the process still
-exits 0; the log scan is what catches it, including in subprocesses and pool workers.
+A harness that exits 0 (or 77, SKIP) but whose log contains a Python traceback is FAIL,
+with a note. pyqtgraph replaces sys.excepthook when xmodfit is imported, so an exception
+raised in a Qt slot (signal handler, timer, cell edit) is printed and swallowed and the
+process still exits 0; the log scan is what catches it. It also covers child processes
+that print to the inherited stderr. A multiprocessing.Pool worker's exception is pickled
+back to the parent and is seen only if the parent prints it (or dies of it).
 
 Registry entry keys (all optional): interp ('cmc-py39' | 'cmcars'), external (str),
 slow (bool), known (str: expected to fail), smoke (bool: assertion-free script),
-timeout (int seconds), expected_tracebacks (True, or a str that the final exception
-line of every traceback in the log must contain: the harness prints one on purpose).
+timeout (int seconds), expected_tracebacks (True, or an exception type name, optionally
+module-qualified in the log, that every traceback in the log must end with: the harness
+prints one on purpose; the row note counts the allowed tracebacks).
 """
 import argparse
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -82,32 +86,66 @@ def log_path(rel):
     return os.path.join(LOG_DIR, rel.replace('/', '__') + '.log')
 
 
+def _exception_line(lines, i):
+    """The exception line that ends the traceback whose header is lines[i].
+
+    It is the first non-blank line after the frames at the header's OWN
+    indentation: frame ('File ...'), code and caret lines sit deeper, so a
+    traceback embedded in an indented message is read correctly. A line
+    indented less than the header ends the block with no exception line ('?')."""
+    hdr = lines[i]
+    ind = hdr[:len(hdr) - len(hdr.lstrip())]
+    for nxt in lines[i + 1:]:
+        if not nxt.strip():
+            continue
+        if not nxt.startswith(ind):
+            return '?'
+        rest = nxt[len(ind):]
+        if rest[:1] in (' ', '\t'):
+            continue                      # a frame, code or caret line
+        return rest.strip()
+    return '?'
+
+
+def _allowed(exc, allowed):
+    """True if exception line `exc` is allowed by a registry expected_tracebacks
+    value: True allows anything; a str must be the exception TYPE (optionally
+    module-qualified), not merely appear in the message."""
+    if allowed is True:
+        return True
+    if not isinstance(allowed, str) or not allowed:
+        return False
+    return re.match(r'^(?:[\w.]+\.)?%s(?::|$)' % re.escape(allowed), exc) is not None
+
+
 def traceback_problem(log, allowed=None):
-    """Return None if the log is traceback-free (or every traceback is allowed by the
-    registry's expected_tracebacks), else a short note naming the first offending
-    exception line."""
+    """Scan a harness log for Python tracebacks.
+
+    Returns (problem, n_allowed). problem is None if every traceback is allowed by
+    the registry's expected_tracebacks, else a short note naming the first
+    offending exception line. n_allowed counts the tracebacks that were allowed."""
     try:
         with open(log, 'rb') as fh:
-            text = fh.read().decode('utf-8', 'replace')
+            raw = fh.read()
     except OSError:
-        return None
-    if TRACEBACK not in text or allowed is True:
-        return None
+        return None, 0
+    # harnesses run with PYTHONIOENCODING=utf-8; a child that wrote UTF-16 (BOM) is decoded too
+    bom16 = raw[:2] in (b'\xff\xfe', b'\xfe\xff')
+    text = raw.decode('utf-16' if bom16 else 'utf-8', 'replace')
+    if TRACEBACK not in text:
+        return None, 0
     lines = text.splitlines()
-    n_tb = 0
+    n_tb = n_ok = 0
     for i, ln in enumerate(lines):
         if TRACEBACK not in ln:
             continue
         n_tb += 1
-        exc = '?'
-        for nxt in lines[i + 1:]:          # frames are indented; the exception line is not
-            if nxt.strip() and not nxt.startswith((' ', '	')):
-                exc = nxt.strip()
-                break
-        if not (isinstance(allowed, str) and allowed in exc):
-            return ('traceback in log, exit 0 overridden (traceback #%d): %s'
-                    % (n_tb, exc[:100]))
-    return None
+        exc = _exception_line(lines, i)
+        if not _allowed(exc, allowed):
+            return ('traceback in log, exit code overridden (traceback #%d): %s'
+                    % (n_tb, exc[:100])), n_ok
+        n_ok += 1
+    return None, n_ok
 
 
 def discover(dirs):
@@ -193,11 +231,13 @@ def main(argv=None):
         timeout = args.timeout or ent.get('timeout') or DEFAULT_TIMEOUT
         print('running %s ...' % rel, flush=True)
         status, secs = run_one(rel, interp, timeout)
-        if status == 'PASS':
-            tb = traceback_problem(log_path(rel), ent.get('expected_tracebacks'))
+        if status in ('PASS', 'SKIP'):    # a skip after a swallowed exception is a FAIL
+            tb, n_ok = traceback_problem(log_path(rel), ent.get('expected_tracebacks'))
             if tb:
                 status = 'FAIL'
                 notes.append(tb)
+            elif n_ok:
+                notes.append('%d allowed traceback%s' % (n_ok, '' if n_ok == 1 else 's'))
         if ent.get('known'):
             notes.append('known: ' + ent['known'])
             if status == 'PASS':

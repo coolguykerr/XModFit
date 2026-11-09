@@ -53,6 +53,31 @@ def slot_exception():
     check('later check passes', True)
 
 
+def skip_after_failure():
+    # a failed check (or a counted slot exception) must not be hidden by a later skip
+    check('a', False, 'deliberate')
+    skip('no data')
+
+
+def skip_after_slot_exception():
+    import pyqtgraph.Qt  # noqa: F401
+    _raise_in_qt_slot()
+    skip('no data')
+
+
+def raise_mode_in_slot():
+    # XMF_CHECK_RAISE=1: a failing check inside a Qt slot is counted once, not twice
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from PyQt5.QtCore import QTimer
+    from PyQt5.QtWidgets import QApplication
+    import pyqtgraph.Qt  # noqa: F401
+    app = QApplication.instance() or QApplication(sys.argv)
+    QTimer.singleShot(0, lambda: check('in slot', False, 'deliberate'))
+    QTimer.singleShot(100, app.quit)
+    app.exec_()
+    check('later', True)
+
+
 def slot_exception_late_hook():
     # something replaces sys.excepthook after tests.harness was imported; check()
     # must re-install the counting hook in front of it

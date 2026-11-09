@@ -16,13 +16,18 @@ CASES = {            # case -> (expected exit code, substring expected in stdout
     # audit N1: a Qt-slot exception is a failed check even though the process survives
     'slot_exception':           (1, 'FAILURES PRESENT (1 of 2)'),
     'slot_exception_late_hook': (1, 'FAILURES PRESENT (1 of 3)'),
+    # review F3: a skip after a failure exits 1, not 77
+    'skip_after_failure':        (1, 'before the skip: exiting as a failure'),
+    'skip_after_slot_exception': (1, 'before the skip: exiting as a failure'),
+    # review F6: counted once under XMF_CHECK_RAISE=1 (run with it set)
+    'raise_mode_in_slot':        (1, 'FAILURES PRESENT (1 of 2)'),
 }
 
 n_fail = 0
 for case, (want_code, want_text) in CASES.items():
     env = dict(os.environ)
     env.pop('XMF_CHECK_RAISE', None)
-    if case == 'raise_mode':
+    if case in ('raise_mode', 'raise_mode_in_slot'):
         env['XMF_CHECK_RAISE'] = '1'
     p = subprocess.run([sys.executable, CASES_SCRIPT, case], cwd=ROOT, env=env,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,

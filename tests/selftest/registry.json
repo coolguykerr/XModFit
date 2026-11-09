@@ -2,5 +2,9 @@
   "tests/selftest/fixtures/fixed.py": {"known": "self-test"},
   "tests/selftest/fixtures/smoke.py": {"smoke": true},
   "tests/selftest/fixtures/tb_allowed.py": {"expected_tracebacks": "ExpectedAbort"},
-  "tests/selftest/fixtures/tb_not_allowed.py": {"expected_tracebacks": "ExpectedAbort"}
+  "tests/selftest/fixtures/tb_not_allowed.py": {"expected_tracebacks": "ExpectedAbort"},
+  "tests/selftest/fixtures/tb_msg_mentions.py": {"expected_tracebacks": "ExpectedAbort"},
+  "tests/selftest/fixtures/tb_key_named.py": {"expected_tracebacks": "ExpectedAbort"},
+  "tests/selftest/fixtures/tb_indented.py": {"expected_tracebacks": "ExpectedAbort"},
+  "tests/selftest/fixtures/tb_qualified.py": {"expected_tracebacks": "ExpectedAbort"}
 }
