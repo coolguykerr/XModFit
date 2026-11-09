@@ -1238,6 +1238,9 @@ class JointFit(QObject):
         relation to the fitted (centroid-referenced) one depends on theta and phi.
         The keymap is what makes it work here: master parameters are namespaced
         per dataset unless shared, so the model cannot find 'protins' by name.
+        It is read off ``param_map`` (which master key drives each dataset's local
+        key), so share-groups -- bare, named or ``g{n}_`` subset groups from
+        ``JointFitSpec.compile`` -- resolve as well as the legacy ``shared`` list.
 
         One block per objective, but a SHARED insertion+orientation gives every
         dataset the same three master parameters and hence the same block, so
@@ -1248,13 +1251,13 @@ class JointFit(QObject):
         """
         rep = fit_report(self.result)
         blocks, seen = [], set()
+        keymaps = self._derived_keymaps()
         for idx, obj in enumerate(self.objectives):
             func = obj.get('func')
             derive = getattr(func, 'derived_report', None)
             if derive is None:
                 continue
-            keymap = {k: self._master_key(idx, k)
-                      for k in ('protins', 'theta', 'phi')}
+            keymap = keymaps[idx]
             key = tuple(sorted(keymap.values()))
             if key in seen:
                 continue
@@ -1272,6 +1275,21 @@ class JointFit(QObject):
             rep = rep + '\n\nJoint-fit warnings:\n' + ''.join(
                 '  - %s\n' % w for w in self.warnings)
         return rep
+
+    def _derived_keymaps(self, keys=('protins', 'theta', 'phi')):
+        """Per objective, {local key: master key driving it} for ``keys``.
+
+        A reverse lookup of ``param_map``, so a key tied through a share-group
+        maps to that group's master key (audit N2: ``_master_key`` alone knows
+        only the legacy ``shared`` list, and sent a spec-shared pose to
+        non-existent ``d{i}_theta`` names). Keys absent from ``param_map`` fall
+        back to ``_master_key``."""
+        loc2master = {}
+        for mkey, targets in self.param_map.items():
+            for (i, lk) in targets:
+                loc2master[(i, lk)] = mkey
+        return [{k: loc2master.get((idx, k), self._master_key(idx, k)) for k in keys}
+                for idx in range(len(self.objectives))]
 
     # ----------------------------------------------------------------- #
     #  viewer / GUI duck-typing contract

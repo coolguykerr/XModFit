@@ -194,7 +194,14 @@ quantity is *derived and reported*, three ways:
   invariant under the fold (`r3(360-theta, phi+180) == r3(theta, phi)`, so the
   *value* does not care), the SIGN of `d(maxh)/d(theta)` does.
   `Joint_Fit_Routines._report` does the same per objective through a namespace
-  keymap built from `_master_key`, collapsing duplicates when the pose is shared.
+  keymap, collapsing duplicates when the pose is shared. Until 2026-11-09 the
+  keymap came from `_master_key`, which knows only the legacy scripted `shared=`
+  list; for a pose shared through `JointFitSpec` groups (every GUI joint fit) it
+  pointed at non-existent `d{i}_theta` keys and the block was silently missing
+  (WS0/WS1 audit N2). It is now a reverse lookup of `param_map`
+  (`JointFit._derived_keymaps`), so bare, named and `g{n}_` subset groups all
+  resolve; `validate_joint_ws1.py` N2 checks it with the real `derived_report`
+  on a synthetic model (no Julia).
   Both append a `[[Derived]]` block to the fit report.
 
 The linearisation is verified exact (Monte Carlo from the same covariance shrunk to

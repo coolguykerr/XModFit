@@ -541,7 +541,7 @@ class XLayersPDB_XPR:  # Please put the class name same as the function name
         parameters are not called ``protins``/``theta``/``phi`` -- a joint fit
         namespaces the un-shared ones as ``d{i}_protins`` and so on. Pass
         ``{'protins': 'd0_protins', ...}``; Joint_Fit_Routines builds it from
-        ``_master_key``.
+        ``param_map`` (``JointFit._derived_keymaps``), so share-groups resolve.
         """
         if not (self.use_protein and self.fname and os.path.isfile(self.fname)):
             return None

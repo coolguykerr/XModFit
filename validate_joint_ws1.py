@@ -13,6 +13,7 @@ One function per task section; later tasks append T2..T5.
 
     T4  warn on per-max weighting (01 6.7) and dropped sub-curves (6.14)
     T5  joint-vs-individual chi-square on the joint fit's own active points (A1.4)
+    N2  the report's derived-quantity keymap follows share-groups (audit N2)
 
     QT_QPA_PLATFORM=offscreen python validate_joint_ws1.py
 """
@@ -532,6 +533,103 @@ def test_t5():
           ok and abs(ci - ci_want) <= 1e-5 * ci_want, (ci, ci_want))
 
 
+def test_n2():
+    """Audit N2: JointFit._report builds the derived-quantity keymap from
+    param_map, so a pose shared through JointFitSpec groups (bare, or a subset
+    group) still reaches XLayersPDB_XPR.derived_report and its protins_top block
+    appears. The model is synthetic; derived_params/derived_report are the real
+    XLayersPDB_XPR methods (pure-Python geometry on Data/1ubq.pdb, no Julia)."""
+    import numpy as np
+    from importlib import import_module
+    from lmfit import Parameters
+    from joint_fit_spec import JointFitSpec
+    XPR = import_module('Functions.XRR.XLayersPDB_XPR').XLayersPDB_XPR
+    PI = np.pi
+    xg = np.linspace(0.02, 0.5, 40)
+
+    def shape(t, p, ins, x):
+        return (1 + 0.3 * np.cos(t * PI / 180) * np.cos(2 * PI * x)
+                + 0.3 * np.sin(t * PI / 180) * np.cos(p * PI / 180) * np.sin(2 * PI * x)
+                + 0.02 * ins * x)
+
+    class SynPose:
+        derived_params = XPR.derived_params
+        derived_report = XPR.derived_report
+
+        def __init__(s, x=xg):
+            s.x = x
+            s.use_protein = True
+            s.fname = os.path.join(ROOT, 'Data', '1ubq.pdb')
+            s.params = Parameters()
+            s.params.add('theta', value=50., vary=True)
+            s.params.add('phi', value=130., vary=True)
+            s.params.add('protins', value=5., vary=True)
+            s.params.add('scale', value=1., vary=True)
+            s.output_params = {}
+
+        def init_params(s):
+            pass
+
+        def y(s):
+            P = s.params
+            return P['scale'].value * shape(P['theta'].value, P['phi'].value,
+                                            P['protins'].value, s.x)
+
+    rng = np.random.RandomState(1)
+    err = 0.01 * np.ones_like(xg)
+    scales = (1.0, 1.3, 0.8)
+
+    def build(n, share):
+        names = ['P%d' % i for i in range(n)]
+        data = {nm: {'c': {'x': xg, 'y': scales[i] * shape(50, 130, 5, xg)
+                           + 0.01 * rng.randn(len(xg)), 'yerr': err}}
+                for i, nm in enumerate(names)}
+        sp = JointFitSpec(default_model_class=SynPose)
+        for nm in names:
+            sp.add_dataset(nm, model=SynPose())
+        for k in ('protins', 'theta', 'phi'):
+            share(sp, k, names)
+        jf = sp.compile(data)
+        jf.perform_fit(xg[0], xg[-1], fit_scale='Linear', fit_method='leastsq')
+        return jf
+
+    # (a) pose shared by every dataset (bare master keys protins/theta/phi)
+    jf = build(2, lambda sp, k, names: sp.set_shared(k))
+    km = jf._derived_keymaps()
+    check("N2a spec-shared pose: no legacy shared list (the case _master_key missed)",
+          list(jf.shared) == [], jf.shared)
+    check("N2a keymap points at master keys that exist",
+          all(v in jf.master_params for m in km for v in m.values()), km)
+    check("N2a both datasets map to the same (shared) keys", km[0] == km[1], km)
+    rep = jf._report()
+    check("N2a protins_top block present in the joint report",
+          rep.count('[[Derived]]') == 1 and 'protins_top:' in rep,
+          rep.count('[[Derived]]'))
+
+    # (b) pose shared by a SUBSET (P0, P1) of three datasets: g-prefixed master keys
+    jf = build(3, lambda sp, k, names: sp.set_shared(k, dataset_names=names[:2]))
+    km = jf._derived_keymaps()
+    check("N2b subset group: keymap points at master keys that exist",
+          all(v in jf.master_params for m in km for v in m.values()), km)
+    check("N2b P0/P1 share keys, P2 has its own",
+          km[0] == km[1] and km[2] != km[0]
+          and not set(km[2].values()) & set(km[0].values()), km)
+    rep = jf._report()
+    check("N2b two derived blocks (P0/P1 collapsed, P2 separate)",
+          rep.count('[[Derived]]') == 2 and '(P2)' in rep, rep.count('[[Derived]]'))
+
+    # (c) the legacy scripted shared= path is unchanged
+    from Joint_Fit_Routines import JointFit
+    jl = JointFit()
+    for i in range(2):
+        jl.add_dataset('L%d' % i, func=SynPose(), x=xg,
+                       y=scales[i] * shape(50, 130, 5, xg), yerr=err)
+    jl.build_master_params(shared=['protins', 'theta', 'phi'])
+    jl.perform_fit(xg[0], xg[-1], fit_scale='Linear', fit_method='leastsq')
+    check("N2c legacy shared=: one derived block",
+          jl._report().count('[[Derived]]') == 1)
+
+
 def test_t3_gui():
     """The GUI guards spec.compile (final review I3/I4) and freezes the fit
     ranges of a loaded joint fit (I2).
@@ -684,7 +782,8 @@ def test_t3_gui():
 
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
-    for t in (test_t1, test_t2, test_t3, test_t4, test_t5, test_t3_gui):
+    for t in (test_t1, test_t2, test_t3, test_t4, test_t5, test_n2,
+              test_t3_gui):
         try:
             t()
         except Exception as ex:
