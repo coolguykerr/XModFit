@@ -47,8 +47,11 @@ REGISTRY = {
     'validate_fastscan.py': {'slow': True, 'interp': 'cmcars'},
 
     # --- recovered harnesses (P-3b) ---
-    'tests/recovered/repro_backend.py': {'smoke': True},
+    # repro_backend, repro_raw, repro_tab, test_gui_construct: assert via tests.harness
+    # since the audit-gap fixes (W0.3), so they are no longer registered smoke.
+    # Diagnostic probe of what does and does not pickle; documents, does not assert.
     'tests/recovered/test_pickle_fit.py': {'smoke': True},
+    # Timing printout; a speed assertion would be machine-dependent.
     'tests/recovered/test_autocorr_window.py': {'smoke': True},
     # exercises XLayersPDB_dev_smooth, retired under D1; goes when WS1/B8 removes that variant
     'tests/recovered/compare_models.py': {'smoke': True, 'slow': True, 'timeout': 900},
@@ -60,9 +63,6 @@ REGISTRY = {
         'expected_tracebacks': 'AbortFitException'},
     # smoke-shaped: prints fit diagnostics, asserts nothing (tests/recovered/README.md)
     'tests/recovered/smoke_fit.py': {'smoke': True},
-    'tests/recovered/test_gui_construct.py': {'smoke': True},
-    'tests/recovered/repro_raw.py': {'smoke': True},
-    'tests/recovered/repro_tab.py': {'smoke': True},
     'tests/recovered/check_aproj.py': {
         'smoke': True, 'interp': 'cmcars',
         'external': 'XPR-main/test_data, sibling of the repo'},

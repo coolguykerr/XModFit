@@ -8,6 +8,7 @@ class X:
 _xr.XrayDB = X; sys.modules['xraydb'] = _xr
 
 import numpy as np
+from tests.harness import check, finish
 from PyQt5.QtWidgets import QApplication, QFileDialog
 import xmodfit
 from Joint_Fit_Routines import JointFit
@@ -50,12 +51,23 @@ tmp = os.path.join(SCRATCH, 'joint_test_chain.h5')
 if os.path.exists(tmp):
     os.remove(tmp)
 QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (tmp, 'MCMC Files (*.h5)'))
+_raised = None
 try:
     w.startMCMCBackendFile()
     print('startMCMCBackendFile returned normally')
 except Exception as e:
+    _raised = e
     import traceback; traceback.print_exc()
     print('startMCMCBackendFile RAISED:', type(e).__name__, e)
 
 print('self.backend after Start MCMC file:', getattr(w, 'backend', 'MISSING'))
 print('backend is None?', getattr(w, 'backend', None) is None)
+
+check('joint MCMC window opened as joint', w._mcmc_is_joint is True)
+check('startMCMCBackendFile returned normally (joint fit, no current function item)',
+      _raised is None, repr(_raised))
+check('Start MCMC file attached an HDF backend', getattr(w, 'backend', None) is not None,
+      repr(getattr(w, 'backend', None)))
+check('the backend writes the chosen file', getattr(getattr(w, 'backend', None),
+                                                   'filename', None) == tmp)
+sys.exit(finish())

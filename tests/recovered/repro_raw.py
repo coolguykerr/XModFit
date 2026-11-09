@@ -11,6 +11,7 @@ _xr.XrayDB = _XrayDB; _xr.f0 = lambda *a, **k: 0; _xr.__path__ = []
 sys.modules.setdefault("xraydb", _xr)
 sys.path.insert(0, ROOT); sys.path.insert(0, os.path.join(ROOT, 'Functions'))
 import numpy as np
+from tests.harness import check, finish
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
 app = QApplication(sys.argv)
@@ -61,3 +62,13 @@ print("2D tab visible:", w.plotTabWidget.isTabVisible(w._plotTab2D_index))
 print("\n--- panel banner ---")
 print("visible:", w.imageWidget.warnLabel.isVisible())
 print(w.imageWidget.warnLabel.text())
+
+# what the repro is for: loading the RAW (q_xy, q_z, I, Ierr) file as the dataset is
+# diagnosed, not silently fitted
+check('RAW file as dataset: coverage collapses', s.get('map_coverage_frac', 1) < 0.01,
+      s.get('map_coverage_frac'))
+check('RAW file as dataset: the "not a row index" warning is set',
+      'IS NOT A ROW INDEX' in str(s.get('WARNING_map_coverage')))
+check('the panel banner carries the same warning',
+      'IS NOT A ROW INDEX' in w.imageWidget.warnLabel.text())
+sys.exit(finish())

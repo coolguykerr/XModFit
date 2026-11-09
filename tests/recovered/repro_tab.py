@@ -11,6 +11,7 @@ _xr.XrayDB = _XrayDB; _xr.f0 = lambda *a, **k: 0; _xr.__path__ = []
 sys.modules.setdefault("xraydb", _xr)
 sys.path.insert(0, ROOT)
 import numpy as np
+from tests.harness import check, finish
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
 app = QApplication(sys.argv)
@@ -60,3 +61,14 @@ print("output_params has map2d keys:", [k for k in op if k.startswith('map2d')])
 s = op.get('scaler_parameters', {})
 print("coverage:", s.get('map_coverage_frac'), " warning:", repr(s.get('WARNING_map_coverage'))[:70])
 print("func.mode =", repr(w.fit.func.mode), " mapfile =", os.path.basename(str(w.fit.func.mapfile)))
+
+check('GID2D on a loaded indexed map: model is in map2d mode', w.fit.func.mode == 'map2d',
+      repr(w.fit.func.mode))
+check('the 2D plot tab is visible', w.plotTabWidget.isTabVisible(w._plotTab2D_index))
+check('the image widget has maps', w.imageWidget.has_maps())
+check('the three map2d outputs are auto-selected', len(sel) == 3 and all(
+    t.startswith('map2d') for t in sel), sel)
+check('the indexed map covers the detector (no coverage warning)',
+      s.get('map_coverage_frac', 0) > 0.9 and not s.get('WARNING_map_coverage'),
+      (s.get('map_coverage_frac'), s.get('WARNING_map_coverage')))
+sys.exit(finish())

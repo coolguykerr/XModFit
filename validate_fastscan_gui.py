@@ -29,7 +29,7 @@ import sys
 import types
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-ROOT = r"C:\Users\kerr\Documents\GitHub\XModJointFit"
+ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, 'Functions'))
@@ -81,7 +81,7 @@ def main():
     from Functions import xpr_backend as xb
     if not xb.julia_available():
         say('SKIP: the Julia/XPR backend is unavailable here.')
-        return 0
+        return 77          # runner convention: exit 77 is SKIP, not a green row
 
     app = QApplication.instance() or QApplication(sys.argv)
     import xmodfit
