@@ -459,6 +459,50 @@ def test_t5():
           ob['yfit_masked'] and abs(t - jm.result.chisqr) <= 1e-10 * jm.result.chisqr,
           (t, jm.result.chisqr))
 
+    # (f) audit gap: drive the REAL XModFit.computeModelComparison (and _eval_chisqr
+    # through it) on a joint fit with per-dataset fit ranges and a column mask. The
+    # helpers above are not enough: reverting the call site to the scalar window
+    # with no mask leaves T5a-T5e green. Host is a SimpleNamespace, as in T5e.
+    from PyQt5.QtWidgets import QTextEdit
+    jc = sp.compile(data, masks={'D0': None, 'D1': mask})
+    jc.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq', ranges=ranges)
+    jc._is_fitted = True
+    ind = {}
+    for i in range(2):      # "individual fits": fixed lines, deliberately off the data
+        ind['D%d' % i] = _types.SimpleNamespace(
+            func=Line(x=X, a=3.0 + 0.01 * i, b=0.5), _is_fitted=True, result=None)
+    te = QTextEdit()
+    host = _types.SimpleNamespace(jointFit=jc, data=data, dataset_fits=ind,
+                                  compareTextEdit=te, _short_name=lambda n: n,
+                                  _joint_range=lambda: (X[0], X[-1]))
+    host._eval_chisqr = _types.MethodType(xmodfit.XModFit._eval_chisqr, host)
+    xmodfit.XModFit.computeModelComparison(host)
+    rows = {}
+    for ln in te.toPlainText().splitlines():
+        for key in ('data points N', 'chi-square'):
+            if ln.startswith(key + ' '):
+                rows[key] = ln.split()[-2:]
+    n_act = sum(len(jc.active_index(i)) for i in range(2))
+    ok = len(rows) == 2
+    nj = ni = cj = ci = None
+    if ok:
+        nj, ni = int(rows['data points N'][0]), int(rows['data points N'][1])
+        cj, ci = float(rows['chi-square'][0]), float(rows['chi-square'][1])
+    # independent expectation for the individuals: plain sum over the active points
+    ci_want = 0.0
+    for i in range(2):
+        f = Line(x=X, a=3.0 + 0.01 * i, b=0.5)   # fresh: chisqr_on re-windows func.x
+        r = (ys[i] - f.y()) / err
+        ci_want += float(np.sum(r[jc.active_index(i)] ** 2))
+    check("T5f computeModelComparison: N (joint and individuals) == active points",
+          ok and nj == n_act and ni == n_act and n_act < 2 * len(X),
+          (nj, ni, n_act, 2 * len(X)))
+    check("T5f computeModelComparison: joint chi-square == result.chisqr",
+          ok and abs(cj - jc.result.chisqr) <= 1e-5 * jc.result.chisqr,
+          (cj, jc.result.chisqr))
+    check("T5f computeModelComparison: individual chi-square on the same points",
+          ok and abs(ci - ci_want) <= 1e-5 * ci_want, (ci, ci_want))
+
 
 def test_t3_gui():
     """The GUI guards spec.compile (final review I3/I4) and freezes the fit

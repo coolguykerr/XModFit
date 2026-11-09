@@ -703,7 +703,7 @@ One line each, from the review ledger; the final review will triage them.
 - T4: `joint_fit_spec.py:64` recomputes the first key that `_primary_curve` could return.
 - T5: `chisqr_on` window `idx.min..idx.max` vs `imin..imax` differs when a mask drops window-edge points (no current model affected; no edge-mask test).
 - T5: T5d checks `yfit_masked` only on the last loop variable.
-- T5: the `_eval_chisqr` / `computeModelComparison` wiring is covered only through `validate_jointfit_gui`.
+- T5: the `_eval_chisqr` / `computeModelComparison` wiring was recorded here as "covered only through `validate_jointfit_gui`". **That was false** (WS0/WS1 audit, 2026-11-09): the GUI harness checks only text features on a joint fit with no range and no mask, and it passes with the A1.4 call site reverted. **Closed 2026-11-09** by `validate_joint_ws1.py` T5f, which drives the real `computeModelComparison` on a joint fit with per-dataset ranges and a mask and asserts N and both chi-squares; the reverted call site fails it (3 checks).
 - T5: `xmodfit._joint_range` is now dead code.
 - T5: under covariance the comparison scores raw `y`/`yerr` (pre-existing, intended); documented in `01` §6.6 and A1.4.
 - T6: `validate_seed_mask` check (d) is near-tautological (brief-mandated form).
