@@ -33,6 +33,35 @@ def close_fail():
     check_close('close', 1.0, 1.5, 0.1)
 
 
+def _raise_in_qt_slot():
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from PyQt5.QtCore import QTimer
+    from PyQt5.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    def boom():
+        raise AssertionError('slot boom')
+    QTimer.singleShot(0, boom)
+    QTimer.singleShot(100, app.quit)
+    app.exec_()
+
+
+def slot_exception():
+    # pyqtgraph is imported after tests.harness, as in every harness that imports xmodfit
+    import pyqtgraph.Qt  # noqa: F401
+    _raise_in_qt_slot()
+    check('later check passes', True)
+
+
+def slot_exception_late_hook():
+    # something replaces sys.excepthook after tests.harness was imported; check()
+    # must re-install the counting hook in front of it
+    sys.excepthook = lambda *a: sys.__excepthook__(*a)
+    check('first check passes', True)
+    _raise_in_qt_slot()
+    check('later check passes', True)
+
+
 if __name__ == '__main__':
     globals()[sys.argv[1]]()
     sys.exit(finish())

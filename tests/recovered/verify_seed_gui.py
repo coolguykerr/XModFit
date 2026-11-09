@@ -37,7 +37,11 @@ class R: pass
 class F:
     def __init__(s): s.result = R(); s.result.nvarys = 3
 w1.fit = F(); w1.errorAvailable = False; w1.sfnames = ['0<>C:/d/x.rrf']
+# Signals blocked: with no category selected, functionChanged would raise inside the
+# slot (curr_category unset) and replace the faked w1.fit. Only the item text is needed.
+w1.funcListWidget.blockSignals(True)
 w1.funcListWidget.addItem('XLayersPDB'); w1.funcListWidget.setCurrentRow(0)
+w1.funcListWidget.blockSignals(False)
 w1.confInterval_emcee(joint=False)
 cw1 = w1.emceeConfIntervalWidget
 tr, tc = grid_row(cw1, cw1.seedTempSpinBox)

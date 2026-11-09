@@ -1,4 +1,6 @@
 {
   "tests/selftest/fixtures/fixed.py": {"known": "self-test"},
-  "tests/selftest/fixtures/smoke.py": {"smoke": true}
+  "tests/selftest/fixtures/smoke.py": {"smoke": true},
+  "tests/selftest/fixtures/tb_allowed.py": {"expected_tracebacks": "ExpectedAbort"},
+  "tests/selftest/fixtures/tb_not_allowed.py": {"expected_tracebacks": "ExpectedAbort"}
 }

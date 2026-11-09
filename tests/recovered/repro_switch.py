@@ -29,8 +29,12 @@ class FakeIndivFit:
 w.fit = FakeIndivFit(indiv_res)
 w.errorAvailable = False
 w.sfnames = ['0<>C:/data/indiv.rrf']
-# give funcListWidget a current item
+# give funcListWidget a current item (the MCMC window reads its text). Signals are
+# blocked: with no category selected, functionChanged would raise AttributeError
+# (curr_category unset) inside the slot and replace the faked w.fit.
+w.funcListWidget.blockSignals(True)
 w.funcListWidget.addItem('XLayers'); w.funcListWidget.setCurrentRow(0)
+w.funcListWidget.blockSignals(False)
 
 # ---- open the INDIVIDUAL MCMC window ----
 w.confInterval_emcee(joint=False)

@@ -36,11 +36,19 @@ for line in p.stdout.splitlines():
 # The table is sorted by path; the brief's order is checked by name.
 want = [('ok', 'PASS'), ('bad', 'FAIL'), ('skip', 'SKIP'), ('hang', 'TIMEOUT'),
         ('hang_child', 'TIMEOUT'), ('unicode', 'PASS'),
-        ('fixed', 'KNOWN-FAIL NOW PASSES'), ('smoke', 'PASS')]
+        ('fixed', 'KNOWN-FAIL NOW PASSES'), ('smoke', 'PASS'),
+        # audit N1: exit 0 with a traceback in the log is FAIL unless the registry allows it
+        ('tb_exit0', 'FAIL'), ('tb_allowed', 'PASS'), ('tb_not_allowed', 'FAIL'),
+        ('slot_exc', 'FAIL')]
 for name, st in want:
     got = rows.get(name, (None, ''))[0]
     check('status of %s' % name, got == st, 'got %r want %r' % (got, st))
 check('smoke note says smoke', 'smoke' in rows.get('smoke', ('', ''))[1])
+for name in ('tb_exit0', 'tb_not_allowed', 'slot_exc'):
+    check('%s note explains the traceback' % name,
+          'traceback in log' in rows.get(name, ('', ''))[1], rows.get(name, ('', ''))[1])
+check('slot_exc note names the slot exception',
+      'AssertionError' in rows.get('slot_exc', ('', ''))[1])
 check('runner exit code is 1', p.returncode == 1, 'rc %s' % p.returncode)
 
 alive = None
@@ -53,4 +61,14 @@ if os.path.exists(pid_file):
     os.remove(pid_file)
 check('hang_child grandchild was killed', alive is False, 'alive=%s' % alive)
 check('wall time under 60 s', wall < 60, '%.1f s' % wall)
+
+# audit N3: --only that matches nothing must not look like a green run
+p2 = subprocess.run(
+    [sys.executable, 'tests/run_all.py', '--dir', 'tests/selftest/fixtures',
+     '--registry', 'tests/selftest/registry.json', '--only', 'no_such_harness_xyz'],
+    cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    universal_newlines=True, encoding='utf-8')
+print(p2.stdout)
+check('--only with no match exits 2', p2.returncode == 2, 'rc %s' % p2.returncode)
+check('--only with no match says so', 'no harness matched' in p2.stdout)
 sys.exit(finish())

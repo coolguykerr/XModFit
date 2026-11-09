@@ -13,6 +13,9 @@ CASES = {            # case -> (expected exit code, substring expected in stdout
     'skipped':    (77, 'SKIP - no data'),
     'raise_mode': (1,  'AssertionError'),     # run with XMF_CHECK_RAISE=1
     'close_fail': (1,  'FAIL'),
+    # audit N1: a Qt-slot exception is a failed check even though the process survives
+    'slot_exception':           (1, 'FAILURES PRESENT (1 of 2)'),
+    'slot_exception_late_hook': (1, 'FAILURES PRESENT (1 of 3)'),
 }
 
 n_fail = 0

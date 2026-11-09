@@ -8,11 +8,18 @@ to tests/_logs/<path with / as __>.log, and a table of status / seconds / interp
 note is printed. A timed-out harness has its whole process tree killed.
 
 Statuses: PASS, FAIL, SKIP (exit 77 or --quick), TIMEOUT, KNOWN-FAIL,
-KNOWN-FAIL NOW PASSES. Exit code 1 if any FAIL or TIMEOUT, else 0.
+KNOWN-FAIL NOW PASSES. Exit code 1 if any FAIL or TIMEOUT, 2 if --only matched no
+harness, else 0.
+
+A harness that exits 0 but whose log contains a Python traceback is FAIL, with a note.
+pyqtgraph replaces sys.excepthook when xmodfit is imported, so an exception raised in a
+Qt slot (signal handler, timer, cell edit) is printed and swallowed and the process still
+exits 0; the log scan is what catches it, including in subprocesses and pool workers.
 
 Registry entry keys (all optional): interp ('cmc-py39' | 'cmcars'), external (str),
 slow (bool), known (str: expected to fail), smoke (bool: assertion-free script),
-timeout (int seconds).
+timeout (int seconds), expected_tracebacks (True, or a str that the final exception
+line of every traceback in the log must contain: the harness prints one on purpose).
 """
 import argparse
 import glob
@@ -45,7 +52,14 @@ REGISTRY = {
     'tests/recovered/test_autocorr_window.py': {'smoke': True},
     # exercises XLayersPDB_dev_smooth, retired under D1; goes when WS1/B8 removes that variant
     'tests/recovered/compare_models.py': {'smoke': True, 'slow': True, 'timeout': 900},
-    'tests/recovered/test_joint_abort.py': {'slow': True, 'timeout': 900},
+    'tests/recovered/test_joint_abort.py': {
+        'slow': True, 'timeout': 900,
+        # It aborts a running MCMC on purpose. emcee's _FunctionWrapper prints the
+        # traceback of the AbortFitException raised in the log-prob before re-raising
+        # it, so these tracebacks are the expected path. Any other exception still fails.
+        'expected_tracebacks': 'AbortFitException'},
+    # smoke-shaped: prints fit diagnostics, asserts nothing (tests/recovered/README.md)
+    'tests/recovered/smoke_fit.py': {'smoke': True},
     'tests/recovered/test_gui_construct.py': {'smoke': True},
     'tests/recovered/repro_raw.py': {'smoke': True},
     'tests/recovered/repro_tab.py': {'smoke': True},
@@ -61,6 +75,39 @@ REGISTRY = {
 }
 
 DEFAULT_TIMEOUT = 600
+TRACEBACK = 'Traceback (most recent call last)'
+
+
+def log_path(rel):
+    return os.path.join(LOG_DIR, rel.replace('/', '__') + '.log')
+
+
+def traceback_problem(log, allowed=None):
+    """Return None if the log is traceback-free (or every traceback is allowed by the
+    registry's expected_tracebacks), else a short note naming the first offending
+    exception line."""
+    try:
+        with open(log, 'rb') as fh:
+            text = fh.read().decode('utf-8', 'replace')
+    except OSError:
+        return None
+    if TRACEBACK not in text or allowed is True:
+        return None
+    lines = text.splitlines()
+    n_tb = 0
+    for i, ln in enumerate(lines):
+        if TRACEBACK not in ln:
+            continue
+        n_tb += 1
+        exc = '?'
+        for nxt in lines[i + 1:]:          # frames are indented; the exception line is not
+            if nxt.strip() and not nxt.startswith((' ', '	')):
+                exc = nxt.strip()
+                break
+        if not (isinstance(allowed, str) and allowed in exc):
+            return ('traceback in log, exit 0 overridden (traceback #%d): %s'
+                    % (n_tb, exc[:100]))
+    return None
 
 
 def discover(dirs):
@@ -82,7 +129,7 @@ def run_one(rel, interp, timeout):
     """Run one harness. Returns (status_core, seconds) with status_core in
     PASS/FAIL/SKIP/TIMEOUT."""
     os.makedirs(LOG_DIR, exist_ok=True)
-    log = os.path.join(LOG_DIR, rel.replace('/', '__') + '.log')
+    log = log_path(rel)
     env = dict(os.environ, QT_QPA_PLATFORM='offscreen', PYTHONIOENCODING='utf-8')
     t0 = time.time()
     with open(log, 'wb') as fh:
@@ -146,6 +193,11 @@ def main(argv=None):
         timeout = args.timeout or ent.get('timeout') or DEFAULT_TIMEOUT
         print('running %s ...' % rel, flush=True)
         status, secs = run_one(rel, interp, timeout)
+        if status == 'PASS':
+            tb = traceback_problem(log_path(rel), ent.get('expected_tracebacks'))
+            if tb:
+                status = 'FAIL'
+                notes.append(tb)
         if ent.get('known'):
             notes.append('known: ' + ent['known'])
             if status == 'PASS':
@@ -156,6 +208,10 @@ def main(argv=None):
         if status in ('FAIL', 'TIMEOUT'):
             n_bad += 1
         rows.append((rel, status, secs, interp, '; '.join(notes)))
+
+    if args.only and not rows:
+        print('no harness matched --only %r' % args.only)
+        return 2
 
     print()
     print('%-22s %8s  %-8s  %-50s %s' % ('status', 'seconds', 'interp', 'harness', 'note'))
