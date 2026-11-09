@@ -14,6 +14,7 @@ One function per task section; later tasks append T2..T5.
     T4  warn on per-max weighting (01 6.7) and dropped sub-curves (6.14)
     T5  joint-vs-individual chi-square on the joint fit's own active points (A1.4)
     N2  the report's derived-quantity keymap follows share-groups (audit N2)
+    N4  no-cov 'Log w/o error' / 'Linear w/o error' joint residuals (audit N4)
 
     QT_QPA_PLATFORM=offscreen python validate_joint_ws1.py
 """
@@ -630,6 +631,39 @@ def test_n2():
           jl._report().count('[[Derived]]') == 1)
 
 
+def test_n4():
+    """Audit N4: pin the no-covariance 'Log w/o error' and 'Linear w/o error' joint
+    residuals against values computed by hand from the model and data."""
+    import numpy as np
+    from validate_joint_gls import Line, X, make_data, E
+    from Joint_Fit_Routines import JointFit
+    ys = make_data(2)
+    err = E * np.ones_like(X)
+    jf = JointFit()
+    for i in range(2):
+        jf.add_dataset('D%d' % i, funcClass=Line, x=X, y=ys[i], yerr=err)
+        jf.objectives[i]['func'].params['b'].set(vary=True)
+    jf.build_master_params(groups=[jf.share_within('a', ['D0', 'D1'])])
+    jf._set_ranges(X[0], X[-1], None)
+    p = jf.master_params.copy()
+    for k in p:                 # off the optimum so every residual is non-trivial
+        p[k].value = 2.7 if k.split('_')[-1] == 'a' else 0.6
+    check("N4 master keys are one shared a and two b's",
+          sorted(k.split('_')[-1] for k in p) == ['a', 'b', 'b'], list(p))
+    yf = [2.7 * X + 0.6, 2.7 * X + 0.6]
+    for scale, want in (
+            ('Log w/o error',
+             np.concatenate([np.log10(ys[i]) - np.log10(yf[i]) for i in range(2)])),
+            ('Linear w/o error',
+             np.concatenate([(ys[i] - yf[i]) / np.max(ys[i]) for i in range(2)]))):
+        jf.fit_scale = scale
+        got = np.asarray(jf.residual(p, scale), float)
+        ok = got.shape == want.shape and np.allclose(got, want, rtol=1e-12, atol=1e-14)
+        check("N4 no-cov '%s' joint residual == hand-computed" % scale, ok,
+              'max|d| %.3g' % (np.max(np.abs(got - want)) if got.shape == want.shape
+                               else float('nan')))
+
+
 def test_t3_gui():
     """The GUI guards spec.compile (final review I3/I4) and freezes the fit
     ranges of a loaded joint fit (I2).
@@ -782,7 +816,7 @@ def test_t3_gui():
 
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
-    for t in (test_t1, test_t2, test_t3, test_t4, test_t5, test_n2,
+    for t in (test_t1, test_t2, test_t3, test_t4, test_t5, test_n2, test_n4,
               test_t3_gui):
         try:
             t()
