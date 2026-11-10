@@ -37,7 +37,7 @@ def _scale_residual_norm(y, fit, err, fit_scale):
     err = err / maxd
     fit = fit / maxd
     if fit_scale == 'Log':
-        return (np.log10(y) - np.log10(fit)) * y / err
+        return (np.log(y) - np.log(fit)) * y / err
     elif fit_scale == 'Log w/o error':
         return np.log10(y) - np.log10(fit)
     elif fit_scale == 'Linear w/o error':

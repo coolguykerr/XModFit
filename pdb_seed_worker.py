@@ -37,7 +37,7 @@ _G = {}
 def _scale_residual(y, fit, err, fit_scale):
     """Mirror Fit.residual's single-(non-dict)-dataset residual for each scale."""
     if fit_scale == 'Log':
-        return (np.log10(y) - np.log10(fit)) * y / err
+        return (np.log(y) - np.log(fit)) * y / err
     elif fit_scale == 'Log w/o error':
         return np.log10(y) - np.log10(fit)
     elif fit_scale == 'Linear w/o error':

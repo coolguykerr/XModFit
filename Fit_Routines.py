@@ -277,7 +277,7 @@ class Fit(QObject):
                 dnorm = data[0]
                 fnorm = fit[0]
                 if fit_scale=='Log':
-                    y.append((np.log10(data)-np.log10(fit))*data/err)
+                    y.append((np.log(data)-np.log(fit))*data/err)
                 elif fit_scale=='Log w/o error':
                     y.append(np.log10(data) - np.log10(fit))
                 elif fit_scale=='Linear w/o error':
@@ -296,7 +296,11 @@ class Fit(QObject):
                 if not getattr(self,'_yfit_masked',False):
                     fit=np.asarray(fit)[im]
             if fit_scale=='Log':
-                y= (np.log10(data)-np.log10(fit))*data/err
+                # Natural log, so the residual is normalised: sigma_ln(y) = err/y.
+                # log10 here understated every residual by ln10 (chi2 by ~5.3x).
+                # pdb_logprob / pdb_seed_worker / pdb_joint_logprob and
+                # JointFit.residual mirror this and must stay identical.
+                y= (np.log(data)-np.log(fit))*data/err
             elif fit_scale=='Log w/o error':
                 y = (np.log10(data)-np.log10(fit))
             elif fit_scale=='Linear w/o error':
@@ -342,8 +346,8 @@ class Fit(QObject):
         Mirrors residual()'s scaling term by term, so the two stay consistent:
 
             Linear            r = (data-fit)/err       dr/dp = -(1/err) dfit/dp
-            Log               r = (lg(data)-lg(fit))*data/err
-                                                       dr/dp = -(data/(err*fit*ln10)) dfit/dp
+            Log               r = (ln(data)-ln(fit))*data/err
+                                                       dr/dp = -(data/(err*fit)) dfit/dp
             Log w/o error     r = lg(data)-lg(fit)     dr/dp = -(1/(fit*ln10)) dfit/dp
             Linear w/o error  r = data-fit             dr/dp = -dfit/dp
         """
@@ -370,7 +374,7 @@ class Fit(QObject):
             fit = fit[im]
         ln10 = np.log(10.0)
         if fit_scale == 'Log':
-            return -(data / (err * fit * ln10))[:, None] * jac
+            return -(data / (err * fit))[:, None] * jac
         return -(1.0 / (fit * ln10))[:, None] * jac
 
     def log_likelihood(self, fit_params, fit_scale):

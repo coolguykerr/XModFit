@@ -698,7 +698,7 @@ class JointFit(QObject):
                 err = err / maxd
                 fit = fit / maxd
                 if fit_scale == "Log":
-                    y.append((np.log10(data) - np.log10(fit)) * data / err)
+                    y.append((np.log(data) - np.log(fit)) * data / err)
                 elif fit_scale == "Log w/o error":
                     y.append(np.log10(data) - np.log10(fit))
                 elif fit_scale == "Linear w/o error":

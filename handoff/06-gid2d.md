@@ -316,7 +316,8 @@ median of ~0.41 on the ROI (q_xy 1.40-1.54, q_z 0.02-0.60, 9875 pixels) and is c
 at 1.0 — so Linear weighting `1/sigma^2` diverges wherever `I -> 0` below the critical
 angle. Measured: ONE pixel at (1.4018, 0.0841) held **72.2%** of the total Linear
 weight and the top ten held 99.1%, and that is real data, not mask residue the sigma
-floor could remove. XModFit's `Log` residual is `(log10 d - log10 f) * d/err`, whose
+floor could remove. XModFit's `Log` residual is `(ln d - ln f) * d/err` (log10 before 2026-11-10; the
+relative weights below are unchanged), whose
 weight is `(I/sigma)^2` — flat for a multiplicative error model; the same top pixel then
 holds 0.08% and the top ten 0.66%. It changes the answer: `L_dom` 144 -> 313 A,
 `L_ch` 9.4 -> 15.3 A, `bkg0` -4.3 -> +53. This is a correctness issue, not cosmetics.
