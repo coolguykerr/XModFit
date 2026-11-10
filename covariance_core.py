@@ -7,8 +7,9 @@ handoff/17-spec-general-covariance.md, sections 4.2, 6.1 and 7.1.
 
 A dataset's covariance is measurement error plus a list of terms:
     C = diag(sigma_meas**2) + sum_terms C_term
-This module holds the objects and the loader registry.  Assembly and whitening arrive
-in a later task.  joint_covariance.py must never import this module (import cycle).
+This module holds the objects, the loader registry, and assembly / factorisation /
+whitening / outer iteration (spec 4.2-4.5).  It imports joint_covariance (for
+cholesky_with_jitter); joint_covariance must never import this module (import cycle).
 """
 import json
 import os
@@ -16,6 +17,9 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
 import numpy as np
+from scipy.linalg import solve_triangular
+
+from joint_covariance import cholesky_with_jitter
 
 KINDS = ('multiplicative', 'additive', 'dense')
 SCOPES = ('dataset', 'shared')
@@ -262,3 +266,155 @@ def _v1_load(path, raw_path=None):
 
 
 register_loader('xmodfit-covariance-v1', _v1_accepts, _v1_load)
+
+
+# ------------------------------------------------------------------ assembly --
+@dataclass
+class Block:
+    """One dataset's active points as they enter the residual."""
+    cov: Optional[DatasetCovariance]      # already restricted to the active points
+    y: np.ndarray                         # data in the residual
+    yerr: np.ndarray                      # used only when cov is None
+    intensity: np.ndarray                 # D: the data ("data" mode) or the model ("model")
+
+
+def needs_intensity(blocks, scale):
+    """True when any term's contribution depends on the intensity D (spec 4.4, 4.5)."""
+    for b in blocks:
+        if b.cov is None:
+            continue
+        for t in b.cov.terms:
+            if scale == 'Linear' and t.kind == 'multiplicative':
+                return True
+            if scale == 'Log' and t.kind in ('additive', 'dense'):
+                return True
+    return False
+
+
+def _loading(term, block, scale):
+    """N x K matrix G with the term's contribution equal to G Sigma G^T (not for dense)."""
+    w = np.asarray(term.weights, float)
+    d = np.asarray(block.intensity, float)
+    if scale == 'Linear':
+        return d[:, None] * w if term.kind == 'multiplicative' else w
+    return w if term.kind == 'multiplicative' else w / d[:, None]
+
+
+def _describe(bi, block):
+    src = os.path.basename(block.cov.source) if block.cov is not None and block.cov.source else ''
+    return '%d (%s)' % (bi, src) if src else str(bi)
+
+
+def _same_term(a, b):
+    if a.kind != b.kind or (a.labels or None) != (b.labels or None):
+        return False
+    ca, cb = np.asarray(a.cov), np.asarray(b.cov)
+    return ca.shape == cb.shape and bool(np.allclose(ca, cb, rtol=1e-12, atol=0.0))
+
+
+def assemble(blocks, scale):
+    """C over the concatenation of `blocks` (in order) for scale 'Linear' or 'Log'.
+    Returns (C, warnings).  Shared terms of the same name are one set of random variables
+    and couple the blocks that carry them; if their labels or cov differ, every copy is
+    made private and one warning names the term and the datasets."""
+    if scale not in ('Linear', 'Log'):
+        raise ValueError("scale must be 'Linear' or 'Log', got %r" % (scale,))
+    sizes = [len(b.y) for b in blocks]
+    offs = np.concatenate([[0], np.cumsum(sizes)]).astype(int)
+    n = int(offs[-1])
+    C = np.zeros((n, n))
+    warnings = []
+    shared = {}                                    # name -> [(block index, term)]
+    for bi, b in enumerate(blocks):
+        sl = slice(offs[bi], offs[bi + 1])
+        y = np.asarray(b.y, float)
+        if b.cov is None:
+            sig = np.asarray(b.yerr, float)
+        else:
+            sig = np.asarray(b.cov.sigma_meas, float)
+        meas = sig ** 2 if scale == 'Linear' else (sig / y) ** 2
+        C[sl, sl][np.diag_indices(sizes[bi])] += meas
+        if b.cov is None:
+            continue
+        e = 1.0 / np.asarray(b.intensity, float)
+        for t in b.cov.terms:
+            if t.kind == 'dense':
+                cd = np.asarray(t.cov, float)
+                C[sl, sl] += cd if scale == 'Linear' else e[:, None] * cd * e[None, :]
+            elif t.scope == 'shared':
+                shared.setdefault(t.name, []).append((bi, t))
+            else:
+                g = _loading(t, b, scale)
+                C[sl, sl] += g @ np.asarray(t.cov, float) @ g.T
+    for name, copies in shared.items():
+        if len(copies) > 1 and not all(_same_term(copies[0][1], t) for _, t in copies[1:]):
+            warnings.append('shared term %r differs between datasets %s (labels or covariance); '
+                            'treated as private to each dataset'
+                            % (name, ', '.join(_describe(bi, blocks[bi]) for bi, _ in copies)))
+            copies = [[c] for c in copies]
+        else:
+            copies = [copies]
+        for group in copies:
+            k = np.asarray(group[0][1].cov).shape[0]
+            G = np.zeros((n, k))
+            for bi, t in group:
+                G[offs[bi]:offs[bi + 1]] = _loading(t, blocks[bi], scale)
+            C += G @ np.asarray(group[0][1].cov, float) @ G.T
+    return 0.5 * (C + C.T), warnings
+
+
+# ------------------------------------------------- factorise, whiten, iterate --
+def factorize(C):
+    """Lower Cholesky factor of C and a list of warnings.  Plain Cholesky first; if that
+    fails, joint_covariance.cholesky_with_jitter, reporting the jitter used or that the
+    eigenvalues had to be floored."""
+    C = 0.5 * (np.asarray(C, float) + np.asarray(C, float).T)
+    try:
+        return np.linalg.cholesky(C), []
+    except np.linalg.LinAlgError:
+        pass
+    L, jitter = cholesky_with_jitter(C)
+    target = C + jitter * np.eye(C.shape[0])
+    if np.linalg.norm(L @ L.T - target) > 1e-8 * np.linalg.norm(C):
+        return L, ['covariance matrix is not positive definite: eigenvalues floored']
+    return L, ['covariance matrix is not positive definite: added diagonal jitter %.3g' % jitter]
+
+
+def whiten(L, r):
+    return solve_triangular(L, r, lower=True, check_finite=False)
+
+
+def whiten_jac(L, J):
+    return solve_triangular(L, J, lower=True, check_finite=False)
+
+
+def _moved(old, new, tol):
+    """True if any varying parameter changed by >= tol x the newer stderr."""
+    for name, p in new.params.items():
+        if not getattr(p, 'vary', False):
+            continue
+        q = old.params[name]
+        dv = abs(p.value - q.value)
+        se = getattr(p, 'stderr', None)
+        if se:
+            if dv >= tol * se:
+                return True
+        elif dv >= 1e-6 * max(abs(p.value), abs(q.value), 1e-300):
+            return True
+    return False
+
+
+def outer_iterate(fit_once, rebuild, max_rounds=5, tol=0.1):
+    """Model-based covariance iteration (spec 4.4).  fit_once() fits from the current
+    parameters; rebuild(result) re-assembles C from the model at result.params.  Round 0 is
+    the data-based fit; up to max_rounds model rounds follow.  Returns
+    (last_result, model_rounds, converged)."""
+    result = fit_once()
+    for rounds in range(1, max_rounds + 1):
+        rebuild(result)
+        new = fit_once()
+        moved = _moved(result, new, tol)
+        result = new
+        if not moved:
+            return result, rounds, True
+    return result, max_rounds, False

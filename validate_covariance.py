@@ -3,6 +3,11 @@ validate_covariance.py -- general covariance fitting: data model and loaders (Qt
 
     C1  v1 JSON loader: every field, and every load-time refusal of spec 7.1
     C2  match_problems (x and y, rtol 1e-4) and subset()
+    C3  Peelle's puzzle: data mode 0.8823529, model-based outer iteration 1.1538462
+    C4  blocks: private terms block-diagonal; shared terms couple blocks; conflicts warn
+    C5  a mask is a submatrix of the full C (linear and log)
+    C6  factorize: plain, jitter and eigenvalue-floor paths and their warnings
+    C7  Log formulas for multiplicative and additive terms
 
     python validate_covariance.py
 """
@@ -133,6 +138,178 @@ def section_c2(cc):
           d.match_problems(xf, yf) == [] and d.data_file != 'other.txt')
 
 
+def _peelle_block(cc, intensity):
+    t = cc.CovTerm('norm', 'multiplicative', np.array([[0.04]]), np.ones((2, 1)), ['n'])
+    dc = cc.DatasetCovariance(x=np.array([1., 2.]), sigma_meas=np.array([0.15, 0.10]), terms=[t])
+    y = np.array([1.5, 1.0])
+    return cc.Block(cov=dc, y=y, yerr=np.array([0.15, 0.10]), intensity=intensity)
+
+
+def _gls_const(cc, blocks):
+    C, _ = cc.assemble(blocks, 'Linear')
+    L, _ = cc.factorize(C)
+    y = np.concatenate([b.y for b in blocks])
+    a, o = cc.whiten(L, y), cc.whiten(L, np.ones_like(y))
+    return float(a @ o / (o @ o)), float(1.0 / np.sqrt(o @ o))
+
+
+def section_c3(cc):
+    from lmfit import Parameters
+    y = np.array([1.5, 1.0])
+    mu, _ = _gls_const(cc, [_peelle_block(cc, y)])
+    check('C3 Peelle data mode 0.8823529', abs(mu - 0.8823529) < 1e-6, '%.9f' % mu)
+    sig = np.array([0.15, 0.10])
+    wm = float(np.sum(y / sig ** 2) / np.sum(1 / sig ** 2))
+    state = {'blk': _peelle_block(cc, y)}
+
+    class Res:
+        pass
+
+    def fit_once():
+        m, err = _gls_const(cc, [state['blk']])
+        r = Res()
+        r.params = Parameters()
+        r.params.add('mu', value=m, vary=True)
+        r.params['mu'].stderr = err
+        return r
+
+    def rebuild(r):
+        state['blk'] = _peelle_block(cc, r.params['mu'].value * np.ones(2))
+
+    res, rounds, conv = cc.outer_iterate(fit_once, rebuild, max_rounds=50, tol=1e-6)
+    m = res.params['mu'].value
+    check('C3 Peelle model mode 1.1538462', abs(m - 1.1538462) < 1e-6, '%.9f' % m)
+    check('C3 model mode equals sigma-weighted mean', abs(m - wm) < 1e-6, '%.9f vs %.9f' % (m, wm))
+    check('C3 converged', conv and rounds >= 1, '%s %s' % (conv, rounds))
+    state['blk'] = _peelle_block(cc, y)
+    _, r1, c1 = cc.outer_iterate(fit_once, rebuild, max_rounds=1, tol=1e-12)
+    check('C3 round limit reports not converged', r1 == 1 and c1 is False, '%s %s' % (r1, c1))
+
+
+def _two_blocks(cc, shared, cov_b=0.01):
+    rng = np.random.RandomState(1)
+    out = []
+    for i, n in enumerate((6, 5)):
+        w = np.zeros((n, 2))
+        w[np.arange(n), np.arange(n) % 2] = 1.0
+        w[2] = [0.5, 0.5]
+        cov = np.array([[0.01, 0.002], [0.002, cov_b if i else 0.01]])
+        t = cc.CovTerm('stitch', 'multiplicative', cov, w, ['a', 'b'],
+                       'shared' if shared else 'dataset')
+        dc = cc.DatasetCovariance(np.arange(n, dtype=float), 0.1 * np.ones(n), [t],
+                                  source='d%d.json' % i)
+        y = 1 + rng.rand(n)
+        out.append(cc.Block(cov=dc, y=y, yerr=0.1 * np.ones(n), intensity=y))
+    return out
+
+
+def section_c4(cc):
+    bl = _two_blocks(cc, shared=False)
+    C, warn = cc.assemble(bl, 'Linear')
+    check('C4 private terms: off-block exactly 0',
+          np.max(np.abs(C[:6, 6:])) == 0.0 and warn == [], str(warn))
+    check('C4 symmetric', np.array_equal(C, C.T))
+    bl = _two_blocks(cc, shared=True)
+    C, warn = cc.assemble(bl, 'Linear')
+    a, b = bl
+    ta = a.cov.terms[0]
+    want = (a.intensity[:, None] * ta.weights) @ ta.cov @ (b.intensity[:, None] * b.cov.terms[0].weights).T
+    check('C4 shared identical: off-block = D_a W S W_b^T D_b',
+          np.max(np.abs(C[:6, 6:] - want)) < 1e-14 and warn == [], str(warn))
+    check('C4 shared: off-block nonzero', np.max(np.abs(want)) > 0)
+    Cp, _ = cc.assemble(_two_blocks(cc, shared=False), 'Linear')
+    check('C4 shared: diagonal blocks equal private ones',
+          np.max(np.abs(C[:6, :6] - Cp[:6, :6])) < 1e-14
+          and np.max(np.abs(C[6:, 6:] - Cp[6:, 6:])) < 1e-14)
+    bl = _two_blocks(cc, shared=True, cov_b=0.02)
+    C, warn = cc.assemble(bl, 'Linear')
+    check('C4 shared conflict: block-diagonal', np.max(np.abs(C[:6, 6:])) == 0.0)
+    check('C4 shared conflict: one warning naming the term',
+          len(warn) == 1 and 'stitch' in warn[0], str(warn))
+    check('C4 shared conflict: warning names the datasets',
+          'd0.json' in warn[0] and 'd1.json' in warn[0], str(warn))
+    bl = _two_blocks(cc, shared=True)
+    C, _ = cc.assemble(bl, 'Log')
+    check('C4 log shared off-block = W S W^T',
+          np.max(np.abs(C[:6, 6:] - bl[0].cov.terms[0].weights @ bl[0].cov.terms[0].cov
+                        @ bl[1].cov.terms[0].weights.T)) < 1e-14)
+    d = cc.CovTerm('dn', 'dense', 0.01 * np.eye(3), None, None, 'shared')
+    dc = cc.DatasetCovariance(np.arange(3.), 0.1 * np.ones(3), [d])
+    bk = [cc.Block(dc, np.ones(3), 0.1 * np.ones(3), np.ones(3)) for _ in range(2)]
+    C, warn = cc.assemble(bk, 'Linear')
+    check('C4 dense shared is private, no warning',
+          warn == [] and np.max(np.abs(C[:3, 3:])) == 0.0)
+    check('C4 needs_intensity: mult linear', cc.needs_intensity(_two_blocks(cc, False), 'Linear'))
+    check('C4 needs_intensity: mult log False',
+          not cc.needs_intensity(_two_blocks(cc, False), 'Log'))
+    check('C4 needs_intensity: dense log True, linear False',
+          cc.needs_intensity(bk, 'Log') and not cc.needs_intensity(bk, 'Linear'))
+    nocov = [cc.Block(None, np.ones(3), 0.1 * np.ones(3), np.ones(3))]
+    check('C4 no cov: diag yerr^2', np.allclose(cc.assemble(nocov, 'Linear')[0], 0.01 * np.eye(3), rtol=1e-14, atol=0))
+
+
+def section_c5(cc):
+    n = 9
+    rng = np.random.RandomState(3)
+    ta = cc.CovTerm('m', 'multiplicative', 0.01 * np.eye(3) + 0.001, rng.rand(n, 3), None)
+    tb = cc.CovTerm('a', 'additive', np.array([[0.02, 0.0], [0.0, 0.03]]), rng.rand(n, 2), None)
+    g = rng.rand(n, n)
+    td = cc.CovTerm('d', 'dense', 0.01 * (g @ g.T) / n, None, None)
+    dc = cc.DatasetCovariance(np.arange(n, dtype=float), 0.1 + 0.1 * rng.rand(n), [ta, tb, td])
+    y = 1 + rng.rand(n)
+    inten = 1 + rng.rand(n)
+    idx = np.array([0, 2, 3, 6, 8])
+    for scale in ('Linear', 'Log'):
+        full, _ = cc.assemble([cc.Block(dc, y, 0.1 * np.ones(n), inten)], scale)
+        sub, _ = cc.assemble([cc.Block(dc.subset(idx), y[idx], 0.1 * np.ones(len(idx)),
+                                       inten[idx])], scale)
+        dev = np.max(np.abs(sub - full[np.ix_(idx, idx)]))
+        check('C5 submatrix %s' % scale, dev < 1e-14, '%.3g' % dev)
+
+
+def section_c6(cc):
+    C = np.diag([1.0, 2.0, 3.0]) + 0.1
+    L, warn = cc.factorize(C)
+    check('C6 PD: no warning, L L^T = C', warn == [] and np.max(np.abs(L @ L.T - C)) < 1e-12,
+          str(warn))
+    t = cc.CovTerm('big', 'multiplicative', np.array([[1e2]]), np.ones((6, 1)), None)
+    dc = cc.DatasetCovariance(np.arange(6.), 1e-9 * np.ones(6), [t])
+    Cr, _ = cc.assemble([cc.Block(dc, np.ones(6), 1e-9 * np.ones(6), np.ones(6))], 'Linear')
+    L, warn = cc.factorize(Cr)
+    check('C6 rank-deficient: one warning', len(warn) == 1 and np.all(np.isfinite(L)), str(warn))
+    L, warn = cc.factorize(np.array([[1.0, 2.0], [2.0, 1.0]]))
+    check('C6 indefinite: eigenvalues floored', len(warn) == 1 and 'floored' in warn[0], str(warn))
+    r = np.array([1.0, 2.0, 3.0])
+    L = np.linalg.cholesky(np.array([[4., 1., 0.], [1., 3., 1.], [0., 1., 2.]]))
+    check('C6 whiten solves L z = r', np.allclose(L @ cc.whiten(L, r), r))
+    J = np.arange(6.).reshape(3, 2)
+    check('C6 whiten_jac solves L Z = J', np.allclose(L @ cc.whiten_jac(L, J), J))
+
+
+def section_c7(cc):
+    n = 4
+    y = np.array([1., 2., 4., 8.])
+    inten = np.array([2., 2., 5., 5.])
+    sig = np.array([0.1, 0.2, 0.3, 0.4])
+    w = np.eye(n)
+    S = np.diag([0.01, 0.02, 0.03, 0.04])
+    tm = cc.CovTerm('m', 'multiplicative', S, w, None)
+    dc = cc.DatasetCovariance(np.arange(n, dtype=float), sig, [tm])
+    C, _ = cc.assemble([cc.Block(dc, y, sig, inten)], 'Log')
+    want = np.diag((sig / y) ** 2) + w @ S @ w.T
+    check('C7 log multiplicative exact', np.max(np.abs(C - want)) < 1e-15)
+    wa = np.array([[1., 0.], [1., 0.], [0., 1.], [0., 1.]])
+    Sa = np.array([[0.5, 0.1], [0.1, 0.6]])
+    dc = cc.DatasetCovariance(np.arange(n, dtype=float), sig, [cc.CovTerm('a', 'additive', Sa, wa, None)])
+    C, _ = cc.assemble([cc.Block(dc, y, sig, inten)], 'Log')
+    E = np.diag(1 / inten)
+    want = np.diag((sig / y) ** 2) + E @ wa @ Sa @ wa.T @ E
+    check('C7 log additive E W S W^T E', np.max(np.abs(C - want)) < 1e-15)
+    C, _ = cc.assemble([cc.Block(dc, y, sig, inten)], 'Linear')
+    check('C7 linear additive W S W^T (no intensity)',
+          np.max(np.abs(C - (np.diag(sig ** 2) + wa @ Sa @ wa.T))) < 1e-15)
+
+
 def main():
     try:
         import covariance_core as cc
@@ -141,6 +318,8 @@ def main():
         return finish()
     section_c1(cc)
     section_c2(cc)
+    for sec in (section_c3, section_c4, section_c5, section_c6, section_c7):
+        sec(cc)
     return finish()
 
 
