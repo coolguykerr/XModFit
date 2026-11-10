@@ -418,3 +418,97 @@ def outer_iterate(fit_once, rebuild, max_rounds=5, tol=0.1):
         if not moved:
             return result, rounds, True
     return result, max_rounds, False
+
+
+# ------------------------------------------------------ legacy bilayer formats --
+import joint_covariance as _jc
+
+
+def from_legacy_meta(meta, x, source, loader):
+    """DatasetCovariance from today's cov dict (y_corr, sigma_meas, k_index, Sigma_logc and
+    optionally v + var_fwhm); spec 7.2.  x comes from the caller (the dict has none).
+
+    attenuator_cal: multiplicative, shared, one-hot W from k_index, labels = SF_LIST
+    strings (or '0'..'K-1' when the meta carries no SF_LIST).  beam_fwhm (only when v is
+    present and var_fwhm != 0): multiplicative, shared, W = v / y_corr, cov = [[var_fwhm]],
+    so that in data mode (intensity = y_corr) it equals var_fwhm * v v^T exactly."""
+    y_corr = np.asarray(meta['y_corr'], float)
+    sigma = np.asarray(meta['sigma_meas'], float)
+    sig_c = np.asarray(meta['Sigma_logc'], float)
+    k_index = np.asarray(meta['k_index']).astype(int)
+    kk = sig_c.shape[0]
+    n = y_corr.size
+    w = np.zeros((n, kk))
+    w[np.arange(n), k_index] = 1.0
+    sf = meta.get('SF_LIST')
+    labels = [str(float(s)) for s in sf] if sf is not None else [str(k) for k in range(kk)]
+    terms = [CovTerm('attenuator_cal', 'multiplicative', sig_c, w, labels, 'shared',
+                     {'origin': 'legacy scale-factor correction'})]
+    v = meta.get('v')
+    var_fwhm = float(meta.get('var_fwhm') or 0.0)
+    if v is not None and var_fwhm:
+        v = np.asarray(v, float)
+        bad = (v != 0) & ~(np.isfinite(y_corr) & (y_corr != 0))
+        if bad.any():
+            raise CovarianceError('beam_fwhm: y_corr is zero or not finite where the footprint '
+                                  'sensitivity v is nonzero (first bad index %s); the term is '
+                                  'defined relative to y_corr' % _first_bad(bad))
+        terms.append(CovTerm('beam_fwhm', 'multiplicative', np.array([[var_fwhm]]),
+                             (v / y_corr)[:, None], None, 'shared',
+                             {'origin': 'legacy shared-beam footprint'}))
+    return DatasetCovariance(np.asarray(x, float), sigma, terms, None, y_corr,
+                             str(source), loader)
+
+
+def _is_bundle(path):
+    try:
+        with np.load(path, allow_pickle=True) as z:
+            return any('__' in k for k in z.keys())
+    except Exception:
+        return False
+
+
+def _npz_accepts(path):
+    # a bundle is claimed too so _npz_load can refuse it by name (use load_bundle)
+    return path.lower().endswith('.npz')
+
+
+def _npz_load(path, raw_path=None):
+    if _is_bundle(path):
+        raise CovarianceError('%s is a multi-dataset bundle; use load_bundle(path)' % path)
+    try:
+        meta = _jc.load_cov_npz(path)
+    except (KeyError, ValueError) as e:
+        raise CovarianceError('%s: %s' % (path, e))
+    return from_legacy_meta(meta, meta['x'], path, 'legacy-npz')
+
+
+def _cf_accepts(path):
+    return path.lower().endswith('_c_factors.txt')
+
+
+def _cf_load(path, raw_path=None):
+    if raw_path is None:
+        raise CovarianceError('%s: a *_c_factors.txt sidecar needs raw_path, the raw 4-column '
+                              'data file (x, y, err, sf), to recover y_corr / sigma_meas / '
+                              'k_index' % path)
+    try:
+        meta = _jc.load_dataset_cov(path, raw_path=raw_path)
+        x = _jc.load_rrf(raw_path)['x']
+    except (KeyError, ValueError, OSError) as e:
+        raise CovarianceError('%s: %s' % (path, e))
+    return from_legacy_meta(meta, x, path, 'legacy-c-factors')
+
+
+def load_bundle(path, datasets=None):
+    """The multi-dataset xrr_corrected_bundle npz as {dataset name: DatasetCovariance}.
+    Different var_fwhm between datasets is refused (CovarianceError)."""
+    try:
+        metas, _ = _jc.load_bundle_npz(str(path), datasets)
+    except (KeyError, ValueError) as e:
+        raise CovarianceError('%s: %s' % (path, e))
+    return {nm: from_legacy_meta(m, m['x'], path, 'legacy-bundle') for nm, m in metas.items()}
+
+
+register_loader('legacy-npz', _npz_accepts, _npz_load)
+register_loader('legacy-c-factors', _cf_accepts, _cf_load)

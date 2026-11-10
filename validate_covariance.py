@@ -310,6 +310,134 @@ def section_c7(cc):
           np.max(np.abs(C - (np.diag(sig ** 2) + wa @ Sa @ wa.T))) < 1e-15)
 
 
+def _legacy_fixture(tmp, footprint):
+    """Two datasets in the bundle layout (shared K2 / SIG2 / V_FP / VAR_FWHM), plus the
+    single-dataset npz and c_factors+raw routes for dataset 'a'."""
+    from validate_joint_gls import X, K2, SIG2, V_FP, VAR_FWHM, E, make_data
+    ys = [np.abs(y) + 1.0 for y in make_data(2)]
+    sf_list = np.array([1.0, 10.0])
+    c = np.array([1.2, 0.9])
+    names = ['a', 'b']
+    z = {'Sigma_logc': SIG2, 'SF_LIST': sf_list, 'c': c}
+    for nm, y in zip(names, ys):
+        z[nm + '__x'] = X
+        z[nm + '__R_corr'] = y
+        z[nm + '__sigma_meas'] = E * np.ones_like(X)
+        z[nm + '__v'] = V_FP
+        z[nm + '__k_index'] = K2
+        z[nm + '__scalars'] = np.array([1.0, 0.0, VAR_FWHM, 0.1, 0.01])
+    bundle = os.path.join(tmp, 'bundle.npz')
+    np.savez(bundle, **z)
+    one = dict(x=X, y_corr=ys[0], sigma_meas=E * np.ones_like(X), k_index=K2,
+               SF_LIST=sf_list, Sigma_logc=SIG2, c=c)
+    if footprint:
+        one.update(v=V_FP, var_fwhm=VAR_FWHM)
+    single = os.path.join(tmp, 'a_corrected_cov%d.npz' % int(footprint))
+    np.savez(single, **one)
+    # c_factors + raw route: raw y chosen so y_raw * c[k] == ys[0]
+    ck = c[K2]
+    raw = os.path.join(tmp, 'a_raw.txt')
+    with open(raw, 'w') as f:
+        for i in range(len(X)):
+            f.write('%.17g\t%.17g\t%.17g\t%.17g\n'
+                    % (X[i], ys[0][i] / ck[i], E / ck[i], sf_list[K2[i]]))
+    cf = os.path.join(tmp, 'a_c_factors.txt')
+    with open(cf, 'w') as f:
+        f.write('# SF c sigma(log c)\n')
+        for i in range(2):
+            f.write('%.17g %.17g %.17g\n' % (sf_list[i], c[i], np.sqrt(SIG2[i, i])))
+        f.write('# Sigma_logc matrix\n')
+        for i in range(2):
+            f.write('%.17g %.17g\n' % tuple(SIG2[i]))
+    return dict(bundle=bundle, single=single, raw=raw, cf=cf, ys=ys, names=names)
+
+
+def _eq_dc(a, b, terms=None):
+    ok = (np.array_equal(a.x, b.x) and np.allclose(a.sigma_meas, b.sigma_meas, rtol=1e-12)
+          and np.allclose(a.replaces_y, b.replaces_y, rtol=1e-12))
+    ta_, tb_ = (a.terms, b.terms) if terms is None else ([t for t in a.terms if t.name in terms],
+                                                         [t for t in b.terms if t.name in terms])
+    ok = ok and [t.name for t in ta_] == [t.name for t in tb_]
+    for ta, tb in zip(ta_, tb_):
+        ok = ok and np.allclose(ta.cov, tb.cov, rtol=1e-12) and np.allclose(ta.weights, tb.weights)
+        ok = ok and ta.labels == tb.labels
+    return ok
+
+
+def section_c8(cc):
+    from validate_joint_gls import X, K2, SIG2, V_FP, VAR_FWHM, E
+    from joint_covariance import build_full_covariance
+    tmp = tempfile.mkdtemp()
+    try:
+        fx = _legacy_fixture(tmp, True)
+        ds = cc.load_bundle(fx['bundle'])
+        check('C8 load_bundle returns both datasets', list(ds) == ['a', 'b'])
+        for foot in (True, False):
+            dcs = []
+            for nm in fx['names']:
+                d = ds[nm]
+                if not foot:
+                    d = cc.DatasetCovariance(d.x, d.sigma_meas,
+                                             [t for t in d.terms if t.name != 'beam_fwhm'],
+                                             d.y, d.replaces_y, d.source, d.loader)
+                dcs.append(d)
+            blocks = [cc.Block(d, d.replaces_y, d.sigma_meas, d.replaces_y) for d in dcs]
+            C, warns = cc.assemble(blocks, 'Linear')
+            ys = np.concatenate(fx['ys'])
+            ref = build_full_covariance(
+                ys, np.concatenate([E * np.ones_like(X)] * 2), np.concatenate([K2, K2]), SIG2,
+                v=(np.concatenate([V_FP, V_FP]) if foot else None),
+                var_fwhm=(VAR_FWHM if foot else 0.0))
+            err = np.max(np.abs(C - ref)) / np.max(np.abs(ref))
+            tag = 'with' if foot else 'without'
+            check('C8 assemble == build_full_covariance (%s footprint)' % tag,
+                  err < 1e-12 and warns == [], 'rel err %.3g, warns %s' % (err, warns))
+            n = len(X)
+            check('C8 cross-dataset block present (%s footprint)' % tag,
+                  np.max(np.abs(C[:n, n:])) > 0)
+        check('C8 bundle terms: attenuator_cal then beam_fwhm, both shared multiplicative',
+              [t.name for t in ds['a'].terms] == ['attenuator_cal', 'beam_fwhm']
+              and all(t.scope == 'shared' and t.kind == 'multiplicative' for t in ds['a'].terms))
+        check('C8 labels from SF_LIST', ds['a'].terms[0].labels == ['1.0', '10.0'],
+              str(ds['a'].terms[0].labels))
+        check('C8 legacy fields: y None, replaces_y = y_corr, source = path',
+              ds['a'].y is None and np.allclose(ds['a'].replaces_y, fx['ys'][0])
+              and ds['a'].loader != '' and ds['a'].source == fx['bundle'])
+        a_npz = cc.load_covariance(fx['single'])
+        a_cf = cc.load_covariance(fx['cf'], raw_path=fx['raw'])
+        check('C8 legacy-npz loader name', a_npz.loader == 'legacy-npz', a_npz.loader)
+        check('C8 legacy-c-factors loader name', a_cf.loader == 'legacy-c-factors', a_cf.loader)
+        check('C8 npz and c_factors+raw routes give equal arrays (attenuator_cal)',
+              _eq_dc(a_npz, a_cf, terms=['attenuator_cal']))
+        check('C8 npz route equals the bundle dataset', _eq_dc(a_npz, ds['a']))
+        try:
+            cc.load_covariance(fx['cf'])
+            check('C8 c_factors without raw_path raises', False, 'no error')
+        except cc.CovarianceError as e:
+            check('C8 c_factors without raw_path raises, naming raw_path',
+                  'raw_path' in str(e), str(e))
+        try:
+            cc.load_covariance(fx['bundle'])
+            check('C8 bundle path to load_covariance raises', False, 'no error')
+        except cc.CovarianceError as e:
+            check('C8 bundle path to load_covariance names load_bundle',
+                  'load_bundle' in str(e), str(e))
+        nofoot = cc.load_covariance(_legacy_fixture(tmp, False)['single'])
+        check('C8 no v/var_fwhm: only attenuator_cal',
+              [t.name for t in nofoot.terms] == ['attenuator_cal'])
+        bad = dict(y_corr=fx['ys'][0].copy(), sigma_meas=E * np.ones_like(X), k_index=K2,
+                   Sigma_logc=SIG2, v=V_FP, var_fwhm=VAR_FWHM)
+        bad['y_corr'][3] = 0.0
+        try:
+            cc.from_legacy_meta(bad, X, 'p', 'legacy-npz')
+            check('C8 y_corr == 0 with v != 0 raises', False, 'no error')
+        except cc.CovarianceError as e:
+            check('C8 y_corr == 0 with v != 0 names beam_fwhm and index 3',
+                  'beam_fwhm' in str(e) and '3' in str(e), str(e))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     try:
         import covariance_core as cc
@@ -318,7 +446,7 @@ def main():
         return finish()
     section_c1(cc)
     section_c2(cc)
-    for sec in (section_c3, section_c4, section_c5, section_c6, section_c7):
+    for sec in (section_c3, section_c4, section_c5, section_c6, section_c7, section_c8):
         sec(cc)
     return finish()
 
