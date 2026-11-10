@@ -68,6 +68,9 @@ class DatasetEntry:
     cov_inherited : True when cov_path/raw_path/cov were pre-filled from the
                  host's attached covariance (``inherit_covariances``); an explicit
                  cov_path (panel picker, .jpar) clears it and always wins.
+    cov_mode   : the host's single-fit covariance mode for an inherited covariance
+                 ('model' | 'data'), or None; compile warns when it differs from the
+                 joint fit's one mode (final review M3).
     fit_xmin   : optional per-dataset lower fit bound (q). ``None`` -> fall back
                  to the joint fit's scalar Xrange. Independent of ``model.x``
                  (the model's evaluation grid); this is the [imin,imax] window.
@@ -91,6 +94,7 @@ class DatasetEntry:
     limits: Optional[Dict[str, Tuple[Optional[float], Optional[float]]]] = None
     cov: Optional[object] = None
     cov_inherited: bool = False
+    cov_mode: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -155,10 +159,10 @@ class JointFitSpec:
                 if cov_path is not None:    # explicit: wins over an inherited one
                     if e.cov_inherited and raw_path is None:
                         e.raw_path = None
-                    e.cov_path, e.cov, e.cov_inherited = cov_path, None, False
+                    e.cov_path, e.cov, e.cov_inherited, e.cov_mode = cov_path, None, False, None
                 if raw_path is not None:
                     e.raw_path = raw_path
-                    e.cov, e.cov_inherited = None, False
+                    e.cov, e.cov_inherited, e.cov_mode = None, False, None
                 if fit_xmin is not None:    e.fit_xmin = fit_xmin
                 if fit_xmax is not None:    e.fit_xmax = fit_xmax
                 if limits is not None:      e.limits = limits
@@ -181,26 +185,30 @@ class JointFitSpec:
             g.prune_dataset(name)
         self.groups = [g for g in self.groups if g.n_members >= 2]
 
-    def inherit_covariances(self, attached):
+    def inherit_covariances(self, attached, modes=None):
         """Pre-fill each entry without an explicit covariance from the host's
         attached ones (spec 17 6.6: a joint fit uses each dataset's attached
         covariance unless the panel overrides it).
 
-        ``attached`` is ``{dataset_name: (DatasetCovariance, path, raw_path)}``.
+        ``attached`` is ``{dataset_name: (DatasetCovariance, path, raw_path)}``;
+        ``modes`` the host's single-fit mode per dataset (``{name: 'model'|'data'}``),
+        kept on the entry so compile can say when the joint mode differs.
         An entry with an explicit cov_path is left alone; an inherited entry
         follows the host (re-filled, or cleared when the covariance was removed)."""
         attached = attached or {}
+        modes = modes or {}
         for e in self.datasets:
             if e.cov_path and not e.cov_inherited:
                 continue
             got = attached.get(e.name)
             if got is None:
                 if e.cov_inherited:
-                    e.cov_path = e.raw_path = e.cov = None
+                    e.cov_path = e.raw_path = e.cov = e.cov_mode = None
                     e.cov_inherited = False
                 continue
             e.cov, e.cov_path, e.raw_path = got
             e.cov_inherited = True
+            e.cov_mode = modes.get(e.name)
 
     @property
     def dataset_names(self) -> List[str]:
@@ -347,6 +355,12 @@ class JointFitSpec:
             jf.warnings.append("dataset %s has %d curves; only the first (%s) "
                                "enters the joint fit" % (nm, n, ck))
         jf.warnings.extend(self.covariance_notes)
+        for e in self.datasets:             # one mode per joint fit (T8 ruling; M3)
+            if e.cov_inherited and e.cov_mode and e.cov_mode != self.covariance_mode:
+                jf.warnings.append(
+                    "dataset %s: its covariance's single-fit mode is %r; the joint fit "
+                    "uses one mode for all datasets, %r"
+                    % (e.name, e.cov_mode, self.covariance_mode))
         return jf
 
 

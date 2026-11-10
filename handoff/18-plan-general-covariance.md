@@ -548,10 +548,14 @@ re-implementation used as a test fixture (Task 6).
   attached, so G3's expectation drops the `· redchi`. Best-fit values and χ² still
   reproduce to 1e-12 in data mode; only stderr moves, by √χ²_red. If wrong: one
   keyword (`scale_covar`) per minimiser call.
-- **R2 — display uses the current model.** `update_plot` calls `residual` outside
-  `perform_fit`, so in model mode it builds C from the model at the current parameters.
-  After a converged fit this differs from the last round's C by less than the 0.1σ
-  tolerance. If wrong: cache the last round's L and reuse it when the active set matches.
+- **R2 — display reuses the last round's factor (changed by the final review, M1).**
+  `update_plot` calls `residual` outside `perform_fit`. `Fit` now reuses the factor the
+  fit's final round used when the active rows match (same scale, mode, x, data, σ and
+  terms), as `JointFit` keeps its `_L`, so the displayed χ² equals `result.chisqr` in
+  model mode too (`validate_covariance_gui.py` G3, `validate_covariance.py` F6); otherwise
+  it falls back to building C from the current state (in model mode from the model at the
+  current parameters). Originally "display uses the current model", accepted because a
+  converged fit differs from the last round's C by less than the 0.1σ tolerance.
 - **R3 — multi-curve datasets refuse a covariance at load** (the user is present), in
   addition to the spec's fit-time "ignore with warning" for dict-x models.
 - **R4 — the test model for Task 6 is a harness-local single-slab curve**, not

@@ -137,7 +137,13 @@ commits `b55bf41`..COV T8). What holds now:
   + raw; a legacy dict from `joint_covariance` is still accepted by `add_dataset`). A file
   that cannot be loaded at compile time, or whose x/y no longer match, fits that dataset
   without it and the report's first line says `DEGRADED FIT:` with the dataset, file and
-  reason (spec §6.5). Verified: `validate_covariance_gui.py` J1.
+  reason (spec §6.5). Verified: `validate_covariance_gui.py` J1 (a file that cannot be
+  loaded); `validate_covariance.py` J2 `mismatched v1 covariance` (x/y no longer match —
+  J1 does not cover this row). A **legacy** covariance (`replaces_y`) of the data's length
+  falls back to its y_corr with σ_meas on that row instead of the raw y, as `Fit` does, and
+  an unweighted (`w/o error`) scale also fits y_corr in both engines (final review I1,
+  2026-11-10). Verified: `validate_covariance.py` F1 (Fit == one-dataset JointFit in
+  Linear, Linear w/o error, Log w/o error and on an x mismatch).
 * **Mixed datasets.** One dataset with a covariance and one without fit together (the old
   `_build_chol` crash is gone); the dataset without one contributes its stock χ².
   Verified: `validate_covariance.py` J1 (Linear and Log), `validate_covariance_gui.py` J1
@@ -159,6 +165,20 @@ commits `b55bf41`..COV T8). What holds now:
   `validate_joint_gls.py` G3 (stderr expectation changed in COV T4).
 * **Sharing** is per term: legacy terms are `shared`, so the bilayer cross-block C is
   unchanged; conflicting shared terms become private with a warning instead of raising.
+  Labels are compared only when both copies carry real ones: a legacy dict without
+  `SF_LIST` has `labels=None` and shares with an npz/bundle copy of the same K and
+  `Sigma_logc` (final review M6); K and cov are always compared. Term names are unique
+  within one covariance: the v1 loader refuses a repeated name and `assemble` raises on two
+  shared terms of one name in one block, which would otherwise be counted once. Verified:
+  `validate_covariance.py` C4 (identical shared terms couple, conflicts are private with a
+  warning), C8 (legacy terms shared; `assemble` == `build_full_covariance`), J2 `different
+  Sigma_logc`, F2 (labels None), F3 (duplicate names).
+* **Model-mode MCMC** freezes C at `self.result` only when that result is stamped as a
+  covariance fit of the current data and ranges (`_cov_data_stamp`, as `Fit` does); else
+  data mode with a downgrade warning. The GUI's joint MCMC runs in the mode the fitted
+  JointFit used and notes a panel combo that differs; a fit stopped during outer iteration
+  reports `aborted by the user, not converged`. Verified: `validate_covariance.py` F4, F5,
+  `validate_covariance_gui.py` J4 (final review M4, T8, T4/T5 abort).
 * **GUI pre-fill.** A covariance attached to a dataset in the Data list (doc 08) appears in
   that dataset's covTable row and is used by the joint fit unless the panel (or a `.jpar`)
   names an explicit file; removing the attachment clears an inherited row, not an explicit

@@ -242,6 +242,17 @@ def _v1_term(raw, n, i):
     return CovTerm(name, kind, cov, w, labels, scope, dict(raw.get('provenance') or {}))
 
 
+def _refuse_duplicate_names(terms):
+    """Term names are unique within one covariance: two shared terms of one name would
+    be one set of random variables counted once (final review T2)."""
+    seen = set()
+    for t in terms:
+        if t.name in seen:
+            raise CovarianceError('term %r: duplicate term name (each term of a covariance '
+                                  'needs its own name)' % t.name)
+        seen.add(t.name)
+
+
 def _v1_load(path, raw_path=None):
     doc = _read_json(path)
     if not isinstance(doc, dict) or doc.get('format') != 'xmodfit-covariance':
@@ -261,6 +272,7 @@ def _v1_load(path, raw_path=None):
                               % (_first_bad(bad), float(sigma[np.argmax(bad)])))
     y = _vec(doc, 'y', n) if doc.get('y') is not None else None
     terms = [_v1_term(t, n, i) for i, t in enumerate(doc.get('terms') or [])]
+    _refuse_duplicate_names(terms)
     return DatasetCovariance(x, sigma, terms, y, None, str(path), 'xmodfit-covariance-v1',
                              doc.get('data_file'))
 
@@ -309,7 +321,10 @@ def _describe(bi, block):
 
 
 def _same_term(a, b):
-    if a.kind != b.kind or (a.labels or None) != (b.labels or None):
+    # labels are compared only when both copies carry real ones: a legacy dict without
+    # SF_LIST has labels None and matches any labels of the same K (final review M6)
+    la, lb = a.labels or None, b.labels or None
+    if a.kind != b.kind or (la is not None and lb is not None and la != lb):
         return False
     ca, cb = np.asarray(a.cov), np.asarray(b.cov)
     return ca.shape == cb.shape and bool(np.allclose(ca, cb, rtol=1e-12, atol=0.0))
@@ -340,6 +355,11 @@ def assemble(blocks, scale):
         if b.cov is None:
             continue
         e = 1.0 / np.asarray(b.intensity, float)
+        names = [t.name for t in b.cov.terms if t.scope == 'shared' and t.kind != 'dense']
+        dup = sorted(set(nm for nm in names if names.count(nm) > 1))
+        if dup:
+            raise CovarianceError('term %r: dataset %s has two shared terms of this name; '
+                                  'they would be counted once' % (dup[0], _describe(bi, b)))
         for t in b.cov.terms:
             if t.kind == 'dense':
                 cd = np.asarray(t.cov, float)
@@ -350,7 +370,9 @@ def assemble(blocks, scale):
                 g = _loading(t, b, scale)
                 C[sl, sl] += g @ np.asarray(t.cov, float) @ g.T
     for name, copies in shared.items():
-        if len(copies) > 1 and not all(_same_term(copies[0][1], t) for _, t in copies[1:]):
+        # pairwise: with labels None matching anything, "same as the first" is not transitive
+        if len(copies) > 1 and not all(_same_term(a[1], b[1]) for i, a in enumerate(copies)
+                                       for b in copies[i + 1:]):
             warnings.append('shared term %r differs between datasets %s (labels or covariance); '
                             'treated as private to each dataset'
                             % (name, ', '.join(_describe(bi, blocks[bi]) for bi, _ in copies)))
@@ -463,6 +485,8 @@ def report_block(covs, info, warnings, result):
     if info.get('mcmc_frozen'):
         out.append('  model rounds: n/a (MCMC: C frozen for the run at the %s)'
                    % ('best-fit model' if info['mcmc_frozen'] == 'model' else 'data'))
+    elif info.get('mode') == 'model' and info.get('aborted'):
+        out.append('  model rounds: %d (aborted by the user, not converged)' % rounds)
     elif info.get('mode') == 'model' and rounds:
         out.append('  model rounds: %d (%s)' % (rounds, 'converged' if info.get('converged')
                                                 else 'round limit reached, not converged'))
@@ -476,6 +500,8 @@ def report_block(covs, info, warnings, result):
         out.append('  downgrade: %s' % w)
     redchi = getattr(result, 'redchi', None)
     nfree = getattr(result, 'nfree', None)
+    out.append('  objective: whitened, r_w = L^-1 r with C = L L^T; Chi-Sqr, Red_Chi_Sqr and '
+               'the residuals shown are of r_w')
     if redchi is not None:
         out.append('  chi2_red = %.6g (errors are absolute, not rescaled by chi2_red)'
                    % redchi)
@@ -502,7 +528,8 @@ def from_legacy_meta(meta, x, source, loader):
     optionally v + var_fwhm); spec 7.2.  x comes from the caller (the dict has none).
 
     attenuator_cal: multiplicative, shared, one-hot W from k_index, labels = SF_LIST
-    strings (or '0'..'K-1' when the meta carries no SF_LIST).  beam_fwhm (only when v is
+    strings (None when the meta carries no SF_LIST, so it shares with any labelled copy
+    of the same Sigma_logc).  beam_fwhm (only when v is
     present and var_fwhm != 0): multiplicative, shared, W = v / y_corr, cov = [[var_fwhm]],
     so that in data mode (intensity = y_corr) it equals var_fwhm * v v^T exactly."""
     y_corr = np.asarray(meta['y_corr'], float)
@@ -514,7 +541,7 @@ def from_legacy_meta(meta, x, source, loader):
     w = np.zeros((n, kk))
     w[np.arange(n), k_index] = 1.0
     sf = meta.get('SF_LIST')
-    labels = [str(float(s)) for s in sf] if sf is not None else [str(k) for k in range(kk)]
+    labels = [str(float(s)) for s in sf] if sf is not None else None
     terms = [CovTerm('attenuator_cal', 'multiplicative', sig_c, w, labels, 'shared',
                      {'origin': 'legacy scale-factor correction'})]
     v = meta.get('v')

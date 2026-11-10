@@ -647,7 +647,8 @@ class JointFitPanel(QWidget):
     def _refresh_cov_table(self):
         # entries without an explicit sidecar follow the Data list's attached
         # covariance (spec 17 6.6); an explicit one (picker, .jpar) wins
-        self.spec.inherit_covariances(self._attached_covariances())
+        self.spec.inherit_covariances(self._attached_covariances(),
+                                      modes=getattr(self.parent_app, "covariance_modes", None))
         self.covModeCombo.blockSignals(True)
         self.covModeCombo.setCurrentText(self.spec.covariance_mode)
         self.covModeCombo.blockSignals(False)

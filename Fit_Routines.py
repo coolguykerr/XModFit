@@ -303,6 +303,7 @@ class Fit(QObject):
                 return self._cov_residual(fit_params, yfit, fit_scale)
             data=self.y[self.imin:self.imax+1]
             err=self.yerr[self.imin:self.imax+1]
+            if getattr(self, 'cov', None) is not None: data, err = self._cov_fallback(data, err)  # legacy: y_corr
             fit = yfit
             im=self.imask_for()          # see the dict branch for why this is here
             if im is not None:
@@ -492,7 +493,7 @@ class Fit(QObject):
     def _report(self, extra=''):
         """lmfit's fit_report, plus whatever the model derived from the result."""
         rep = fit_report(self.result)
-        if getattr(self, '_cov_reported', False):    # a covariance was attached for this fit
+        if getattr(self, '_cov_reported', False) or self._cov_note_pending():   # covariance, or a dropped one
             return self._cov_report(rep + '\n\n' + extra if extra else rep)
         return rep + '\n\n' + extra if extra else rep
 
@@ -577,9 +578,12 @@ class Fit(QObject):
     # (finite y, sigma > 0, finite intensity; Log also y > 0, intensity > 0).
     # The finite mask is built together with L and both are frozen for a whole
     # perform_fit (CLAUDE.md rule 4). Called outside perform_fit (update_plot's
-    # pre-sliced arrays), L is built lazily on the first residual call -- in
-    # model mode from the model at those parameters -- and cached on
-    # (fit_scale, n_active, mode); set_x, attach_covariance and every
+    # pre-sliced arrays), the first residual call reuses the factor the last fit's
+    # final round used when the active rows match it (same scale, mode, x, data,
+    # sigma and terms: _cov_reuse_key), so the displayed chi2 is result.chisqr in
+    # model mode too (Ruling R2 as changed by the final review, M1); otherwise L is
+    # built lazily -- in model mode from the model at those parameters. The cache
+    # is keyed on (fit_scale, active rows, mode); set_x, attach_covariance and every
     # outer-iteration round invalidate it.
     def _cov_reset(self, cov=None):
         """Clear any covariance and its cached factor, then attach ``cov``."""
@@ -634,17 +638,41 @@ class Fit(QObject):
     def _cov_name(self):
         return getattr(self, 'name', '') or 'dataset'
 
+    def _cov_fallback(self, data, err):
+        """The stock residual's (data, err) when an attached covariance does not apply:
+        a legacy covariance (replaces_y) of the data's length is fitted on its y_corr
+        with sigma_meas, as JointFit does (spec 6.5; final review I1). Else unchanged."""
+        cov = getattr(self, 'cov', None)
+        ry = getattr(cov, 'replaces_y', None)
+        if ry is None or type(self.y) == dict or len(ry) != len(self.y):
+            return data, err
+        sl = slice(self.imin, self.imax + 1)
+        return np.asarray(ry, float)[sl], np.asarray(cov.sigma_meas, float)[sl]
+
+    def _cov_note_pending(self):
+        """True when this fit carries a covariance downgrade without a covariance (e.g. one
+        named in a reloaded .xpar that could not be reattached): _report then says so."""
+        return any(isinstance(w, _CovDowngrade) for w in (getattr(self, 'warnings', None) or []))
+
     def _cov_decide(self, fit_scale):
         """(covariance to use or None, [downgrade reasons]) for the current state."""
         cov = getattr(self, 'cov', None)
         if cov is None:
             return None, []
         src = getattr(cov, 'source', None) or '<in memory>'   # a legacy dict has none
+        legacy = (isinstance(cov, dict) and 'y_corr' in cov) \
+            or getattr(cov, 'replaces_y', None) is not None
         if type(self.x) == dict:
             return None, ['covariance %s ignored: %s is a multi-curve (dict-x) dataset, '
-                          'which the covariance path does not support; fitted without it'
-                          % (src, self._cov_name())]
+                          'which the covariance path does not support; fitted without it%s'
+                          % (src, self._cov_name(),
+                             " (the uncorrected y: a legacy covariance's corrected y "
+                             "cannot be mapped onto the curves)" if legacy else '')]
         if fit_scale not in ('Linear', 'Log'):
+            if getattr(cov, 'replaces_y', None) is not None and len(cov.replaces_y) == len(self.y):
+                return None, ["covariance ignored: fit scale %r is unweighted; the corrected y "
+                              "of legacy covariance %s is fitted, unweighted, without its "
+                              "correlated terms (use 'Linear' or 'Log')" % (fit_scale, src)]
             return None, ["covariance ignored: fit scale %r is unweighted, so the fit runs "
                           "exactly as without a covariance (use 'Linear' or 'Log')"
                           % (fit_scale,)]
@@ -749,14 +777,35 @@ class Fit(QObject):
         """The cached (L, rows), built now if missing or keyed differently. A lazy
         build in model mode uses the model ``f`` when a term depends on it."""
         st = self._cov_cache
-        if st is None or st['key'] != (fit_scale, idx.tobytes(), self._cov_mode()):
-            model = self._cov_mode() == 'model' and self._cov_needs(fit_scale)
-            self._cov_build(fit_scale, idx, d, sig, f if model else d)
+        key = (fit_scale, idx.tobytes(), self._cov_mode())
+        if st is None or st['key'] != key:
+            last = getattr(self, '_cov_last', None)
+            if last is not None and len(last['rows']) == len(d) \
+                    and last['key'] == self._cov_reuse_key(fit_scale):
+                self._cov_cache = {'key': key, 'L': last['L'], 'rows': last['rows']}
+            else:
+                model = self._cov_mode() == 'model' and self._cov_needs(fit_scale)
+                self._cov_build(fit_scale, idx, d, sig, f if model else d)
             st = self._cov_cache
         if len(st['rows']) != len(d):
             raise RuntimeError('covariance rows %d != residual rows %d: the window mask '
                                'changed without a rebuild' % (len(st['rows']), len(d)))
         return st
+
+    def _cov_reuse_key(self, fit_scale):
+        """Identity of the active rows a factor belongs to: scale, mode, and on those rows
+        x, the fitted data, sigma_meas and every term (a pre-sliced update_plot call
+        and the fit's full arrays give the same key)."""
+        idx, d, sig = self._cov_rows()
+        use = self._cov_dec[1]
+        parts = [fit_scale, self._cov_mode(), use.source,
+                 np.asarray(self.x, float)[idx].tobytes(), d.tobytes(), sig.tobytes()]
+        for t in use.terms:
+            cv = np.asarray(t.cov, float)
+            parts += [t.name, t.kind, t.scope,
+                      (cv[np.ix_(idx, idx)] if t.kind == 'dense' else cv).tobytes(),
+                      b'' if t.weights is None else np.asarray(t.weights, float)[idx].tobytes()]
+        return hash(tuple(parts))
 
     def _cov_residual(self, fit_params, yfit, fit_scale):
         """Whitened residual L^-1 (d - f) (Linear) or L^-1 (ln d - ln f) (Log), in
@@ -825,13 +874,18 @@ class Fit(QObject):
         self._cov_fit_mode = self.covariance_mode if covariance_mode is None else covariance_mode
         return True
 
-    def _cov_finish(self, fit_scale, rounds, converged, mcmc_frozen=None):
+    def _cov_finish(self, fit_scale, rounds, converged, mcmc_frozen=None, aborted=False):
         self.cov_info = {'mode': self._cov_fit_mode, 'scale': fit_scale, 'rounds': int(rounds),
-                         'converged': bool(converged),
+                         'converged': bool(converged) and not aborted,
                          'factor_warnings': list(self._cov_factor_warnings),
                          'jitter': float(self._cov_jitter)}
+        if aborted:
+            self.cov_info['aborted'] = True
         if mcmc_frozen:
             self.cov_info['mcmc_frozen'] = mcmc_frozen
+        # the factor the final round used, for residual() outside perform_fit (M1)
+        self._cov_last = {'key': self._cov_reuse_key(fit_scale), 'L': self._cov_cache['L'],
+                          'rows': self._cov_cache['rows']}
         for w in self._cov_warnings:
             self.warnings.append(_CovDowngrade(w))
         for w in self._cov_notes:
@@ -922,14 +976,19 @@ class Fit(QObject):
 
             self.result, rounds, converged = cc.outer_iterate(fit_once, rebuild,
                                                               max_rounds=self.cov_max_rounds)
-            if not converged:
+            aborted = bool(self.fit_abort)
+            if aborted:
+                self.warnings.append('fit stopped by the user during the model-based covariance '
+                                     'iteration (round %d); the last result is kept, not '
+                                     'converged' % rounds)
+            elif not converged:
                 self.warnings.append(_CovDowngrade(
                     'model-based covariance did not converge in %d rounds (some varying '
                     'parameter still moved >= 0.1 stderr); the last result is kept' % rounds))
         else:
             self.result = self.fitter.minimize(method=fit_method, params=self.fit_params)
-            rounds, converged = 0, True
-        self._cov_finish(fit_scale, rounds, converged)
+            rounds, converged, aborted = 0, True, False
+        self._cov_finish(fit_scale, rounds, converged, aborted=aborted)
         extra = self._canonicalize_result()
         return self._report(extra), self.result.message
 

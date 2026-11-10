@@ -6,11 +6,15 @@ validate_covariance_gui.py -- the single-fit GUI entry point for a covariance
         tooltip, text unchanged); a y-mismatched dataset is refused with a message
         naming y; a data_file name mismatch warns; remove_covariance_from detaches
     G2  one Fit moved between datasets: B fits without a covariance, A with its own
-    G3  update_plot with a covariance: Chi-Sqr == result.chisqr, Residuals == the
-        whitened residual; without one, Residuals stay (y - yfit)/yerr
+    G3  update_plot with a covariance: Chi-Sqr == result.chisqr (data and model mode),
+        Residuals == the whitened residual, labelled whitened; without one, Residuals
+        stay (y - yfit)/yerr and nothing is labelled
     G4  .xpar persistence: path + mode round trip; no mode line -> data mode with a
-        report note; a missing covariance file warns and continues; no covariance ->
+        report note; a missing covariance or raw file, or a mismatching one, warns,
+        continues, and the next fit's report starts DEGRADED FIT; no covariance ->
         no covariance lines
+    G6  a legacy covariance attached: the Data plot shows y_corr; removed: raw y
+    J4  joint MCMC uses the fitted JointFit's mode, noting a changed panel combo
     G5  confidence intervals: with a covariance the target is chi2_min + chi2.ppf(CL, 1)
         and the profile compares chisqr; without one, today's redchi formula
     J1  JointFitSpec / build_jointfit_from_selection load sidecars through
@@ -218,12 +222,30 @@ def section_g3(w, kA, kB):
     check('G3 Residuals y == independent whitened residual L^-1 (y - f) (1e-10)',
           dev < 1e-10 * max(1.0, np.max(np.abs(rw))) and np.array_equal(R['x'], x),
           'dev %.3g' % dev)
+    check('G3 with a covariance: the residual plot is labelled whitened and the list says so',
+          'whitened' in str(R.get('names', '')) and 'whitened' in str(sp.get('Chi-Sqr objective'))
+          and 'whitened' in w.fit_report, '%s %s' % (R.get('names'), sp.get('Chi-Sqr objective')))
+    # model mode (final review M1, Ruling R2 changed): the last round's factor is reused
+    w.covModeComboBox.setCurrentText('model')
+    _fit(w, kA)
+    res = w.fit.result
+    rep = w.fit_report                    # (cov_info is reset by the GUI's later set_x)
+    check('G3 model mode iterated', '  mode: model' in rep and 'model rounds: 0' not in rep
+          and 'model rounds:' in rep, rep[-500:])
+    w.update_plot()
+    chi = w.fit.params['output_params']['scaler_parameters']['Chi-Sqr']
+    d = abs(chi - res.chisqr) / res.chisqr
+    check('G3 model mode: displayed Chi-Sqr == result.chisqr (1e-10)', d < 1e-10,
+          'shown %r fit %r rel %.2e' % (chi, res.chisqr, d))
+    w.covModeComboBox.setCurrentText('data')
     _select(w, kB)
     fb = w.fit
     R = fb.params['output_params']['Residuals']
     yb = w.data[kB][k0]['y']
     check('G3 without a covariance: Residuals == (y - yfit)/yerr exactly',
           np.array_equal(R['y'], (yb - fb.yfit) / w.data[kB][k0]['yerr']))
+    check('G3 without a covariance: no whitened label, no objective entry',
+          'names' not in R and 'Chi-Sqr objective' not in fb.params['output_params']['scaler_parameters'])
 
 
 def section_g4(w, kA, kB, tmp):
@@ -275,6 +297,14 @@ def section_g4(w, kA, kB, tmp):
     check('G4 missing covariance file: warning, dataset continues without one',
           kA not in w.covariances and any('not found' in m and gone in m for m in MSGS)
           and not any('Import Error' in m for m in MSGS), str(MSGS))
+    _fit(w, kA)
+    rep = w.fit_report
+    check('G4 missing covariance file: the next fit report starts DEGRADED FIT naming the file',
+          rep.startswith('DEGRADED FIT:') and 'gone.cov.json' in rep.splitlines()[0]
+          and 'Fit warnings:' in rep, rep[:300])
+    _fit(w, kA)
+    check('G4 ... reported once (the fit after it is a plain no-covariance fit)',
+          not w.fit_report.startswith('DEGRADED') and 'gone.cov.json' not in w.fit_report)
     # a legacy *_c_factors.txt whose raw data file is missing
     cf = os.path.join(tmp, 'a_c_factors.txt')
     with open(cf, 'w') as fh:
@@ -296,6 +326,25 @@ def section_g4(w, kA, kB, tmp):
           err is None and kA not in w.covariances
           and any(raw_gone in m for m in MSGS)
           and not any('Import Error' in m for m in MSGS), '%s %s' % (err, MSGS))
+    _fit(w, kA)
+    check('G4 missing raw file: the next fit report starts DEGRADED FIT naming it',
+          w.fit_report.startswith('DEGRADED FIT:')
+          and 'a_raw_gone.txt' in w.fit_report.splitlines()[0], w.fit_report[:300])
+    # a covariance that no longer matches the dataset (x/y edited since the save)
+    xp6 = os.path.join(tmp, 'a_cov_mismatch.xpar')
+    mm = os.path.join(tmp, 'mismatch.cov.json')
+    import json
+    doc = json.load(open(GOOD))
+    doc['y'] = [1.1 * v for v in doc['y']]
+    json.dump(doc, open(mm, 'w'))
+    with open(xp6, 'w') as fh:
+        fh.write(open(xp).read().replace(os.path.abspath(GOOD), mm))
+    _select(w, kA)
+    w.loadParameters(fname=xp6)
+    _fit(w, kA)
+    check('G4 mismatching covariance on reload: next fit report starts DEGRADED FIT naming it',
+          kA not in w.covariances and w.fit_report.startswith('DEGRADED FIT:')
+          and 'mismatch.cov.json' in w.fit_report.splitlines()[0], w.fit_report[:300])
     w.attach_covariance_to(kA, GOOD)
     # no covariance -> no covariance lines
     _select(w, kB)
@@ -554,6 +603,56 @@ def section_j2(w, kA, kB, tmp):
     w.attach_covariance_to(kA, GOOD)
 
 
+def section_g6(w, kA, kB, tmp):
+    """Final review I1: with a legacy (replaces_y) covariance attached, the Data plot shows
+    the corrected y the fit uses; removing it restores the raw curve."""
+    k0 = list(w.data[kB].keys())[0]
+    d = w.data[kB][k0]
+    x, y, e = (np.asarray(d[c], float) for c in ('x', 'y', 'yerr'))
+    kidx = (x > np.median(x)).astype(int)
+    ycorr = np.where(kidx == 1, 1.3 * y, y)
+    p = os.path.join(tmp, 'b_corrected_cov.npz')
+    np.savez(p, x=x, y_corr=ycorr, sigma_meas=e, k_index=kidx, SF_LIST=np.array([1.0, 10.0]),
+             Sigma_logc=np.array([[4e-4, 0.0], [0.0, 4e-4]]))
+    name = '%s:%s' % (kB.split('<>')[0], k0)
+    _select(w, kB)
+    ok = w.attach_covariance_to(kB, p)
+    w.update_plot()
+    shown = np.asarray(w.plotWidget.data[name].yData, float)
+    check('G6 legacy covariance attached: the Data plot shows y_corr (the data fitted)',
+          ok and len(shown) == len(ycorr) and np.allclose(shown, ycorr, rtol=1e-12, atol=0),
+          'attached %s, max |shown - y_corr| %.3g' % (ok, np.max(np.abs(shown - ycorr))
+                                                       if len(shown) == len(ycorr) else np.inf))
+    w.remove_covariance_from(kB)
+    w.update_plot()
+    shown = np.asarray(w.plotWidget.data[name].yData, float)
+    check('G6 legacy covariance removed: the raw curve is shown again',
+          np.allclose(shown, y, rtol=1e-12, atol=0))
+
+
+def section_j4(w, kA, kB):
+    """Final review M4/T8: joint MCMC uses the mode the fitted JointFit used, and notes a
+    panel combo that has changed since."""
+    panel = w.jointFitPanel
+    fitted = w.fit.cov_info.get('mode') if hasattr(w.fit, 'objectives') else None
+    other = 'model' if fitted == 'data' else 'data'
+    panel.covModeCombo.setCurrentText(other)
+    try:
+        mode, note = w._joint_emcee_mode()
+    except Exception as e:
+        mode, note = None, repr(e)
+    check('J4 joint MCMC mode: the fitted mode, with a note naming the panel mode',
+          fitted is not None and mode == fitted and note is not None
+          and fitted in str(note) and other in str(note), '%r %r %r' % (fitted, mode, note))
+    panel.covModeCombo.setCurrentText(fitted or 'model')
+    try:
+        mode, note = w._joint_emcee_mode()
+    except Exception as e:
+        mode, note = None, repr(e)
+    check('J4 joint MCMC mode: panel == fitted mode -> no note', mode == fitted and note is None,
+          '%r %r' % (mode, note))
+
+
 def _strip(path, out, prefix):
     with open(out, 'w') as fh:
         fh.write(''.join(l for l in open(path).readlines() if not l.startswith(prefix)))
@@ -705,8 +804,10 @@ def main():
         kA, kB, kC = keys
         for sec, args in ((section_g1, (w, kA, kB, kC)), (section_g2, (w, kA, kB)),
                           (section_g3, (w, kA, kB)), (section_g4, (w, kA, kB, tmp)),
-                          (section_g5, (w, kA, kB)), (section_j1, (tmp,)),
-                          (section_j2, (w, kA, kB, tmp)), (section_j3, (w, kA, kB, tmp)),
+                          (section_g5, (w, kA, kB)), (section_g6, (w, kA, kB, tmp)),
+                          (section_j1, (tmp,)),
+                          (section_j2, (w, kA, kB, tmp)), (section_j4, (w, kA, kB)),
+                          (section_j3, (w, kA, kB, tmp)),
                           (section_j3_legacy, (tmp,))):
             try:
                 sec(*args)

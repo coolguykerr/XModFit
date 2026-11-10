@@ -23,6 +23,19 @@ validate_covariance.py -- general covariance fitting: data model and loaders (Qt
         follows the result); the cached L is keyed
         on the active rows; dict-x + legacy dict downgrades; MCMC freezes C only at a
         result of the same data
+    F1  legacy (replaces_y) downgrades fit y_corr with sigma_meas in Fit and JointFit alike
+        (Linear, Linear w/o error, Log w/o error, x mismatch); dict-x says uncorrected y
+    F2  shared-term labels compared only when both carry real labels (legacy dict without
+        SF_LIST shares with an npz); pairwise across copies
+    F3  duplicate term names: refused by the v1 loader; assemble raises on a block's two
+        shared terms of one name
+    F4  a fit stopped during outer iteration reports aborted, not converged (Fit, JointFit)
+    F5  JointFit model-mode MCMC freezes C only at a result of these data/ranges;
+        pending_warnings reach the next report once
+    F6  outside perform_fit Fit reuses the final round's factor when the rows match
+        (model-mode chi2 == result.chisqr); other data on the same rows -> no reuse
+    F7  the report says Chi-Sqr and residuals are of the whitened objective
+    F8  a joint fit inheriting a covariance with another single-fit mode warns
 
     python validate_covariance.py
 """
@@ -1137,6 +1150,273 @@ def section_s7(cc):
               False, repr(ex))
 
 
+# ------------------------------------------------ final review (COV final) ----
+def _f_legacy(cc, x_cov=None):
+    """Raw stepped line, and a legacy covariance whose y_corr is 1.3 x raw above x = 1
+    (final review I1's case: the corrected and the raw data differ)."""
+    from validate_joint_gls import X, E, K2, SIG2
+    rng = np.random.default_rng(7)
+    ytrue = 3.0 * X + 0.5
+    ycorr = ytrue + E * rng.standard_normal(len(X))
+    raw = np.where(X > 1.0, ycorr / 1.3, ycorr)
+    ee = E * np.ones_like(X)
+    meta = dict(y_corr=ycorr, sigma_meas=ee, k_index=K2, Sigma_logc=SIG2)
+    leg = cc.from_legacy_meta(meta, X if x_cov is None else x_cov, 'leg.npz', 'legacy-npz')
+    return X, ee, raw, ycorr, leg
+
+
+def section_f1(cc):
+    """I1: a legacy covariance's downgrade fits y_corr with sigma_meas in Fit and JointFit."""
+    from Joint_Fit_Routines import JointFit
+    from validate_joint_gls import rel
+    X, ee, raw, ycorr, leg = _f_legacy(cc)
+    for sc in ('Linear', 'Linear w/o error', 'Log w/o error'):
+        f = _s_fit(X, raw, 2 * ee, cov=leg)
+        rep, _ = _s_run(f, sc)
+        jf, jrep = _j_fit([('A', raw, leg)], sc)
+        ref = _s_fit(X, ycorr, ee)                    # the corrected data, no covariance
+        _s_run(ref, sc)
+        dj = max(rel(f.result.params[n].value, jf.result.params['d0_' + n].value)
+                 for n in ('a', 'b'))
+        dr = max(rel(f.result.params[n].value, ref.result.params[n].value) for n in ('a', 'b'))
+        check('F1 legacy (%s): Fit == one-dataset JointFit (1e-6)' % sc, dj < 1e-6,
+              'Fit a=%.6g JointFit a=%.6g rel %.2e' % (f.result.params['a'].value,
+                                                    jf.result.params['d0_a'].value, dj))
+        if sc != 'Linear':
+            check('F1 legacy (%s): both fit y_corr (== stock fit of y_corr, 1e-6)' % sc,
+                  dr < 1e-6, 'rel %.2e' % dr)
+            check('F1 legacy (%s): the downgrade line says the corrected y is fitted' % sc,
+                  'corrected y' in _first(rep) and 'corrected y' in _first(jrep),
+                  '%s | %s' % (_first(rep), _first(jrep)))
+    # JointFit x mismatch on a legacy covariance of the same length: y_corr + sigma_meas
+    X, ee, raw, ycorr, leg = _f_legacy(cc, x_cov=_f_legacy(cc)[0] * 1.01)
+    jf = JointFit()
+    jf.add_dataset('A', func=_j_line(), x=X, y=raw, yerr=2 * ee, cov=leg)
+    jf.build_master_params()
+    jrep, _ = jf.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq', maxiter=2000)
+    f = _s_fit(X * 1.01, raw, 2 * ee, cov=leg)
+    f.x = X                                          # Fit's S5 'legacy x changed' row
+    rep, _ = _s_run(f, 'Linear')
+    ref = _s_fit(X, ycorr, ee)
+    _s_run(ref, 'Linear')
+    dj = max(rel(f.result.params[n].value, jf.result.params['d0_' + n].value) for n in ('a', 'b'))
+    dr = max(rel(jf.result.params['d0_' + n].value, ref.result.params[n].value)
+             for n in ('a', 'b'))
+    check('F1 legacy x mismatch: JointFit fits y_corr with sigma_meas (== stock fit of y_corr, '
+          '1e-6) and == Fit', dr < 1e-6 and dj < 1e-6, 'vs ref %.2e, vs Fit %.2e' % (dr, dj))
+    check('F1 legacy x mismatch: JointFit DEGRADED FIT names the mismatch and the corrected y',
+          _first(jrep).startswith('DEGRADED FIT:') and 'x mismatch' in _first(jrep)
+          and 'corrected y' in _first(jrep), _first(jrep))
+    # dict-x with a legacy covariance: the report says the uncorrected curves are fitted
+    X, ee, raw, ycorr, leg = _f_legacy(cc)
+    f = _s_fit({'c1': X, 'c2': X}, {'c1': raw, 'c2': raw}, {'c1': ee, 'c2': ee},
+               model=lambda: _DictLine())
+    f.attach_covariance(leg)
+    rep, _ = _s_run(f, 'Linear')
+    check('F1 dict-x + legacy covariance: DEGRADED FIT says the uncorrected y is fitted',
+          'dict-x' in _first(rep) and 'uncorrected' in _first(rep), _first(rep))
+
+
+def section_f2(cc):
+    """M6: a legacy dict without SF_LIST shares Sigma_logc with an npz that has SF_LIST."""
+    from validate_joint_gls import X, E, K2, SIG2
+    ee = E * np.ones_like(X)
+    y = 3.0 * X + 0.5
+    no_sf = cc.from_legacy_meta(dict(y_corr=y, sigma_meas=ee, k_index=K2, Sigma_logc=SIG2),
+                                X, '<dict>', 'legacy-dict')
+    with_sf = cc.from_legacy_meta(dict(y_corr=y, sigma_meas=ee, k_index=K2, Sigma_logc=SIG2,
+                                       SF_LIST=np.array([1.0, 10.0])), X, 'b.npz', 'legacy-npz')
+    check('F2 legacy dict without SF_LIST: attenuator_cal labels are None',
+          no_sf.terms[0].labels is None, str(no_sf.terms[0].labels))
+    bl = [cc.Block(no_sf, y, ee, y, name='A'), cc.Block(with_sf, y, ee, y, name='B')]
+    C, warn = cc.assemble(bl, 'Linear')
+    n = len(X)
+    check('F2 no SF_LIST + SF_LIST, same Sigma_logc: shared (off-block nonzero), no warning',
+          warn == [] and np.max(np.abs(C[:n, n:])) > 0, str(warn))
+    other = cc.from_legacy_meta(dict(y_corr=y, sigma_meas=ee, k_index=K2, Sigma_logc=SIG2,
+                                     SF_LIST=np.array([1.0, 3.0])), X, 'c.npz', 'legacy-npz')
+    C, warn = cc.assemble([cc.Block(with_sf, y, ee, y, name='B'),
+                           cc.Block(other, y, ee, y, name='C')], 'Linear')
+    check('F2 both carry real labels that differ: still private, with a warning',
+          len(warn) == 1 and np.max(np.abs(C[:n, n:])) == 0.0, str(warn))
+    C, warn = cc.assemble([cc.Block(no_sf, y, ee, y, name='A'),
+                           cc.Block(with_sf, y, ee, y, name='B'),
+                           cc.Block(other, y, ee, y, name='C')], 'Linear')
+    check('F2 None + two different real labels: compared pairwise, private with a warning',
+          len(warn) == 1 and np.max(np.abs(C[:n, n:])) == 0.0, str(warn))
+    k3 = np.array([[4e-4, 0, 0], [0, 4e-4, 0], [0, 0, 4e-4]])
+    t3 = cc.CovTerm('attenuator_cal', 'multiplicative', k3, np.eye(n, 3), None, 'shared')
+    d3 = cc.DatasetCovariance(X, ee, [t3], None, y, 'd.npz', 'legacy-npz')
+    C, warn = cc.assemble([cc.Block(no_sf, y, ee, y, name='A'),
+                           cc.Block(d3, y, ee, y, name='D')], 'Linear')
+    check('F2 labels None on one side: K and cov still compared (K 2 vs 3 -> private)',
+          len(warn) == 1 and np.max(np.abs(C[:n, n:])) == 0.0, str(warn))
+
+
+def section_f3(cc):
+    """Duplicate term names: refused at load; assemble never counts a duplicate once."""
+    with open(GOOD) as fh:
+        doc = json.load(fh)
+    doc['terms'].append(copy.deepcopy(doc['terms'][0]))
+    tmp = tempfile.mkdtemp()
+    try:
+        p = os.path.join(tmp, 'dup.cov.json')
+        with open(p, 'w') as fh:
+            json.dump(doc, fh)
+        try:
+            cc.load_covariance(p)
+            check('F3 v1 with two terms of one name refused, naming the term', False, 'no error')
+        except cc.CovarianceError as e:
+            check('F3 v1 with two terms of one name refused, naming the term',
+                  'duplicate' in str(e) and "'stitch'" in str(e), str(e))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    from validate_joint_gls import X, E
+    n = len(X)
+    ee = E * np.ones_like(X)
+    y = 3.0 * X + 0.5
+    w = np.ones((n, 1))
+    t = cc.CovTerm('s', 'multiplicative', np.array([[1e-3]]), w, None, 'shared')
+    d = cc.DatasetCovariance(X, ee, [t, cc.CovTerm('s', 'multiplicative', np.array([[2e-3]]),
+                                                   w, None, 'shared')], y)
+    try:
+        cc.assemble([cc.Block(d, y, ee, y, name='A')], 'Linear')
+        check('F3 assemble: a block with two shared terms of one name raises', False,
+              'assembled silently')
+    except cc.CovarianceError as e:
+        check('F3 assemble: a block with two shared terms of one name raises', "'s'" in str(e),
+              str(e))
+
+
+def _abort_after(fit, ncalls):
+    """Make ``fit`` see a user Stop after ``ncalls`` residual evaluations."""
+    seen = [0]
+
+    def slot(*a):
+        seen[0] += 1
+        if seen[0] >= ncalls:
+            fit.fit_abort = True
+    fit.functionCalled.connect(slot)
+
+
+def section_f4(cc):
+    """Aborted outer iteration: cov_info and the report say aborted, not converged."""
+    X, E, ya, yb, cov = _j_data()
+    ee = E * np.ones_like(X)
+    f = _s_fit(X, ya, ee, cov=cov)
+    f.fit_params['a'].value, f.fit_params['b'].value = 0.5, 5.0
+    _abort_after(f, 3)
+    rep, _ = _s_run(f, 'Linear')
+    check('F4 Fit aborted during outer iteration: cov_info aborted, not converged',
+          f.cov_info.get('aborted') is True and f.cov_info.get('converged') is False,
+          str(f.cov_info))
+    check('F4 Fit aborted: the report says aborted, never "(converged)"',
+          'aborted' in rep and '(converged)' not in rep, rep[-700:])
+    from Joint_Fit_Routines import JointFit
+    jf = JointFit()
+    jf.add_dataset('A', func=_j_line(a=0.5, b=5.0), x=X, y=ya, yerr=ee, cov=cov)
+    jf.build_master_params()
+    _abort_after(jf, 3)
+    rep, _ = jf.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq', maxiter=2000)
+    check('F4 JointFit aborted during outer iteration: cov_info aborted, not converged; report',
+          jf.cov_info.get('aborted') is True and jf.cov_info.get('converged') is False
+          and 'aborted' in rep and '(converged)' not in rep, str(jf.cov_info))
+    f = _s_fit(X, ya, ee, cov=cov)
+    rep, _ = _s_run(f, 'Linear')
+    check('F4 a fit that is not aborted: converged, no aborted key',
+          f.cov_info.get('converged') is True and 'aborted' not in f.cov_info
+          and 'aborted' not in rep, str(f.cov_info))
+
+
+def section_f5(cc):
+    """M4: JointFit model-mode MCMC freezes C only at a result of these data and ranges;
+    pending_warnings reach the next fit's report (run_joint_emcee's mode note)."""
+    X, E, ya, yb, cov = _j_data()
+    jf, _ = _j_fit([('A', ya, cov), ('B', yb, None)], 'Linear')
+    try:
+        rep, _ = jf.perform_fit(X[3], X[-1], fit_scale='Linear', fit_method='emcee',
+                                emcee_walkers=16, emcee_steps=5, emcee_cores=1)
+        check('F5 JointFit emcee on other ranges than the fit: C frozen in data mode, warned',
+              jf.cov_info.get('mcmc_frozen') == 'data' and 'other data' in _first(rep),
+              '%s | %s' % (jf.cov_info, _first(rep)))
+    except Exception as e:
+        check('F5 JointFit emcee on other ranges than the fit: C frozen in data mode, warned',
+              False, repr(e))
+    jf, _ = _j_fit([('A', ya, cov), ('B', yb, None)], 'Linear')
+    jf.pending_warnings = ['a note for the next fit']
+    rep, _ = jf.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq', maxiter=2000)
+    check('F5 JointFit pending_warnings reach the next report once',
+          'a note for the next fit' in rep and not getattr(jf, 'pending_warnings', None))
+    rep, _ = jf.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq', maxiter=2000)
+    check('F5 ... and not the one after', 'a note for the next fit' not in rep)
+
+
+def section_f6(cc):
+    """M1 (Ruling R2 changed): outside perform_fit, Fit reuses the last round's factor when
+    the active rows match, so the displayed chi2 == result.chisqr in model mode too."""
+    from validate_joint_gls import rel
+    X, E, ya, yb, cov = _j_data()
+    ee = E * np.ones_like(X)
+    for sc in ('Linear', 'Log'):
+        f = _s_fit(X, ya, ee, cov=cov)
+        _s_run(f, sc, xmin=X[2], xmax=X[-3])
+        check('F6 (%s) model mode iterated' % sc, f.cov_info.get('rounds', 0) >= 1, str(f.cov_info))
+        i0, i1 = f.imin, f.imax + 1
+        f.set_x(X[i0:i1], y=ya[i0:i1], yerr=ee[i0:i1], cov=cov.subset(np.arange(i0, i1)))
+        r = f.residual(f.result.params, sc)
+        d = rel(float(np.sum(r ** 2)), f.result.chisqr)
+        check('F6 (%s) model mode: update_plot pre-sliced chi2 == result.chisqr (1e-10)' % sc,
+              d < 1e-10, 'rel %.2e' % d)
+    cny = cc.DatasetCovariance(X.copy(), cov.sigma_meas, cov.terms, None, source='A.cov.json')
+    f = _s_fit(X, ya, ee, cov=cny)
+    _s_run(f, 'Linear')
+    f.set_x(X, y=yb, yerr=ee, cov=cny)               # other data on the same rows
+    g = _s_fit(X, yb, ee, cov=cny)
+    p = f.result.params
+    try:
+        r, r0 = f.residual(p, 'Linear'), g.residual(p, 'Linear')
+        same = np.max(np.abs(r - r0)) < 1e-12
+    except Exception as e:
+        same = False
+    check('F6 other data on the same rows: no reuse (== a fresh lazy build)', same)
+
+
+def section_f7(cc):
+    """M2: with a covariance the report says the numbers come from the whitened objective."""
+    X, E, ya, yb, cov = _j_data()
+    ee = E * np.ones_like(X)
+    f = _s_fit(X, ya, ee, cov=cov)
+    rep, _ = _s_run(f, 'Linear')
+    jf, jrep = _j_fit([('A', ya, cov), ('B', yb, None)], 'Linear')
+    check('F7 report (Fit and JointFit): a line saying chi-square and residuals are whitened',
+          'whitened' in rep and 'whitened' in jrep, rep[-400:])
+
+
+def section_f8(cc):
+    """M3: a joint fit inheriting a covariance whose single-fit mode differs warns."""
+    from joint_fit_spec import JointFitSpec
+    X, E, ya, yb, cov = _j_data()
+    data = {nm: {'c': {'x': X, 'y': y, 'yerr': E * np.ones_like(X)}}
+            for nm, y in (('A', ya), ('B', yb))}
+    for single, joint, want in (('data', 'model', True), ('model', 'model', False)):
+        spec = JointFitSpec()
+        spec.add_dataset('A', model=_j_line())
+        spec.add_dataset('B', model=_j_line())
+        spec.covariance_mode = joint
+        try:
+            spec.inherit_covariances({'A': (cov, 'A.cov.json', None)}, modes={'A': single})
+            jf = spec.compile(data)
+            rep, _ = jf.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq',
+                                    maxiter=2000)
+            hit = any('single-fit' in w and "'%s'" % joint in w for w in jf.warnings)
+            ok = hit == want and (('single-fit' in rep) == want)
+            msg = str(jf.warnings)
+        except Exception as e:
+            ok, msg = False, repr(e)
+        check('F8 inherited single-fit mode %s, joint mode %s: warning %s'
+              % (single, joint, 'names the joint mode' if want else 'absent'), ok, msg)
+
+
 def main():
     try:
         import covariance_core as cc
@@ -1151,7 +1431,8 @@ def main():
     from PyQt5.QtWidgets import QApplication
     app = QApplication.instance() or QApplication(sys.argv)
     for sec in (section_j1, section_j2, section_s6, section_s1, section_s2, section_s3,
-                section_s4, section_s5, section_s7):
+                section_s4, section_s5, section_s7, section_f1, section_f2, section_f3,
+                section_f4, section_f5, section_f6, section_f7, section_f8):
         try:
             sec(cc)
         except Exception as e:

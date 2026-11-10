@@ -203,22 +203,33 @@ class JointFit(QObject):
             func.init_params()
 
         cov_notes = []
+        legacy = None                 # a legacy covariance whose y_corr is fitted
         if cov is not None and not isinstance(cov, cc.DatasetCovariance):
             cov = cc.from_legacy_meta(cov, x, source='<dict>', loader='legacy-dict')
         if cov is not None:
             probs = cov.match_problems(x, y)
-            if probs:
+            if probs and cov.replaces_y is not None and cov.n == len(x):
+                # legacy of the data's length: fall back to y_corr with sigma_meas,
+                # as Fit does (spec 6.5; final review I1)
+                cov_notes.append(_Downgrade(
+                    "%s: covariance %s does not match the data (%s); fitted without its "
+                    "correlated terms (corrected y with the measurement errors only)"
+                    % (name, cov.source or '<in memory>', '; '.join(probs))))
+                legacy, cov = cov, None
+            elif probs:
                 cov_notes.append(_Downgrade(
                     "%s: covariance %s does not match the data (%s); fitted without it"
                     % (name, cov.source or '<in memory>', '; '.join(probs))))
                 cov = None
+            else:
+                legacy = cov if cov.replaces_y is not None else None
         y_use = np.zeros_like(x) if y is None else np.asarray(y, dtype=float)
         yerr_use = np.ones_like(x) if yerr is None else np.asarray(yerr, dtype=float)
-        if cov is not None and cov.replaces_y is not None:
+        if legacy is not None:
             # legacy: the corrected data with the measurement-only error is the
             # dataset (also its no-covariance fallback, spec 6.5)
-            y_use = np.asarray(cov.y_for_fit(y_use), dtype=float)
-            yerr_use = np.asarray(cov.sigma_meas, dtype=float)
+            y_use = np.asarray(legacy.y_for_fit(y_use), dtype=float)
+            yerr_use = np.asarray(legacy.sigma_meas, dtype=float)
 
         if mask is not None:
             mask = np.asarray(mask, dtype=bool)
@@ -243,6 +254,7 @@ class JointFit(QObject):
             "mask": mask,       # full-length eligibility mask, or None
             "cov": cov,         # covariance_core.DatasetCovariance or None
             "cov_notes": cov_notes,   # downgrades decided here (re-added per fit)
+            "legacy_y": legacy is not None,   # y/yerr are a legacy covariance's y_corr
         }
         self.objectives.append(obj)
         return obj
@@ -1261,11 +1273,17 @@ class JointFit(QObject):
         for obj in self.objectives:         # add_dataset downgrades, every fit
             for w in obj.get("cov_notes") or []:
                 self.warnings.append(_Downgrade(w))
+        for w in getattr(self, 'pending_warnings', None) or []:   # e.g. a host's MCMC note
+            self.warnings.append(w if isinstance(w, _RunWarning) else _RunWarning(w))
+        self.pending_warnings = []
         cov_on = self._use_cov and fit_scale in ('Linear', 'Log')
         if self._use_cov and not cov_on:
+            leg = [o["name"] for o in self.objectives if o.get("legacy_y")]
             self.warnings.append(_Downgrade(
                 "covariance ignored: fit scale %r is unweighted, so the fit runs "
-                "exactly as without a covariance (use 'Linear' or 'Log')" % (fit_scale,)))
+                "exactly as without a covariance (use 'Linear' or 'Log')%s"
+                % (fit_scale, '; the corrected y of the legacy covariance is fitted for %s'
+                   % ', '.join(leg) if leg else '')))
         self.cov_info = {}
         self._cov_warnings = []
         self._cov_info_notes = []
@@ -1291,6 +1309,12 @@ class JointFit(QObject):
                     self.warnings.append(_Downgrade(
                         "model-based covariance needs a prior fit to freeze C at; "
                         "none exists, so MCMC uses the data-based covariance"))
+                elif getattr(self.result, '_cov_stamp', None) != self._cov_data_stamp():
+                    self.warnings.append(_Downgrade(
+                        "model-based covariance needs a prior covariance fit of these data "
+                        "and fit ranges to freeze C at; the last result belongs to other "
+                        "data (or ranges, or was fitted without the covariance), so MCMC "
+                        "uses the data-based covariance"))
                 else:
                     self.push_params(self.result.params)
                     self._build_chol(fit_scale, model=True)   # frozen for the run
@@ -1356,12 +1380,17 @@ class JointFit(QObject):
                 self._build_chol(fit_scale, model=True)
 
             self.result, rounds, converged = cc.outer_iterate(fit_once, rebuild)
-            if not converged:
+            aborted = bool(self.fit_abort)
+            if aborted:
+                self._add_run_warning(
+                    "fit stopped by the user during the model-based covariance iteration "
+                    "(round %d); the last result is kept, not converged" % rounds)
+            elif not converged:
                 self.warnings.append(_Downgrade(
                     "model-based covariance did not converge in %d rounds (some varying "
                     "parameter still moved >= 0.1 stderr); the last result is kept"
                     % rounds))
-            self._finish_cov(mode, fit_scale, rounds, converged)
+            self._finish_cov(mode, fit_scale, rounds, converged, aborted=aborted)
             return self._report(), self.result.message
 
         self.result = self.fitter.minimize(method=fit_method,
@@ -1371,20 +1400,34 @@ class JointFit(QObject):
             self._finish_cov(mode, fit_scale, 0, True)
         return self._report(), self.result.message
 
-    def _finish_cov(self, mode, fit_scale, rounds, converged, mcmc_frozen=None):
+    def _finish_cov(self, mode, fit_scale, rounds, converged, mcmc_frozen=None, aborted=False):
         """Record ``cov_info`` and turn this fit's assembly/factorisation warnings
         into run warnings (downgrades) and its point-exclusion notes into plain
-        run warnings."""
+        run warnings. Stamps the result with the identity of the data it fitted
+        (model-mode MCMC freezes C only at such a result, as Fit does)."""
         self.cov_info = {'mode': mode, 'scale': fit_scale, 'rounds': int(rounds),
-                         'converged': bool(converged),
+                         'converged': bool(converged) and not aborted,
                          'factor_warnings': list(self._cov_factor_warnings),
                          'jitter': float(self._jitter)}
+        if aborted:
+            self.cov_info['aborted'] = True
         if mcmc_frozen:
             self.cov_info['mcmc_frozen'] = mcmc_frozen
+        self.result._cov_stamp = self._cov_data_stamp()
         for w in self._cov_warnings:
             self.warnings.append(_Downgrade(w))
         for w in self._cov_info_notes:
             self.warnings.append(_RunWarning(w))
+
+    def _cov_data_stamp(self):
+        """Identity of the active rows of every objective (x and y after the current
+        ranges and masks), for the model-mode MCMC freeze."""
+        parts = []
+        for k, obj in enumerate(self.objectives):
+            idx = self.active_index(k)
+            parts += [obj["name"], np.asarray(obj["x"], float)[idx].tobytes(),
+                      np.asarray(obj["y"], float)[idx].tobytes()]
+        return hash(tuple(parts))
 
     def _report(self):
         """lmfit's fit_report plus each objective's derived quantities.

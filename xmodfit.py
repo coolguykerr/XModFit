@@ -2204,6 +2204,9 @@ class XModFit(QWidget):
         cov = getattr(self, 'covariances', {}).get(data_key)
         if cov is None or type(x) == dict:
             fit.set_x(x, **kw)
+            if consume_notes and data_key in getattr(self, '_cov_pending_notes', {}):
+                # e.g. a covariance named in a reloaded .xpar that could not be reattached
+                fit.pending_warnings = list(self._cov_pending_notes.pop(data_key))
             return
         import covariance_core as cc
         fit.covariance_mode = self.covariance_modes.get(data_key, 'model')
@@ -4415,6 +4418,7 @@ class XModFit(QWidget):
         try:
             cov = cc.load_covariance(path, raw_path=raw_path)
         except (cc.CovarianceError, OSError) as e:     # e.g. a legacy loader's missing raw file
+            self._cov_refusal = str(e)
             QMessageBox.warning(self, 'Covariance', 'Covariance not attached to %s:\n%s' % (name, e),
                                 QMessageBox.Ok)
             return False
@@ -4423,10 +4427,18 @@ class XModFit(QWidget):
         if cov.n != len(d['x']) and not probs:
             probs = ['covariance has %d points but the dataset has %d' % (cov.n, len(d['x']))]
         if probs:
+            self._cov_refusal = 'it does not match the data: %s' % '; '.join(probs)
             QMessageBox.warning(self, 'Covariance',
                                 'Covariance %s does not match dataset %s; not attached:\n%s'
                                 % (os.path.basename(path), name, '\n'.join(probs)), QMessageBox.Ok)
             return False
+        from Fit_Routines import _CovDowngrade
+        _left = [w for w in self._cov_pending_notes.get(data_key, [])
+                 if not isinstance(w, _CovDowngrade)]           # a reload failure is stale now
+        if _left:
+            self._cov_pending_notes[data_key] = _left
+        else:
+            self._cov_pending_notes.pop(data_key, None)
         self.covariances[data_key] = cov
         self.covariance_paths[data_key] = (path, raw_path)
         self.covariance_modes.setdefault(data_key, 'model')
@@ -4441,12 +4453,39 @@ class XModFit(QWidget):
         self._refresh_data_labels()
         self._cov_sync_mode_combo()
         self._cov_sync_joint_panel()
+        self._cov_plot_data(data_key)
         return True
+
+    def _cov_plot_data(self, data_key):
+        """Draw dataset ``data_key``'s Data curve as the data a single fit uses: a legacy
+        covariance (replaces_y) is fitted on its y_corr with sigma_meas, so that is what
+        is shown while it is attached; otherwise the dataset's own y (final review I1).
+        Only touches a curve that a legacy covariance changed."""
+        d = getattr(self, 'data', {}).get(data_key)
+        if not d or len(d.keys()) != 1:
+            return
+        key = list(d.keys())[0]
+        cov = getattr(self, 'covariances', {}).get(data_key)
+        ry = getattr(cov, 'replaces_y', None)
+        shown = getattr(self, '_cov_plotted_legacy', set())
+        if ry is not None and len(ry) == len(d[key]['x']):
+            y, yerr = np.asarray(ry, float), np.asarray(cov.sigma_meas, float)
+            shown.add(data_key)
+        elif data_key in shown:
+            y, yerr = d[key]['y'], d[key]['yerr']
+            shown.discard(data_key)
+        else:
+            return
+        self._cov_plotted_legacy = shown
+        color = d[key].get('color') or self._curve_color_for(data_key, key)
+        self.plotWidget.add_data(d[key]['x'], y, yerr=yerr,
+                                 name='%s:%s' % (data_key.split('<>')[0], key), color=color)
 
     def remove_covariance_from(self, data_key):
         """Detach dataset ``data_key``'s covariance (its next fit runs without one)."""
         had = data_key in self.covariances
         self._cov_forget(data_key)
+        self._cov_plot_data(data_key)
         if had:
             self._cov_status('Covariance removed from %s.'
                              % os.path.basename(data_key.split('<>', 1)[-1]))
@@ -5239,11 +5278,18 @@ class XModFit(QWidget):
             self._cov_status(msg)
             QMessageBox.warning(self, 'Covariance', msg, QMessageBox.Ok)
             return
+        from Fit_Routines import _CovDowngrade
+
+        def _note(why):      # the next fit's report says so too (spec 17 3, 6.6; review I2)
+            self._cov_pending_notes[key] = [_CovDowngrade(
+                'covariance %s named in the parameter file could not be reattached (%s); '
+                'fitted without it' % (path, why))]
         if not os.path.isfile(path):
             msg = ('Covariance file not found: %s\n%s continues without a covariance.'
                    % (path, os.path.basename(key.split('<>', 1)[-1])))
             self._cov_status(msg)
             QMessageBox.warning(self, 'Covariance', msg, QMessageBox.Ok)
+            _note('file not found')
             return
         raw = info.get('raw') or None
         if raw is not None and not os.path.isfile(raw):
@@ -5252,8 +5298,11 @@ class XModFit(QWidget):
                                     os.path.basename(key.split('<>', 1)[-1])))
             self._cov_status(msg)
             QMessageBox.warning(self, 'Covariance', msg, QMessageBox.Ok)
+            _note('raw data file %s not found' % raw)
             return
+        self._cov_refusal = None
         if not self.attach_covariance_to(key, path, raw_path=raw):
+            _note(getattr(self, '_cov_refusal', None) or 'refused')
             return
         mode = info.get('mode')
         if mode in ('model', 'data'):
@@ -6537,6 +6586,7 @@ class XModFit(QWidget):
                 self._cov_set_x(self.fit, self.sfnames[-1], x, y=y, yerr=yerr,
                                 mask=self._column_mask(self.sfnames[-1],
                                                        slice_=(_pi0, _pi1)), slice_=(_pi0, _pi1))
+                self._cov_plot_data(self.sfnames[-1])     # legacy covariance: shows y_corr
                 try:
                     residual = self.fit.residual(self.fit.fit_params, self.fitScaleComboBox.currentText())
 
@@ -6561,6 +6611,7 @@ class XModFit(QWidget):
             self.fit.params['output_params']['scaler_parameters']['Exec-time (sec)'] = exectime
             self.fit.params['output_params']['scaler_parameters']['Chi-Sqr'] = self.chisqr
             self.fit.params['output_params']['scaler_parameters']['Red_Chi_Sqr'] = self.red_chisqr
+            self._cov_label_objective()
             if type(self.fit.x)==dict:
                 for key in self.fit.x.keys():
                     self.plotWidget.add_data(x=self.fit.x[key][self.fit.imin[key]:self.fit.imax[key] + 1], y=self.fit.yfit[key],
@@ -6673,7 +6724,7 @@ class XModFit(QWidget):
 
     def _cov_whitened_residuals(self, residual):
         """With a covariance active, the plotted residual is the whitened one the fit
-        minimised, against x of its rows (spec 17 6.2)."""
+        minimised, against x of its rows, labelled as such (spec 17 6.2)."""
         try:
             idx = self.fit.cov_residual_index(self.fitScaleComboBox.currentText())
         except Exception:
@@ -6681,7 +6732,22 @@ class XModFit(QWidget):
         if idx is None or residual is None or len(idx) != len(residual):
             return
         self.fit.params['output_params']['Residuals'] = {'x': np.asarray(self.fit.x)[idx],
-                                                         'y': np.asarray(residual)}
+                                                         'y': np.asarray(residual),
+                                                         'names': ['x', 'Residuals (whitened)']}
+
+    def _cov_label_objective(self):
+        """With a covariance active, a 'Chi-Sqr objective' entry says Chi-Sqr and
+        Red_Chi_Sqr are of the whitened residual (spec 17 6.2); removed otherwise, so a
+        fit without a covariance shows exactly the stock entries."""
+        sp = self.fit.params['output_params']['scaler_parameters']
+        try:
+            on = self.fit.cov_residual_index(self.fitScaleComboBox.currentText()) is not None
+        except Exception:
+            on = False
+        if on:
+            sp['Chi-Sqr objective'] = 'whitened (covariance)'
+        else:
+            sp.pop('Chi-Sqr objective', None)
 
     def _eval_individual_curve(self, name):
         """(x, y, color) for dataset ``name``'s stored INDIVIDUAL fit curve, or None.
@@ -7486,6 +7552,21 @@ class XModFit(QWidget):
         self._update_ci_button_state()
         FitResultDialog(self.fit_report, self.fit_message, parent=self).show()
 
+    def _joint_emcee_mode(self):
+        """(covariance mode, note) for joint MCMC: the mode the fitted JointFit used, so
+        C is frozen at the result it belongs to; a note when the panel's combo now names
+        another mode (final review M4/T8). No covariance fit -> the panel's mode, no note."""
+        panel = getattr(getattr(self, 'jointFitPanel', None), 'spec', None)
+        pmode = getattr(panel, 'covariance_mode', None)
+        fitted = (getattr(self.fit, 'cov_info', None) or {}).get('mode')
+        if fitted is None:
+            return pmode, None
+        note = None
+        if pmode is not None and pmode != fitted:
+            note = ('joint MCMC uses covariance mode %r, the mode of the fit it samples from; '
+                    'the panel now says %r (refit to change it)' % (fitted, pmode))
+        return fitted, note
+
     def run_joint_emcee(self, emcee_walkers=100, emcee_steps=100, emcee_cores=1,
                         reuse_sampler=False, emcee_burn=0, emcee_thin=1, backend=None):
         """Run MCMC confidence intervals on the joint objective. Reuses the already
@@ -7518,6 +7599,9 @@ class XModFit(QWidget):
                       for e in self.jointFitPanel.spec.datasets}
         except Exception:
             ranges = None
+        _cmode, _cnote = self._joint_emcee_mode()
+        if _cnote:
+            self.fit.pending_warnings = [_cnote]
         self.MCMC_starting_step = 0
         self.autoCorrTime = _np.array([[0, 1]])
         self.start_time = time.time()
@@ -7536,8 +7620,7 @@ class XModFit(QWidget):
                 emcee_burn=emcee_burn, emcee_thin=emcee_thin, backend=backend, ranges=ranges,
                 seed_temperature=getattr(self, 'seed_temperature', 1.0),
                 seed_mode=getattr(self, 'seed_mode', 'joint'),
-                covariance_mode=getattr(getattr(self.jointFitPanel, 'spec', None),
-                                        'covariance_mode', None))
+                covariance_mode=_cmode)
         finally:
             self.disconnect_fit_function()
         self.errorAvailable = True

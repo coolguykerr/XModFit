@@ -484,9 +484,26 @@ per dataset and enabled only with a covariance. With a covariance the fit uses a
 `#Covariance Raw=<path>` (legacy text only) and `#Covariance Mode=<model|data>`, written only
 with a covariance so other files stay byte-identical. An `.xpar` with `#Covariance=` and no mode
 line reloads in `data` mode and the next fit's report says "saved before covariance modes
-existed; reloaded in data mode"; a missing covariance or raw file warns and the dataset
-continues without one. The joint panel inherits these attachments (doc 01 §3.4). Verified:
-`validate_covariance_gui.py` G1-G5 (single fit) and J2 (joint pre-fill), headless.
+existed; reloaded in data mode"; a missing covariance or raw file, or one that no longer
+matches the data, warns and the dataset continues without one, and the next fit's report
+starts `DEGRADED FIT:` naming the file and the reason (a popup alone left no record; final
+review I2). The joint panel inherits these attachments (doc 01 §3.4); a joint fit whose one
+mode differs from a dataset's single-fit mode says so in its warnings (final review M3).
+Verified: `validate_covariance_gui.py` G1-G6 (single fit), J2 (joint pre-fill),
+`validate_covariance.py` F8 (mode warning), headless.
+
+**What the display shows with a covariance (final review, 2026-11-10).** Chi-Sqr, Red_Chi_Sqr
+and the plotted Residuals are of the whitened residual L⁻¹r: the report's Covariance block
+says so (`objective: whitened ...`), the generated-parameter list gets a `Chi-Sqr objective :
+whitened (covariance)` entry, and the residual panel's y axis reads `Residuals (whitened)`;
+without a covariance none of these appear (the Chi-Sqr/Red_Chi_Sqr keys are not renamed).
+Outside `perform_fit`, `Fit` reuses the factor the fit's final round used when the active rows
+match (scale, mode, x, data, σ and terms), so the displayed Chi-Sqr equals `result.chisqr` in
+model mode too (Ruling R2 as changed). A **legacy** covariance (`replaces_y`: `*.npz`,
+`*_c_factors.txt`) is fitted on its y_corr with σ_meas, also when it is downgraded (an
+unweighted scale, an x mismatch of the same length) — the same data `JointFit` fits — and
+the Data plot shows y_corr while it is attached. Verified: `validate_covariance_gui.py` G3
+(data and model mode, labels), G6 (plot); `validate_covariance.py` F1, F6, F7.
 
 **Multi-dataset individual fitting.** Ctrl+click several datasets in the Data list, then press
 **Fit**: each is fitted in turn from its own stored parameters (progress dialog with Abort), and
