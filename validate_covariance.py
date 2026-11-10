@@ -8,6 +8,9 @@ validate_covariance.py -- general covariance fitting: data model and loaders (Qt
     C5  a mask is a submatrix of the full C (linear and log)
     C6  factorize: plain, jitter and eigenvalue-floor paths and their warnings
     C7  Log formulas for multiplicative and additive terms
+    C8  legacy loaders (npz, c_factors + raw, bundle) and from_legacy_meta
+    J1  mixed joint fit (one dataset with a covariance, one without), Linear and Log
+    J2  JointFit downgrades: Log y <= 0 point, w/o error scale, v1 mismatch, Sigma_logc conflict
 
     python validate_covariance.py
 """
@@ -434,8 +437,213 @@ def section_c8(cc):
         except cc.CovarianceError as e:
             check('C8 y_corr == 0 with v != 0 names beam_fwhm and index 3',
                   'beam_fwhm' in str(e) and '3' in str(e), str(e))
+        zv = dict(bad, v=V_FP.copy())
+        zv['v'][3] = 0.0                       # y_corr 0 where v is 0 too: allowed
+        try:
+            dz = cc.from_legacy_meta(zv, X, 'p', 'legacy-npz')
+            wz = dz.terms[1].weights
+            check('C8 beam_fwhm W is 0 (not NaN) where v == 0 and y_corr == 0',
+                  np.all(np.isfinite(wz)) and wz[3, 0] == 0.0, str(wz[3]))
+        except Exception as e:
+            check('C8 beam_fwhm W is 0 (not NaN) where v == 0 and y_corr == 0', False, repr(e))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --------------------------------------------------------------- JointFit ----
+def _j_line(a=2.5, b=0.3):
+    from validate_joint_gls import Line, X
+    f = Line(x=X, a=a, b=b)
+    for nm in ('a', 'b'):
+        f.params[nm].vary = True
+    return f
+
+
+def _j_data():
+    """Two noisy lines on validate_joint_gls's X, and a v1-style covariance for the first
+    (private stitch term, two regions with averaged overlap rows, plus a private additive
+    background term so Log model mode iterates as well)."""
+    from validate_joint_gls import X, E
+    import covariance_core as cc
+    rng = np.random.default_rng(5)
+    n = len(X)
+    ya = 3.0 * X + 0.5 + E * rng.standard_normal(n)
+    yb = 2.0 * X + 1.0 + E * rng.standard_normal(n)
+    w = np.zeros((n, 2))
+    w[X <= 1.0, 0] = 1.0
+    w[X > 1.0, 1] = 1.0
+    w[19:21] = [0.5, 0.5]
+    stitch = cc.CovTerm('stitch', 'multiplicative', np.array([[4e-4, 1e-4], [1e-4, 9e-4]]),
+                        w, ['r0', 'r1'], 'dataset')
+    bkg = cc.CovTerm('bkg', 'additive', np.array([[1e-3]]), np.ones((n, 1)), None, 'dataset')
+    cov = cc.DatasetCovariance(X.copy(), E * np.ones(n), [stitch, bkg], ya.copy(),
+                               source='A.cov.json', loader='xmodfit-covariance-v1')
+    return X, E, ya, yb, cov
+
+
+def _j_fit(rows, sc, mode='model', **kw):
+    from Joint_Fit_Routines import JointFit
+    from validate_joint_gls import X, E
+    jf = JointFit()
+    for nm, y, cov in rows:
+        jf.add_dataset(nm, func=_j_line(), x=X, y=y, yerr=E * np.ones_like(X), cov=cov)
+    jf.build_master_params()
+    rep, msg = jf.perform_fit(X[0], X[-1], fit_scale=sc, fit_method='leastsq', maxiter=2000,
+                              covariance_mode=mode, **kw)
+    return jf, rep
+
+
+def section_j1(cc):
+    from Fit_Routines import Fit
+    from validate_joint_gls import Line, rel
+    X, E, ya, yb, cov = _j_data()
+    for sc in ('Linear', 'Log'):
+        try:
+            jf, rep = _j_fit([('A', ya, cov), ('B', yb, None)], sc)
+        except Exception as e:
+            check('J1 mixed joint (%s) runs' % sc, False, repr(e))
+            continue
+        check('J1 mixed joint (%s) runs' % sc, True)
+        ja, _ = _j_fit([('A', ya, cov)], sc)
+        fb = Fit(lambda: Line(a=2.5, b=0.3), X, y=yb, yerr=E * np.ones_like(X))
+        for nm in ('a', 'b'):
+            fb.fit_params[nm].vary = True
+        fb.perform_fit(X[0], X[-1], fit_scale=sc, fit_method='leastsq', maxiter=2000)
+        want = ja.result.chisqr + fb.result.chisqr
+        d = rel(jf.result.chisqr, want)
+        check('J1 (%s) joint chi2 == A one-dataset cov chi2 + B stock chi2 to 1e-8' % sc,
+              d < 1e-8, 'joint=%.10e sum=%.10e rel=%.2e' % (jf.result.chisqr, want, d))
+        db = max(rel(jf.result.params['d1_' + nm].value, fb.result.params[nm].value)
+                 for nm in ('a', 'b'))
+        check('J1 (%s) B params == stock Fit to 1e-6' % sc, db < 1e-6, 'max rel=%.2e' % db)
+        da = max(rel(jf.result.params['d0_' + nm].value, ja.result.params['d0_' + nm].value)
+                 for nm in ('a', 'b'))
+        check('J1 (%s) A params == one-dataset cov fit to 1e-6' % sc, da < 1e-6,
+              'max rel=%.2e' % da)
+        info = jf.cov_info
+        check('J1 (%s) cov_info: model mode, scale, iterated, converged' % sc,
+              info.get('mode') == 'model' and info.get('scale') == sc
+              and info.get('rounds', 0) >= 1 and info.get('converged') is True, str(info))
+        check('J1 (%s) absolute errors: scale_covar off' % sc,
+              jf.fitter.scale_covar is False)
+        check('J1 (%s) report: Covariance block lists A source, both terms, and B as none'
+              % sc, 'Covariance:' in rep and 'A.cov.json' in rep and 'stitch' in rep
+              and 'bkg' in rep and 'chi2_red =' in rep and 'not rescaled' in rep, rep[-600:])
+        check('J1 (%s) report: not degraded' % sc, not rep.startswith('DEGRADED'))
+
+    # the pre-T4 crash path: a legacy dict on A, nothing on B (data mode)
+    from validate_joint_gls import K2, SIG2
+    leg = dict(y_corr=ya, sigma_meas=E * np.ones_like(X), k_index=K2, Sigma_logc=SIG2)
+    try:
+        jf, _ = _j_fit([('A', ya, dict(leg)), ('B', yb, None)], 'Linear', mode='data')
+        ja, _ = _j_fit([('A', ya, dict(leg))], 'Linear', mode='data')
+        fb = Fit(lambda: Line(a=2.5, b=0.3), X, y=yb, yerr=E * np.ones_like(X))
+        for nm in ('a', 'b'):
+            fb.fit_params[nm].vary = True
+        fb.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq', maxiter=2000)
+        want = ja.result.chisqr + fb.result.chisqr
+        d = rel(jf.result.chisqr, want)
+        check('J1 legacy dict + no-cov: chi2 == sum of the separate fits to 1e-8', d < 1e-8,
+              'rel=%.2e' % d)
+    except Exception as e:
+        check('J1 legacy dict + no-cov: chi2 == sum of the separate fits to 1e-8', False,
+              repr(e))
+
+
+def section_j2(cc):
+    from validate_joint_gls import rel
+    X, E, ya, yb, cov = _j_data()
+    yneg = ya.copy()
+    yneg[7] = -0.05                      # y <= 0 inside the window
+    cneg = cc.DatasetCovariance(cov.x, cov.sigma_meas, cov.terms, yneg.copy(),
+                                source='A.cov.json', loader='xmodfit-covariance-v1')
+    try:
+        jf, rep = _j_fit([('A', yneg, cneg), ('B', yb, None)], 'Log')
+        ok = True
+    except Exception as e:
+        ok = False
+        check('J2 Log with a y <= 0 point and a covariance: fit completes', False, repr(e))
+    if ok:
+        check('J2 Log with a y <= 0 point and a covariance: fit completes', True)
+        m = jf._cov_mask
+        check('J2 the y <= 0 point is not an active covariance row',
+              m is not None and len(m) == 2 * len(X) and not m[7] and m.sum() == 2 * len(X) - 1,
+              'len=%s n_false=%s' % (None if m is None else len(m),
+                                      None if m is None else int((~m).sum())))
+        check('J2 report lists the scale as Log', 'scale: Log' in rep, rep[-600:])
+
+    # 'w/o error' scale: covariance ignored, same fit as no covariance, report says so first
+    jf, rep = _j_fit([('A', ya, cov), ('B', yb, None)], 'Linear w/o error')
+    j0, _ = _j_fit([('A', ya, None), ('B', yb, None)], 'Linear w/o error')
+    d = rel(jf.result.chisqr, j0.result.chisqr)
+    check('J2 Linear w/o error with a covariance == no-covariance fit', d < 1e-12,
+          'rel=%.2e' % d)
+    check('J2 Linear w/o error: report first line DEGRADED FIT, names the ignored covariance',
+          rep.startswith('DEGRADED FIT:') and 'ignored' in rep.splitlines()[0],
+          rep.splitlines()[0])
+
+    # v1 covariance whose y does not match at add_dataset: dataset fits without it
+    bad = cc.DatasetCovariance(cov.x, cov.sigma_meas, cov.terms, ya * 1.01,
+                               source='A.cov.json', loader='xmodfit-covariance-v1')
+    jf, rep = _j_fit([('A', ya, bad), ('B', yb, None)], 'Linear')
+    j0, _ = _j_fit([('A', ya, None), ('B', yb, None)], 'Linear')
+    check('J2 mismatched v1 covariance: dataset added without it',
+          jf.objectives[0]['cov'] is None and not jf._use_cov)
+    check('J2 mismatched v1 covariance: fit == no-covariance fit',
+          rel(jf.result.chisqr, j0.result.chisqr) < 1e-12)
+    check('J2 mismatched v1 covariance: DEGRADED FIT first line naming the mismatch',
+          rep.startswith('DEGRADED FIT:') and 'y mismatch' in rep.splitlines()[0],
+          rep.splitlines()[0])
+    jf.build_master_params()             # resets build-time warnings only
+    rep2, _ = jf.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq',
+                             maxiter=2000)
+    check('J2 mismatch note survives build_master_params and a re-fit',
+          rep2.startswith('DEGRADED FIT:') and 'y mismatch' in rep2.splitlines()[0])
+
+    # legacy dicts with different Sigma_logc: private terms + a warning (was a ValueError)
+    from validate_joint_gls import K2, SIG2
+    leg = [dict(y_corr=y, sigma_meas=E * np.ones_like(X), k_index=K2, Sigma_logc=S)
+           for y, S in ((ya, SIG2), (yb, 2 * SIG2))]
+    try:
+        jf, rep = _j_fit([('A', ya, leg[0]), ('B', yb, leg[1])], 'Linear', mode='data')
+        n = len(X)
+        check('J2 different Sigma_logc: fit runs, C block-diagonal',
+              np.max(np.abs((jf._L @ jf._L.T)[:n, n:])) == 0.0)
+        check('J2 different Sigma_logc: DEGRADED FIT naming attenuator_cal and both datasets',
+              rep.startswith('DEGRADED FIT:') and 'attenuator_cal' in rep.splitlines()[0]
+              and 'A' in rep.splitlines()[0] and 'B' in rep.splitlines()[0],
+              rep.splitlines()[0])
+    except Exception as e:
+        check('J2 different Sigma_logc: fit runs, C block-diagonal', False, repr(e))
+
+    # chi2_red band: central 99 % of chi2(nfree)/nfree
+    from scipy.stats import chi2 as _chi2
+
+    class _R:
+        def __init__(self, redchi, nfree):
+            self.redchi, self.nfree = redchi, nfree
+    info = {'mode': 'data', 'scale': 'Linear', 'rounds': 0, 'converged': True}
+    hi = _chi2.ppf(0.995, 50) / 50
+    lo = _chi2.ppf(0.005, 50) / 50
+    txt = [cc.report_block([('A', cov)], info, [], _R(v, 50))
+           for v in (1.0, hi * 1.001, hi * 0.999, lo * 0.999)]
+    check('J2 report_block: chi2_red line always, band warning only outside the 99% band',
+          all('chi2_red = ' in t for t in txt)
+          and 'WARNING' not in txt[0] and 'misfit exceeds' in txt[1]
+          and 'WARNING' not in txt[2] and 'below the central 99%' in txt[3],
+          '%.4f %.4f' % (lo, hi))
+
+    # emcee with a covariance: C frozen at the best-fit model, serial, reported as such
+    try:
+        jf, _ = _j_fit([('A', ya, cov), ('B', yb, None)], 'Linear')
+        rep, _ = jf.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='emcee',
+                                emcee_walkers=16, emcee_steps=20, emcee_cores=1)
+        check('J2 emcee with a covariance: C frozen at the best-fit model and reported',
+              jf.cov_info.get('mcmc_frozen') == 'model' and 'C frozen for the run' in rep
+              and not rep.startswith('DEGRADED'), str(jf.cov_info))
+    except Exception as e:
+        check('J2 emcee with a covariance: C frozen at the best-fit model and reported',
+              False, repr(e))
 
 
 def main():
@@ -448,6 +656,14 @@ def main():
     section_c2(cc)
     for sec in (section_c3, section_c4, section_c5, section_c6, section_c7, section_c8):
         sec(cc)
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from PyQt5.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication(sys.argv)
+    for sec in (section_j1, section_j2):
+        try:
+            sec(cc)
+        except Exception as e:
+            check('%s runs' % sec.__name__, False, repr(e))
     return finish()
 
 

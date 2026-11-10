@@ -48,6 +48,7 @@ except Exception:                                        # pragma: no cover
     _solve_tri = None
 
 import joint_covariance as jcov
+import covariance_core as cc
 
 # --------------------------------------------------------------------------- #
 #  Optional-PyQt shim (so the engine runs head-less for validation)
@@ -92,6 +93,12 @@ class _RunWarning(str):
     """A ``JointFit.warnings`` entry added by ``perform_fit`` (run-time), as
     opposed to one added by ``build_master_params`` (build-time). The subclass is
     the bookkeeping: the next ``perform_fit`` drops exactly these entries."""
+
+
+class _Downgrade(_RunWarning):
+    """A run-time warning recording a covariance downgrade (spec 6.5): the fit
+    continued in a weaker mode. Any of these puts ``DEGRADED FIT:`` on the
+    report's first line."""
 
 
 def _fmt_num(v):
@@ -144,14 +151,18 @@ class JointFit(QObject):
         self.Niter = 0
         self.fit_abort = False
         self._current = 0             # index of the "current" objective (viewer)
-        # covariance state
-        self._use_cov = False
+        # covariance state: each objective's "cov" is a DatasetCovariance or None
+        # (_use_cov / _use_footprint are read-only properties derived from them)
         self._L = None
         self._cov_mask = None
-        self._Sigma_logc = None       # shared K x K
-        self._var_fwhm = 0.0          # shared beam FWHM variance (footprint term)
-        self._use_footprint = False
+        self._jitter = 0.0
+        self._cov_scale = None        # fit scale _L was assembled for
+        self._cov_warnings = []       # assemble/factorize warnings of this fit
+        self._cov_factor_warnings = []  # factorize warnings of the last build
+        self._cov_info_notes = []     # non-downgrade notes (points dropped)
         self._cov_ready = False
+        self.covariance_mode = 'model'   # 'model' | 'data' (spec 4.4)
+        self.cov_info = {}
         # optional per-parameter Gaussian priors (soft constraints):
         #   {master_key: (mu, sigma)} -> append (value - mu)/sigma to the residual.
         self._priors = {}
@@ -170,11 +181,15 @@ class JointFit(QObject):
         name : str          dataset key (unique).
         funcClass : type    model class (e.g. XLayers); ignored if ``func`` given.
         func : instance      a pre-built model instance (alternative to funcClass).
-        x, y, yerr : arrays  the data.  If ``cov`` is supplied, its ``y_corr`` /
-                             ``sigma_meas`` OVERRIDE y / yerr for the fit.
-        cov : dict or None   per-dataset covariance metadata as returned by
-                             ``joint_covariance.build_dataset_cov_meta`` (keys
-                             y_corr, sigma_meas, k_index, SF_LIST, Sigma_logc).
+        x, y, yerr : arrays  the data.  A legacy covariance (``replaces_y``)
+                             OVERRIDES y / yerr with its ``y_corr`` / ``sigma_meas``.
+        cov : covariance_core.DatasetCovariance, a legacy dict, or None.
+                             A legacy dict (keys y_corr, sigma_meas, k_index,
+                             SF_LIST, Sigma_logc[, v, var_fwhm], as returned by
+                             ``joint_covariance.load_dataset_cov``) is converted
+                             with ``covariance_core.from_legacy_meta``. A
+                             covariance whose x (or v1 y) does not match the data
+                             is dropped with a warning (spec 6.5, fit-time row).
                              Attaching a cov on ANY dataset turns on the joint
                              covariance-whitening residual for the whole fit.
         """
@@ -187,20 +202,23 @@ class JointFit(QObject):
         if not getattr(func, "params", None):
             func.init_params()
 
+        cov_notes = []
+        if cov is not None and not isinstance(cov, cc.DatasetCovariance):
+            cov = cc.from_legacy_meta(cov, x, source='<dict>', loader='legacy-dict')
         if cov is not None:
-            y_use = np.asarray(cov["y_corr"], dtype=float)
-            yerr_use = np.asarray(cov["sigma_meas"], dtype=float)
-            self._register_shared_sigma(cov["Sigma_logc"])
-            self._use_cov = True
-            # optional shared-beam footprint term (v + var_fwhm); see
-            # joint_covariance.build_full_covariance. var_fwhm is a single shared
-            # scalar (one beam), so it couples across datasets like Sigma_logc.
-            if cov.get("v", None) is not None and cov.get("var_fwhm", 0.0):
-                self._register_shared_var_fwhm(float(cov["var_fwhm"]))
-                self._use_footprint = True
-        else:
-            y_use = np.zeros_like(x) if y is None else np.asarray(y, dtype=float)
-            yerr_use = np.ones_like(x) if yerr is None else np.asarray(yerr, dtype=float)
+            probs = cov.match_problems(x, y)
+            if probs:
+                cov_notes.append(_Downgrade(
+                    "%s: covariance %s does not match the data (%s); fitted without it"
+                    % (name, cov.source or '<in memory>', '; '.join(probs))))
+                cov = None
+        y_use = np.zeros_like(x) if y is None else np.asarray(y, dtype=float)
+        yerr_use = np.ones_like(x) if yerr is None else np.asarray(yerr, dtype=float)
+        if cov is not None and cov.replaces_y is not None:
+            # legacy: the corrected data with the measurement-only error is the
+            # dataset (also its no-covariance fallback, spec 6.5)
+            y_use = np.asarray(cov.y_for_fit(y_use), dtype=float)
+            yerr_use = np.asarray(cov.sigma_meas, dtype=float)
 
         if mask is not None:
             mask = np.asarray(mask, dtype=bool)
@@ -223,7 +241,8 @@ class JointFit(QObject):
             "imask": None,      # window-restricted mask, frozen by _set_ranges
             "yfit_masked": False,  # did evaluate() already apply imask to yfit?
             "mask": mask,       # full-length eligibility mask, or None
-            "cov": cov,
+            "cov": cov,         # covariance_core.DatasetCovariance or None
+            "cov_notes": cov_notes,   # downgrades decided here (re-added per fit)
         }
         self.objectives.append(obj)
         return obj
@@ -254,13 +273,12 @@ class JointFit(QObject):
         self.param_map = {}
         self.shared = []
         self._current = 0
-        self._use_cov = False
         self._L = None
         self._cov_mask = None
-        self._Sigma_logc = None
-        self._var_fwhm = 0.0
-        self._use_footprint = False
+        self._jitter = 0.0
+        self._cov_scale = None
         self._cov_ready = False
+        self.cov_info = {}
         self._priors = {}
         self.warnings = []
 
@@ -327,25 +345,18 @@ class JointFit(QObject):
             p = self.objectives[idx]["func"].params[lk]
             p.set(min=p0.min, max=p0.max, vary=p0.vary)
 
-    def _register_shared_sigma(self, Sigma_logc):
-        Sigma_logc = np.asarray(Sigma_logc, dtype=float)
-        if self._Sigma_logc is None:
-            self._Sigma_logc = Sigma_logc
-        else:
-            if not np.allclose(self._Sigma_logc, Sigma_logc):
-                raise ValueError(
-                    "attached covariances use different Sigma_logc matrices; "
-                    "cross-dataset correlation requires a single shared "
-                    "correction-factor covariance (same attenuator calibration)."
-                )
+    @property
+    def _use_cov(self):
+        """True when any objective has a covariance attached (read-only; callers
+        outside this file read it: lmfit/minimizer.py, xmodfit.py)."""
+        return any(o.get("cov") is not None for o in self.objectives)
 
-    def _register_shared_var_fwhm(self, var_fwhm):
-        if not self._var_fwhm:
-            self._var_fwhm = float(var_fwhm)
-        elif not np.isclose(self._var_fwhm, float(var_fwhm)):
-            raise ValueError(
-                "attached covariances use different var_fwhm; the shared-beam "
-                "footprint term assumes ONE beam FWHM across all datasets.")
+    @property
+    def _use_footprint(self):
+        """True when any attached covariance carries a ``beam_fwhm`` term."""
+        return any(o.get("cov") is not None
+                   and any(t.name == 'beam_fwhm' for t in o["cov"].terms)
+                   for o in self.objectives)
 
     # ----------------------------------------------------------------- #
     #  parameter namespacing / master params
@@ -601,45 +612,100 @@ class JointFit(QObject):
     # ----------------------------------------------------------------- #
     #  covariance / Cholesky over the concatenation
     # ----------------------------------------------------------------- #
-    def _build_chol(self):
-        """Assemble C_full over the concatenated [imin,imax] slices of all
-        objectives (in residual order) and cache its Cholesky factor."""
-        yc, sm, ki, vv = [], [], [], []
-        for obj in self.objectives:
-            i0, i1 = obj["imin"], obj["imax"] + 1
-            cov = obj["cov"]
-            # MASK COMPOSITION ORDER, and it matters: (1) slice [imin,imax],
-            # (2) apply this objective's imask, (3) concatenate, (4) apply
-            # _cov_mask. _cov_mask is DEFINED against the output of (3), so imask
-            # must be folded in here AND in residual()'s r assembly, or the
-            # whitening rows silently misalign with the data rows -- no exception,
-            # no warning, just a plausible wrong answer.
-            im = obj.get("imask")
-            sel = (lambda a: a[i0:i1] if im is None else a[i0:i1][im])
-            yc.append(sel(cov["y_corr"]))
-            sm.append(sel(cov["sigma_meas"]))
-            ki.append(sel(np.asarray(cov["k_index"])))
-            if self._use_footprint:
-                # missing v on one dataset -> zero sensitivity (no beam coupling
-                # for that dataset), consistent with build_full_covariance's rank-1
-                vseg = cov.get("v", None)
-                nseg = (i1 - i0) if im is None else int(np.count_nonzero(im))
-                vv.append(sel(np.asarray(vseg, dtype=float)) if vseg is not None
-                          else np.zeros(nseg))
-        yc = np.concatenate(yc)
-        sm = np.concatenate(sm)
-        ki = np.concatenate(ki).astype(int)
-        v = np.concatenate(vv) if self._use_footprint else None
+    def _build_chol(self, fit_scale='Linear', model=False):
+        """Assemble C over the concatenated active points of all objectives (in
+        residual order) through covariance_core and cache its Cholesky factor.
 
-        m = np.isfinite(yc) & np.isfinite(sm) & (sm > 0)
-        if v is not None:
-            m &= np.isfinite(v)
-        self._cov_mask = m
-        C = jcov.build_full_covariance(
-            yc[m], sm[m], ki[m], self._Sigma_logc,
-            v=(v[m] if v is not None else None),
-            var_fwhm=(self._var_fwhm if self._use_footprint else 0.0))
-        self._L, self._jitter = jcov.cholesky_with_jitter(C)
+        Per objective: slice -> imask (``cov.subset`` of the active index) -> one
+        ``Block`` (no covariance: diag(yerr^2), or its log equivalent). The finite
+        mask over the concatenation (finite y, sigma > 0, finite intensity; in Log
+        also y > 0 and intensity > 0) is ``_cov_mask``, frozen on the first build
+        of a fit; C is assembled on the masked rows only. ``model=False`` uses the
+        data as the intensity D (the data-based C, round 0); ``model=True`` the
+        current model (the caller pushes the parameters first).
+
+        MASK COMPOSITION ORDER, and it matters: (1) slice [imin,imax], (2) apply
+        this objective's imask, (3) concatenate, (4) apply _cov_mask. _cov_mask is
+        DEFINED against the output of (3), so imask must be folded in here AND in
+        residual()'s assembly, or the whitening rows silently misalign with the
+        data rows -- no exception, no warning, just a plausible wrong answer."""
+        scale = 'Log' if fit_scale == 'Log' else 'Linear'
+        yfits = self.evaluate() if model else None
+        blocks, ycat, scat, icat = [], [], [], []
+        for k, obj in enumerate(self.objectives):
+            idx = self.active_index(k)
+            y = np.asarray(obj["y"], dtype=float)[idx]
+            yerr = np.asarray(obj["yerr"], dtype=float)[idx]
+            cov = obj["cov"]
+            cs = None if cov is None else cov.subset(idx)
+            if model:
+                f = np.asarray(yfits[k], dtype=float)
+                im = obj.get("imask")
+                if im is not None and not obj.get("yfit_masked"):
+                    f = f[im]
+                inten = f
+            else:
+                inten = y
+            blocks.append(cc.Block(cs, y, yerr, inten, name=obj["name"]))
+            ycat.append(y)
+            scat.append(yerr if cs is None else np.asarray(cs.sigma_meas, dtype=float))
+            icat.append(inten)
+        ycat, scat, icat = (np.concatenate(a) for a in (ycat, scat, icat))
+
+        if model and self._cov_mask is not None and len(self._cov_mask) == len(ycat):
+            # the mask is frozen once per fit (rule 4): a model intensity that is
+            # unusable on an active row falls back to the data there, with a note
+            m = self._cov_mask
+            bad = m & ~np.isfinite(icat)
+            if scale == 'Log':
+                bad |= m & (icat <= 0)
+            if bad.any():
+                self._cov_warnings.append(
+                    'model intensity not usable at %d active points (non-finite%s); '
+                    'the data are used there' % (int(bad.sum()),
+                                                 ' or <= 0' if scale == 'Log' else ''))
+                off = 0
+                for b in blocks:
+                    nb = len(b.y)
+                    sub = bad[off:off + nb]
+                    b.intensity = np.where(sub, b.y, b.intensity)
+                    off += nb
+        else:
+            m = np.isfinite(ycat) & np.isfinite(scat) & (scat > 0) & np.isfinite(icat)
+            if scale == 'Log':
+                with np.errstate(invalid='ignore'):
+                    m &= (ycat > 0) & (icat > 0)
+            self._cov_mask = m
+            off, dropped = 0, []
+            for b in blocks:
+                nb = len(b.y)
+                nd = int(nb - m[off:off + nb].sum())
+                if nd:
+                    dropped.append('%s: %d' % (b.name, nd))
+                off += nb
+            if dropped:
+                self._cov_info_notes.append(
+                    'covariance fit (%s): points excluded (non-finite, sigma <= 0%s): %s'
+                    % (scale, ' or y <= 0' if scale == 'Log' else '', ', '.join(dropped)))
+
+        masked, off = [], 0
+        for b in blocks:
+            nb = len(b.y)
+            keep = np.flatnonzero(m[off:off + nb])
+            off += nb
+            masked.append(cc.Block(None if b.cov is None else b.cov.subset(keep),
+                                   b.y[keep], b.yerr[keep], np.asarray(b.intensity)[keep],
+                                   name=b.name))
+        C, awarn = cc.assemble(masked, scale)
+        self._L, fwarn = cc.factorize(C)
+        self._jitter = 0.0
+        if any('jitter' in w for w in fwarn):
+            self._jitter = float(jcov.cholesky_with_jitter(C)[1])
+        for w in awarn + fwarn:
+            if w not in self._cov_warnings:
+                self._cov_warnings.append(w)
+        self._cov_factor_warnings = list(fwarn)
+        self._cov_scale = fit_scale
         self._cov_ready = True
 
     # ----------------------------------------------------------------- #
@@ -649,36 +715,37 @@ class JointFit(QObject):
         self.push_params(params)
         yfits = self.evaluate()
 
-        if self._use_cov:
+        if self._use_cov and fit_scale in ('Linear', 'Log'):
             # ---- Axis-2 / combined: whitened residual over concatenation ----
-            r = []
+            # absolute units (no max-normalisation): whitened (d - f) is
+            # scale-invariant. 'w/o error' scales take the no-covariance branch.
+            d, f = [], []
             for obj, fit in zip(self.objectives, yfits):
                 i0, i1 = obj["imin"], obj["imax"] + 1
-                data = obj["y"][i0:i1]           # y_corr (absolute units)
+                data = obj["y"][i0:i1]
                 im = obj.get("imask")
+                fit = np.asarray(fit)
                 if im is None:
-                    r.append(data - fit)
+                    d.append(data); f.append(fit)
                 else:                            # see _build_chol on the order
-                    f = np.asarray(fit)
                     if not obj.get("yfit_masked"):
-                        f = f[im]                # else evaluate() already masked it
-                    r.append(data[im] - f)
-            r = np.concatenate(r)
-            if self._L is None:
-                self._build_chol()
-            if len(r) != len(self._cov_mask):
+                        fit = fit[im]            # else evaluate() already masked it
+                    d.append(data[im]); f.append(fit)
+            d, f = np.concatenate(d), np.concatenate(f)
+            if self._L is None or self._cov_scale != fit_scale:
+                self._build_chol(fit_scale)
+            if len(d) != len(self._cov_mask):
                 raise RuntimeError(
                     "joint residual length %d != covariance mask length %d: the "
                     "column mask was applied inconsistently between _build_chol "
-                    "and residual" % (len(r), len(self._cov_mask)))
-            r = r[self._cov_mask]
+                    "and residual" % (len(d), len(self._cov_mask)))
+            # drop the masked rows BEFORE any log (Log: y <= 0 rows are masked)
+            d, f = d[self._cov_mask], f[self._cov_mask]
+            r = d - f if fit_scale == 'Linear' else np.log(d) - np.log(f)
             # L is lower-triangular (Cholesky): O(N^2) forward-substitution, NOT
             # a general O(N^3) solve -- this matters a lot at N~10^3 over many
             # least-squares iterations.
-            if _solve_tri is not None:
-                y = _solve_tri(self._L, r, lower=True, check_finite=False)
-            else:
-                y = np.linalg.solve(self._L, r)
+            y = cc.whiten(self._L, r)
         else:
             # ---- no covariance: byte-identical to Fit per-curve behaviour ----
             y = []
@@ -1164,20 +1231,45 @@ class JointFit(QObject):
     def perform_fit(self, xmin, xmax, fit_scale="Linear", fit_method="leastsq",
                     maxiter=1000, emcee_walkers=100, emcee_steps=100, emcee_burn=0,
                     emcee_cores=1, reuse_sampler=False, emcee_thin=1, backend=None,
-                    ranges=None, seed_temperature=1.0, seed_mode='joint', **fit_kws):
+                    ranges=None, seed_temperature=1.0, seed_mode='joint',
+                    covariance_mode=None, **fit_kws):
         """Run a joint fit. Least-squares family as before; emcee samples the
         joint objective. The no-covariance branch samples in PARALLEL across
         ``emcee_cores`` when >1 (a picklable JointLogProb attached by
         set_emcee_minimizer); the covariance/GLS branch stays serial for now.
 
+        With a covariance attached and a weighted scale ('Linear' / 'Log'):
+        least squares runs with ``scale_covar=False`` (absolute errors, spec
+        6.2); ``covariance_mode`` ('model' | 'data'; default
+        ``self.covariance_mode``) selects the intensity in C. In 'model' mode,
+        when a term depends on the intensity at this scale, the fit is wrapped
+        in ``covariance_core.outer_iterate`` (round 0 data-based, then C from
+        the model at the latest result, up to 5 rounds). emcee freezes C before
+        sampling: at ``self.result.params`` in 'model' mode, else from the data.
+        ``self.cov_info`` records mode, scale, rounds, converged, factor_warnings.
+
         Extra keyword args (e.g. ``ftol``/``xtol``/``gtol`` for the
         ``least_squares`` TRF backend) are forwarded to ``Minimizer.minimize``
         and thence to the underlying scipy solver. Backward-compatible: with no
         extra kwargs the behaviour is unchanged."""
+        mode = self.covariance_mode if covariance_mode is None else covariance_mode
+        if mode not in ('model', 'data'):
+            raise ValueError("covariance_mode must be 'model' or 'data', got %r" % (mode,))
         self.Niter = 0
         self.fit_abort = False
         self._reset_run_warnings()          # build-time warnings stay
-        if (len(self.objectives) >= 2 and not self._use_cov
+        for obj in self.objectives:         # add_dataset downgrades, every fit
+            for w in obj.get("cov_notes") or []:
+                self.warnings.append(_Downgrade(w))
+        cov_on = self._use_cov and fit_scale in ('Linear', 'Log')
+        if self._use_cov and not cov_on:
+            self.warnings.append(_Downgrade(
+                "covariance ignored: fit scale %r is unweighted, so the fit runs "
+                "exactly as without a covariance (use 'Linear' or 'Log')" % (fit_scale,)))
+        self.cov_info = {}
+        self._cov_warnings = []
+        self._cov_info_notes = []
+        if (len(self.objectives) >= 2 and not cov_on
                 and fit_scale == 'Linear w/o error'):
             # 01 6.7: per-dataset 1/max(y) weighting is silent otherwise
             self._add_run_warning(
@@ -1186,7 +1278,26 @@ class JointFit(QObject):
                 "(error-weighted) for a comparable joint objective")
         self._set_ranges(xmin, xmax, ranges=ranges)
         self._L = None                      # force Cholesky rebuild for new range
+        self._cov_mask = None               # refrozen by the first build below
         self._cov_ready = False
+        needs, frozen = False, 'data'
+        if cov_on:
+            self._build_chol(fit_scale)     # data-based C (round 0); freezes the mask
+            needs = mode == 'model' and cc.needs_intensity(
+                [cc.Block(o["cov"], o["y"], o["yerr"], o["y"]) for o in self.objectives],
+                'Log' if fit_scale == 'Log' else 'Linear')
+            if fit_method == "emcee" and needs:
+                if self.result is None:
+                    self.warnings.append(_Downgrade(
+                        "model-based covariance needs a prior fit to freeze C at; "
+                        "none exists, so MCMC uses the data-based covariance"))
+                else:
+                    self.push_params(self.result.params)
+                    self._build_chol(fit_scale, model=True)   # frozen for the run
+                    frozen = 'model'
+            if fit_method == "emcee" and isinstance(emcee_cores, int) and emcee_cores > 1:
+                self.warnings.append(_Downgrade(
+                    "parallel MCMC requested with a covariance: sampling runs serial"))
 
         if fit_method == "emcee":
             self.fitter = self.set_emcee_minimizer(
@@ -1203,31 +1314,77 @@ class JointFit(QObject):
                 method='emcee', params=self.emcee_params, burn=0, steps=emcee_steps,
                 thin=emcee_thin, is_weighted=('w/o' not in fit_scale), nwalkers=emcee_walkers,
                 workers=_workers, reuse_sampler=reuse_sampler)
+            if cov_on:
+                self._finish_cov(mode, fit_scale, 0, True, mcmc_frozen=frozen)
             return self._report(), 'None'
 
+        # with a covariance the errors are absolute (spec 6.2): no chi2_red rescale
+        _sc = {'scale_covar': False} if cov_on else {}
         if fit_method == "leastsq":
             self.fitter = Minimizer(self.residual, self.master_params,
                                     fcn_args=(fit_scale,), iter_cb=self.callback,
-                                    nan_policy="raise", max_nfev=maxiter)
+                                    nan_policy="raise", max_nfev=maxiter, **_sc)
         elif fit_method == "least_squares":
             self.fitter = Minimizer(self.residual, self.master_params,
                                     fcn_args=(fit_scale,), iter_cb=self.callback,
-                                    nan_policy="raise", max_nfev=maxiter)
+                                    nan_policy="raise", max_nfev=maxiter, **_sc)
         elif fit_method == "differential_evolution":
             self.fitter = Minimizer(self.residual, self.master_params,
                                     fcn_args=(fit_scale,), iter_cb=self.callback,
                                     nan_policy="raise", calc_covar=True,
                                     max_nfev=maxiter, popsize=300,
-                                    updating="immediate")
+                                    updating="immediate", **_sc)
         else:
             self.fitter = Minimizer(self.residual, self.master_params,
                                     fcn_args=(fit_scale,), iter_cb=self.callback,
-                                    nan_policy="raise", max_nfev=maxiter)
+                                    nan_policy="raise", max_nfev=maxiter, **_sc)
+
+        if needs:
+            # model-based C by outer iteration (spec 4.4); L frozen within a round
+            state = {'params': self.master_params, 'last': None}
+
+            def fit_once():
+                if self.fit_abort and state['last'] is not None:
+                    return state['last']             # aborted: stop iterating
+                res = self.fitter.minimize(method=fit_method, params=state['params'],
+                                           **fit_kws)
+                state['params'], state['last'] = res.params, res
+                return res
+
+            def rebuild(res):
+                self.push_params(res.params)
+                self._build_chol(fit_scale, model=True)
+
+            self.result, rounds, converged = cc.outer_iterate(fit_once, rebuild)
+            if not converged:
+                self.warnings.append(_Downgrade(
+                    "model-based covariance did not converge in %d rounds (some varying "
+                    "parameter still moved >= 0.1 stderr); the last result is kept"
+                    % rounds))
+            self._finish_cov(mode, fit_scale, rounds, converged)
+            return self._report(), self.result.message
 
         self.result = self.fitter.minimize(method=fit_method,
                                            params=self.master_params,
                                            **fit_kws)
+        if cov_on:
+            self._finish_cov(mode, fit_scale, 0, True)
         return self._report(), self.result.message
+
+    def _finish_cov(self, mode, fit_scale, rounds, converged, mcmc_frozen=None):
+        """Record ``cov_info`` and turn this fit's assembly/factorisation warnings
+        into run warnings (downgrades) and its point-exclusion notes into plain
+        run warnings."""
+        self.cov_info = {'mode': mode, 'scale': fit_scale, 'rounds': int(rounds),
+                         'converged': bool(converged),
+                         'factor_warnings': list(self._cov_factor_warnings),
+                         'jitter': float(self._jitter)}
+        if mcmc_frozen:
+            self.cov_info['mcmc_frozen'] = mcmc_frozen
+        for w in self._cov_warnings:
+            self.warnings.append(_Downgrade(w))
+        for w in self._cov_info_notes:
+            self.warnings.append(_RunWarning(w))
 
     def _report(self):
         """lmfit's fit_report plus each objective's derived quantities.
@@ -1247,9 +1404,17 @@ class JointFit(QObject):
         duplicates are collapsed.
 
         Any ``self.warnings`` (build-time and run-time) are appended as a
-        ``Joint-fit warnings:`` block.
+        ``Joint-fit warnings:`` block. With a covariance in use (``cov_info``
+        set) ``covariance_core.report_block`` adds the ``Covariance:`` block,
+        and any covariance downgrade puts ``DEGRADED FIT: <reasons>`` on the
+        first line. With no covariance attached the text is unchanged.
         """
         rep = fit_report(self.result)
+        downgrades = [w for w in self.warnings if isinstance(w, _Downgrade)]
+        for obj in self.objectives:          # add_dataset notes are always reported
+            for w in obj.get("cov_notes") or []:
+                if w not in downgrades:
+                    downgrades.append(w)
         blocks, seen = [], set()
         keymaps = self._derived_keymaps()
         for idx, obj in enumerate(self.objectives):
@@ -1271,9 +1436,16 @@ class JointFit(QObject):
                 blocks.append(txt)
         if blocks:
             rep = rep + '\n\n' + '\n\n'.join(blocks)
-        if self.warnings:
+        if self.cov_info:
+            rep = rep + '\n\n' + cc.report_block(
+                [(o["name"], o["cov"]) for o in self.objectives], self.cov_info,
+                downgrades, self.result)
+        warns = list(self.warnings) + [w for w in downgrades if w not in self.warnings]
+        if warns:
             rep = rep + '\n\nJoint-fit warnings:\n' + ''.join(
-                '  - %s\n' % w for w in self.warnings)
+                '  - %s\n' % w for w in warns)
+        if downgrades:
+            rep = 'DEGRADED FIT: %s\n\n' % '; '.join(downgrades) + rep
         return rep
 
     def _derived_keymaps(self, keys=('protins', 'theta', 'phi')):

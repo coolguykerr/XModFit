@@ -76,6 +76,7 @@ def build(mask_a=None, use_cov=False, n=60, footprint=False, v_on_b=True):
     jf.add_dataset('A', funcClass=Line, x=x, y=ya, yerr=e, cov=cov_a, mask=mask_a)
     jf.add_dataset('B', funcClass=Line, x=x, y=yb, yerr=e, cov=cov_b)
     jf.build_master_params()
+    jf.covariance_mode = 'data'       # the legacy (data-based) numbers
     return jf, x
 
 
@@ -217,7 +218,8 @@ def main():
     jfit.functionCalled.connect(lambda p, i, r, s: lens.append(len(r)))
     try:
         rep, msg = jfit.perform_fit(x[0], x[-1], fit_scale='Linear',
-                                    fit_method='leastsq', maxiter=200)
+                                    fit_method='leastsq', maxiter=200,
+                                    covariance_mode='data')
         check("masked joint fit runs with constant residual length",
               len(set(lens)) == 1 and lens[0] == 2 * n - 7,
               'lens=%s msg=%s' % (sorted(set(lens)), msg))

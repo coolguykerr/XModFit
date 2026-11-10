@@ -276,6 +276,7 @@ class Block:
     y: np.ndarray                         # data in the residual
     yerr: np.ndarray                      # used only when cov is None
     intensity: np.ndarray                 # D: the data ("data" mode) or the model ("model")
+    name: str = ''                        # dataset name, used in warnings
 
 
 def needs_intensity(blocks, scale):
@@ -302,6 +303,8 @@ def _loading(term, block, scale):
 
 def _describe(bi, block):
     src = os.path.basename(block.cov.source) if block.cov is not None and block.cov.source else ''
+    if block.name:
+        return '%s (%s)' % (block.name, src) if src else block.name
     return '%d (%s)' % (bi, src) if src else str(bi)
 
 
@@ -420,6 +423,76 @@ def outer_iterate(fit_once, rebuild, max_rounds=5, tol=0.1):
     return result, max_rounds, False
 
 
+# ------------------------------------------------------------------- report --
+def chi2_red_band(nfree, coverage=0.99):
+    """Central `coverage` interval of chi2(nfree)/nfree, or None when nfree < 1."""
+    if not nfree or nfree < 1:
+        return None
+    from scipy.stats import chi2
+    a = 0.5 * (1.0 - coverage)
+    return chi2.ppf(a, nfree) / nfree, chi2.ppf(1.0 - a, nfree) / nfree
+
+
+def _term_k(t):
+    return 'N=%d (dense)' % np.asarray(t.cov).shape[0] if t.kind == 'dense' \
+        else str(np.asarray(t.cov).shape[0])
+
+
+def report_block(covs, info, warnings, result):
+    """The report's 'Covariance:' block (spec 6.6) and the chi2_red line (spec 6.2).
+
+    covs: [(dataset name, DatasetCovariance | None)]; info: mode, scale, rounds,
+    converged, factor_warnings (and optionally jitter); warnings: covariance
+    downgrades to list; result: the lmfit result (redchi, nfree)."""
+    info = info or {}
+    out = ['Covariance:']
+    for name, cov in covs:
+        if cov is None:
+            out.append('  %s: none (diagonal errors from the dataset)' % name)
+            continue
+        out.append('  %s: %s (loader %s)' % (name, cov.source or '<in memory>',
+                                             cov.loader or '?'))
+        if not cov.terms:
+            out.append('    no terms (measurement errors only)')
+        for t in cov.terms:
+            out.append('    term %s: kind=%s scope=%s K=%s' % (t.name, t.kind, t.scope,
+                                                              _term_k(t)))
+    out.append('  mode: %s' % info.get('mode', '?'))
+    out.append('  scale: %s' % info.get('scale', '?'))
+    rounds = int(info.get('rounds', 0) or 0)
+    if info.get('mcmc_frozen'):
+        out.append('  model rounds: n/a (MCMC: C frozen for the run at the %s)'
+                   % ('best-fit model' if info['mcmc_frozen'] == 'model' else 'data'))
+    elif info.get('mode') == 'model' and rounds:
+        out.append('  model rounds: %d (%s)' % (rounds, 'converged' if info.get('converged')
+                                                else 'round limit reached, not converged'))
+    elif info.get('mode') == 'model':
+        out.append('  model rounds: 0 (no term depends on the intensity at this scale)')
+    else:
+        out.append('  model rounds: 0 (data-based covariance)')
+    fw = list(info.get('factor_warnings') or [])
+    out.append('  jitter/floor: %s' % ('; '.join(fw) if fw else 'none'))
+    for w in warnings or []:
+        out.append('  downgrade: %s' % w)
+    redchi = getattr(result, 'redchi', None)
+    nfree = getattr(result, 'nfree', None)
+    if redchi is not None:
+        out.append('  chi2_red = %.6g (errors are absolute, not rescaled by chi2_red)'
+                   % redchi)
+        band = chi2_red_band(nfree)
+        if band is not None and redchi > band[1]:
+            out.append('  WARNING: chi2_red is above the central 99%% of chi2(nfree)/nfree '
+                       '[%.4g, %.4g] (nfree = %d): the misfit exceeds what the stated errors '
+                       'allow, and the error bars cover noise only'
+                       % (band[0], band[1], nfree))
+        elif band is not None and redchi < band[0]:
+            out.append('  WARNING: chi2_red is below the central 99%% of chi2(nfree)/nfree '
+                       '[%.4g, %.4g] (nfree = %d): the stated errors are larger than this '
+                       'misfit suggests, so the error bars may be too wide'
+                       % (band[0], band[1], nfree))
+    return '\n'.join(out)
+
+
 # ------------------------------------------------------ legacy bilayer formats --
 import joint_covariance as _jc
 
@@ -453,8 +526,11 @@ def from_legacy_meta(meta, x, source, loader):
             raise CovarianceError('beam_fwhm: y_corr is zero or not finite where the footprint '
                                   'sensitivity v is nonzero (first bad index %s); the term is '
                                   'defined relative to y_corr' % _first_bad(bad))
+        wv = np.zeros(n)
+        nz = v != 0
+        wv[nz] = v[nz] / y_corr[nz]                # 0 where v == 0, whatever y_corr is
         terms.append(CovTerm('beam_fwhm', 'multiplicative', np.array([[var_fwhm]]),
-                             (v / y_corr)[:, None], None, 'shared',
+                             wv[:, None], None, 'shared',
                              {'origin': 'legacy shared-beam footprint'}))
     return DatasetCovariance(np.asarray(x, float), sigma, terms, None, y_corr,
                              str(source), loader)

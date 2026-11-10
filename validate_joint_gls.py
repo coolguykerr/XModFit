@@ -10,7 +10,7 @@ and the GLS parameter covariance from the exact design matrix of that model.
 
     G1  whitening_identity_with_footprint   L L^T == C and |L^-1 r|^2 == r^T C^-1 r
     G2  n1_nocov_equals_stock_fit            JointFit(1 dataset, no cov) == stock Fit
-    G3  gls_covar_matches_analytic           stderr(a) == sqrt((X^T C^-1 X)^-1 * redchi)
+    G3  gls_covar_matches_analytic           stderr(a) == sqrt((X^T C^-1 X)^-1)  (absolute)
     G4  different_masks_with_cross_blocks    masked whitening == chol(C_active) solve
     G4b same, plus per-dataset fit windows cutting into both masked regions
         (slice -> imask order under covariance)
@@ -110,6 +110,7 @@ def test_g1():
         jf.add_dataset('D%d' % i, funcClass=Line, x=X, y=y, yerr=E * np.ones_like(X),
                        cov=sidecar(y, k, S, footprint=True))
     jf.build_master_params()
+    jf.covariance_mode = 'data'
     jf._set_ranges(X[0], X[-1])
     w = jf.residual(jf.master_params, 'Linear')     # builds the Cholesky
 
@@ -180,7 +181,7 @@ def test_g3():
             jf.add_dataset('D%d' % i, func=f, x=X, cov=sidecar(y, k, S))
         jf.build_master_params(groups=[jf.share_all('a')])
         jf.perform_fit(X[0], X[-1], fit_scale='Linear', fit_method='leastsq',
-                       maxiter=2000)
+                       maxiter=2000, covariance_mode='data')
         res = jf.result
 
         # analytic GLS for y = a*x + b_i, design columns [x | 1_{dataset i}]
@@ -213,9 +214,9 @@ def test_g3():
               dr < 1e-8, 'engine=%.8e analytic=%.8e rel=%.2e'
               % (res.redchi, redchi_an, dr))
 
-        # lmfit scale_covar=True form (redchi-scaled). Whether reported GLS errors
-        # should be scaled or unscaled for an absolute C is a WS2 decision.
-        se_an = np.sqrt(Finv[0, 0] * redchi_an)
+        # absolute errors: with a covariance attached the engine fits with
+        # scale_covar=False (spec 6.2, Ruling R1), so no redchi factor
+        se_an = np.sqrt(Finv[0, 0])
         se_en = res.params['a'].stderr
         ds = rel(se_en, se_an)
         check("G3 gls_covar_matches_analytic (%s): stderr(a)" % vname, ds < 1e-4,
@@ -242,6 +243,7 @@ def test_g4():
         jf.add_dataset('D%d' % i, funcClass=Line, x=X, y=y, yerr=E * np.ones_like(X),
                        cov=sidecar(y, k, S, footprint=True), mask=m)
     jf.build_master_params()
+    jf.covariance_mode = 'data'
     jf._set_ranges(X[0], X[-1])
     w = np.asarray(jf.residual(jf.master_params, 'Linear'))
 
@@ -277,6 +279,7 @@ def test_g4b():
         jf.add_dataset('D%d' % i, funcClass=Line, x=X, y=y, yerr=E * np.ones_like(X),
                        cov=sidecar(y, k, S, footprint=True), mask=m)
     jf.build_master_params()
+    jf.covariance_mode = 'data'
     # windows cut into both masked regions: D0 keeps 3..30, D1 keeps 8..n-4
     jf._set_ranges(X[0], X[-1], ranges={'D0': (X[3], X[30]), 'D1': (X[8], X[-4])})
     w = np.asarray(jf.residual(jf.master_params, 'Linear'))
