@@ -4440,6 +4440,7 @@ class XModFit(QWidget):
             self._cov_status('Covariance %s attached to %s.' % (os.path.basename(path), name))
         self._refresh_data_labels()
         self._cov_sync_mode_combo()
+        self._cov_sync_joint_panel()
         return True
 
     def remove_covariance_from(self, data_key):
@@ -4451,6 +4452,14 @@ class XModFit(QWidget):
                              % os.path.basename(data_key.split('<>', 1)[-1]))
         self._refresh_data_labels()
         self._cov_sync_mode_combo()
+        self._cov_sync_joint_panel()
+
+    def _cov_sync_joint_panel(self):
+        """Re-fill the joint panel's covTable from the attached covariances (spec 17
+        6.6: a joint fit uses each dataset's attached covariance unless overridden)."""
+        panel = getattr(self, 'jointFitPanel', None)
+        if panel is not None and hasattr(panel, '_refresh_cov_table'):
+            panel._refresh_cov_table()
 
     def _cov_forget(self, data_key):
         for d in (self.covariances, self.covariance_paths, self.covariance_modes,
@@ -7421,6 +7430,7 @@ class XModFit(QWidget):
         separate, deferred step."""
         import numpy as _np
         spec = self.jointFitPanel.spec
+        self._cov_sync_joint_panel()        # attached covariances, unless overridden
         _jf = self._compile_joint_guarded(spec)
         if _jf is None:                     # refused or declined; nothing changed
             return
@@ -7451,7 +7461,8 @@ class XModFit(QWidget):
         try:
             self.fit_report, self.fit_message = self.fit.perform_fit(
                 xmin, xmax, fit_scale=self.fit_scale, fit_method=self.fit_method,
-                ranges=ranges)
+                ranges=ranges, covariance_mode=spec.covariance_mode)
+            spec.covariance_notes = []      # a .jpar reload note is reported once
         finally:
             try:
                 self.closeFitInfoDlg()
@@ -7524,7 +7535,9 @@ class XModFit(QWidget):
                 emcee_steps=emcee_steps, emcee_cores=emcee_cores, reuse_sampler=reuse_sampler,
                 emcee_burn=emcee_burn, emcee_thin=emcee_thin, backend=backend, ranges=ranges,
                 seed_temperature=getattr(self, 'seed_temperature', 1.0),
-                seed_mode=getattr(self, 'seed_mode', 'joint'))
+                seed_mode=getattr(self, 'seed_mode', 'joint'),
+                covariance_mode=getattr(getattr(self.jointFitPanel, 'spec', None),
+                                        'covariance_mode', None))
         finally:
             self.disconnect_fit_function()
         self.errorAvailable = True
@@ -7638,7 +7651,8 @@ class XModFit(QWidget):
                     'column_limits': self._format_column_limits(),
                     'fit_method': self.fitMethodComboBox.currentText(),
                     'fit_scale': self.fitScaleComboBox.currentText(),
-                    'fit_iterations': self.fitIterationLineEdit.text()}
+                    'fit_iterations': self.fitIterationLineEdit.text(),
+                    'cov_mode': spec.covariance_mode}
         blocks = []
         for e in spec.datasets:
             if e.model is None:
@@ -7743,6 +7757,9 @@ class XModFit(QWidget):
             eps = [(path_to_name[p], lk) for (p, lk) in g['endpoints'] if p in path_to_name]
             if len(eps) >= 2:
                 spec.set_shared_endpoints(eps, bare=g.get('bare', False), master_name=g.get('name'))
+        _mode, _note = jio.jpar_cov_mode(parsed)    # no #CovMode with a #Cov -> data + note
+        spec.covariance_mode = _mode
+        spec.covariance_notes = [_note] if _note else []
         s = parsed.get('settings', {})
         if s.get('fit_range'):
             self.xminmaxLineEdit.setText(s['fit_range'])

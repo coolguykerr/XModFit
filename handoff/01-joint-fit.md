@@ -126,6 +126,46 @@ an individual-fit value ± stderr instead of hard-fixing it.
 
 ### 3.4 Axis 2 — cross-dataset covariance and Cholesky whitening
 
+**Superseded 2026-11-10 by the general covariance workstream** (design:
+`17-spec-general-covariance.md`; plan and task record: `18-plan-general-covariance.md`;
+commits `b55bf41`..COV T8). What holds now:
+
+* **Loaders.** Every route — `JointFit.add_dataset`, `JointFitSpec.compile`,
+  `build_jointfit_from_selection`, the panel's covTable, `.jpar` `#Cov:`/`#Raw:` — goes
+  through `covariance_core.load_covariance(path, raw_path)` and attaches a
+  `DatasetCovariance` per dataset (v1 `*.cov.json`, legacy `*.npz`, `*_c_factors.txt`
+  + raw; a legacy dict from `joint_covariance` is still accepted by `add_dataset`). A file
+  that cannot be loaded at compile time, or whose x/y no longer match, fits that dataset
+  without it and the report's first line says `DEGRADED FIT:` with the dataset, file and
+  reason (spec §6.5). Verified: `validate_covariance_gui.py` J1.
+* **Mixed datasets.** One dataset with a covariance and one without fit together (the old
+  `_build_chol` crash is gone); the dataset without one contributes its stock χ².
+  Verified: `validate_covariance.py` J1 (Linear and Log), `validate_covariance_gui.py` J1
+  (through the spec).
+* **Log scale** is honoured with a covariance (first-order log-space C, y ≤ 0 points
+  dropped before any log). Verified: `validate_covariance.py` J1/J2.
+* **Modes.** One `covariance_mode` per joint fit, `'model'` (default: intensity terms use
+  the fitted model, outer-iterated) or `'data'` (measured y, the pre-change behaviour). It
+  is `JointFitSpec.covariance_mode`, the panel's **Covariance mode** combo, and the `.jpar`
+  file-level `#CovMode:` line (written only when a dataset has a `#Cov:`). A `.jpar` with a
+  `#Cov:` and no `#CovMode:` reloads in `'data'` mode and the next fit's report notes
+  "saved before covariance modes existed; reloaded in data mode". Verified:
+  `validate_covariance_gui.py` J3, which also shows a legacy bundle-format fit (legacy dict
+  route, and legacy npz sidecars named in a pre-mode `.jpar`) reproducing an independent
+  GLS solve on `build_full_covariance` to 1e-12 in data mode.
+* **Absolute errors (Ruling R1).** With a covariance attached the fit runs with
+  `scale_covar=False`: stderr = √diag((XᵀC⁻¹X)⁻¹), no χ²_red rescaling; χ²_red is printed
+  next to the errors with a warning outside its central 99 % band. Verified:
+  `validate_joint_gls.py` G3 (stderr expectation changed in COV T4).
+* **Sharing** is per term: legacy terms are `shared`, so the bilayer cross-block C is
+  unchanged; conflicting shared terms become private with a warning instead of raising.
+* **GUI pre-fill.** A covariance attached to a dataset in the Data list (doc 08) appears in
+  that dataset's covTable row and is used by the joint fit unless the panel (or a `.jpar`)
+  names an explicit file; removing the attachment clears an inherited row, not an explicit
+  one. Verified: `validate_covariance_gui.py` J2.
+
+The text below is the pre-change state, kept for the design history.
+
 `joint_covariance.build_full_covariance` (`joint_covariance.py:312-353`) assembles
 
     C_ij = delta_ij * sigma_meas_i^2 + y_corr_i*y_corr_j*Sigma_logc[k_i,k_j] + var_fwhm*v_i*v_j
@@ -277,9 +317,11 @@ refuses to run while joint mode is enabled and points the user at the panel's ow
 4. Tick the parameters to share in **Shared parameters** — e.g. `theta`, `phi`, `protins`
    for a joint `XLayersPDB` fit; a substrate layer's `__Model_d_00N`/`__Model_rho_00N` for
    `XLayers`. A checkbox means "tied across ALL datasets in this joint fit".
-5. Optional: double-click in **Correlated-error covariance** to attach a `.npz` or
+5. Optional: double-click in **Correlated-error covariance** to attach a `*.cov.json`, `.npz` or
    `*_c_factors.txt` sidecar (plus the raw 4-column file for the text flavour). Attaching one
-   on any dataset switches the whole fit to GLS whitening.
+   on any dataset switches the whole fit to GLS whitening. A covariance already attached in
+   the Data list fills the row by itself; a file picked here overrides it. Pick
+   **Covariance mode** `model` (default) or `data` below the table (§3.4).
 6. Optional: per-dataset `xmin`/`xmax` in **Per-dataset fit range**; blank falls back to the
    main Xrange box.
 7. Set method/scale/iterations in the usual boxes, then **Run joint fit** (or the main
@@ -460,7 +502,7 @@ which upstream also touched for its new MCMC framework (`merge-with-upstream-dev
 | 1 | A 1-dataset, no-covariance `JointFit` reduces *exactly* to stock `Fit` | `Joint_Fit_Routines.py:6-9` docstring; (retired; was `validate_jointfit.py` T2) | **VERIFIED 2026-11-04 on synthetic data** by `validate_joint_gls.py` G2 (Linear and Log fit scales: chisqr, values and stderrs agree with stock `Fit`). Not re-run on real data |
 | 2 | `sum((L^-1 r)^2) == r^T C^-1 r` to <1e-8 on the real El_Cat covariance | `validate_jointfit.py` T1 | **Verified on SYNTHETIC data with the footprint term ON 2026-11-04** (not the real El_Cat covariance) by `validate_joint_gls.py` G1 (synthetic, no real data). Original check: run T1 with `ELCAT_BASE` set; also assert the same identity with the footprint term switched on (T1 currently builds `C` without `v`) |
 | 3 | Cross-dataset covariance measurably changes stderrs vs diagonal-only | (retired; was `validate_jointfit.py` T3) | **PARTLY COVERED 2026-11-04** by `validate_joint_gls.py` G3's cross-vs-block comparison on synthetic data: stderr(a) differs by ~60% between the cross-block and block-diagonal covariance, and each matches its own analytic value. Real-data stderr ratios not recorded |
-| 4 | lmfit's `.covar` under the whitened residual gives correct GLS uncertainties without MCMC | `Joint_Fit_Routines.py:22-27` | **PARTLY CONFIRMED 2026-11-04** by `validate_joint_gls.py` G3 (redchi computed independently as chi2/(N-n_free), and checked against the engine's): engine stderr matches the redchi-scaled GLS covariance (lmfit `scale_covar=True`) for a linear model; whether reported GLS errors should be scaled or unscaled is open -- a WS2 reporting-contract decision; MCMC comparison untested. The match is to ~1e-8 in both the cross-block and block-diagonal variants. The unscaled textbook covariance `(X^T C^-1 X)^-1` is ~6% smaller here. Compare `result.covar` stderrs against a serial covariance-aware MCMC posterior on one small GLS fit |
+| 4 | lmfit's `.covar` under the whitened residual gives correct GLS uncertainties without MCMC | `Joint_Fit_Routines.py:22-27` | **PARTLY CONFIRMED 2026-11-04** by `validate_joint_gls.py` G3 (redchi computed independently as chi2/(N-n_free), and checked against the engine's): engine stderr matches the redchi-scaled GLS covariance (lmfit `scale_covar=True`) for a linear model; whether reported GLS errors should be scaled or unscaled is open -- a WS2 reporting-contract decision; MCMC comparison untested. The match is to ~1e-8 in both the cross-block and block-diagonal variants. The unscaled textbook covariance `(X^T C^-1 X)^-1` is ~6% smaller here. Compare `result.covar` stderrs against a serial covariance-aware MCMC posterior on one small GLS fit. **Scaling decided 2026-11-10 (Ruling R1, spec 17 §6.2): absolute errors (`scale_covar=False`); G3 now asserts stderr == √((XᵀC⁻¹X)⁻¹) and passes. The MCMC comparison is still open** |
 | 5 | The `bare=True` master name is what keeps the emcee `theta`/`phi` angle gate firing | `Joint_Fit_Routines.py:265-266`, `370-378` | Grep the gate in `lmfit/minimizer.py` / `customsampler.py` and confirm it matches on the bare name; then check a subset-shared (`g0_theta`) joint MCMC does NOT wrap angles (expected failure mode) |
 | 6 | `rsplit('_', 2)` in `loadParameters` (cited as xmodfit.py ~3246/3254) tolerates the `d{i}_`/`g{gid}_` prefixes | `Joint_Fit_Routines.py:243-244`, `377-378` | Those line numbers are stale (the file has grown); locate the current `rsplit('_', 2)` sites and confirm a `__d0_Model_d_005`-style key round-trips through `.par` load |
 | 7 | Per-dataset parameter edits in the stock tables survive a re-`compile()` | `joint_fit_panel.py:31-33` | Edit a value for dataset 1, add a dataset (forces `_resync_all`), re-run, confirm the edit is in `jf.master_params['d1_...']` |

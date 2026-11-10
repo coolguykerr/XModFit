@@ -90,7 +90,14 @@ Each item is specified in the fix list. All are small.
 
 ## WS2 — The reporting contract: statistics the program computes for the user
 
-> The general covariance workstream (docs 17 and 18) precedes WS2.
+> The general covariance workstream (docs 17 and 18) precedes WS2. **DONE 2026-11-10**
+> (XModFit side, commits `b55bf41`..COV T8; verified by `validate_covariance.py`,
+> `validate_covariance_gui.py`, `validate_cov_stitching.py` and the full `tests/run_all.py`;
+> the LSS_Reader side, spec 17 §8, is separate). **WS2 is next**, and must design its
+> per-dataset χ² decomposition (§2.1) on the *whitened* residual `L⁻¹ r` that the fit now
+> minimises for any mix of datasets with and without a covariance, in Linear and Log, in
+> `model` or `data` mode (spec 17 §10). With shared terms that decomposition is not additive
+> and WS2 must state how it splits.
 
 New module **`joint_fit_stats.py`** (Qt-free). It consumes a fitted `JointFit`. Every
 function returns plain data plus a `format_*` text renderer, so the GUI, the `.jpar` and

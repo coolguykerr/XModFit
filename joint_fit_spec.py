@@ -39,8 +39,8 @@ from typing import Optional, Dict, List, Tuple
 
 import numpy as np
 
-from Joint_Fit_Routines import JointFit
-import joint_covariance as jcov
+from Joint_Fit_Routines import JointFit, _Downgrade
+import covariance_core as cc
 
 
 # --------------------------------------------------------------------------- #
@@ -57,10 +57,17 @@ class DatasetEntry:
                  ``model`` is given.
     model      : a pre-built model INSTANCE (overrides model_class).  Use this
                  to carry a per-dataset starting structure / .par into the fit.
-    cov_path   : optional covariance sidecar (*.npz self-contained, or a
-                 *_c_factors.txt needing ``raw_path``).  Attaching one on ANY
-                 dataset turns on Axis-2 GLS whitening for the whole fit.
+    cov_path   : optional covariance sidecar, any format ``covariance_core``
+                 loads (*.cov.json v1, a legacy *.npz, or a *_c_factors.txt
+                 needing ``raw_path``).  Attaching one on ANY dataset turns on
+                 Axis-2 GLS whitening for the whole fit.
     raw_path   : original 4-column data file, required only for *_c_factors.txt.
+    cov        : the in-memory ``DatasetCovariance`` behind ``cov_path`` when it
+                 was inherited from the host's attached covariance (compile uses
+                 it instead of re-reading the file); None otherwise.
+    cov_inherited : True when cov_path/raw_path/cov were pre-filled from the
+                 host's attached covariance (``inherit_covariances``); an explicit
+                 cov_path (panel picker, .jpar) clears it and always wins.
     fit_xmin   : optional per-dataset lower fit bound (q). ``None`` -> fall back
                  to the joint fit's scalar Xrange. Independent of ``model.x``
                  (the model's evaluation grid); this is the [imin,imax] window.
@@ -82,6 +89,8 @@ class DatasetEntry:
     fit_xmin: Optional[float] = None
     fit_xmax: Optional[float] = None
     limits: Optional[Dict[str, Tuple[Optional[float], Optional[float]]]] = None
+    cov: Optional[object] = None
+    cov_inherited: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -127,6 +136,12 @@ class JointFitSpec:
         # exactly: set this False + expose a picker in the panel.  Nothing in
         # compile() reads this flag -- it is a GUI-affordance switch only.
         self.constrain_model: bool = True
+        # one covariance mode for the whole joint fit ('model' | 'data', spec 17
+        # 4.4/6.6), persisted as the .jpar '#CovMode:' line, and notes for the next
+        # fit's report (e.g. a .jpar saved before modes existed); the host clears
+        # the notes after the fit that reported them.
+        self.covariance_mode: str = 'model'
+        self.covariance_notes: List[str] = []
 
     # ---- dataset selection / add / remove --------------------------------- #
     def add_dataset(self, name, model_class=None, model=None,
@@ -137,8 +152,13 @@ class JointFitSpec:
             if e.name == name:
                 if model_class is not None: e.model_class = model_class
                 if model is not None:       e.model = model
-                if cov_path is not None:    e.cov_path = cov_path
-                if raw_path is not None:    e.raw_path = raw_path
+                if cov_path is not None:    # explicit: wins over an inherited one
+                    if e.cov_inherited and raw_path is None:
+                        e.raw_path = None
+                    e.cov_path, e.cov, e.cov_inherited = cov_path, None, False
+                if raw_path is not None:
+                    e.raw_path = raw_path
+                    e.cov, e.cov_inherited = None, False
                 if fit_xmin is not None:    e.fit_xmin = fit_xmin
                 if fit_xmax is not None:    e.fit_xmax = fit_xmax
                 if limits is not None:      e.limits = limits
@@ -160,6 +180,27 @@ class JointFitSpec:
         for g in self.groups:
             g.prune_dataset(name)
         self.groups = [g for g in self.groups if g.n_members >= 2]
+
+    def inherit_covariances(self, attached):
+        """Pre-fill each entry without an explicit covariance from the host's
+        attached ones (spec 17 6.6: a joint fit uses each dataset's attached
+        covariance unless the panel overrides it).
+
+        ``attached`` is ``{dataset_name: (DatasetCovariance, path, raw_path)}``.
+        An entry with an explicit cov_path is left alone; an inherited entry
+        follows the host (re-filled, or cleared when the covariance was removed)."""
+        attached = attached or {}
+        for e in self.datasets:
+            if e.cov_path and not e.cov_inherited:
+                continue
+            got = attached.get(e.name)
+            if got is None:
+                if e.cov_inherited:
+                    e.cov_path = e.raw_path = e.cov = None
+                    e.cov_inherited = False
+                continue
+            e.cov, e.cov_path, e.raw_path = got
+            e.cov_inherited = True
 
     @property
     def dataset_names(self) -> List[str]:
@@ -240,7 +281,11 @@ class JointFitSpec:
 
         ``data`` is XModFit's ``data[fname][curve] -> {'x','y','yerr',...}``.
         Datasets are registered in the spec's order (the stable key contract);
-        covariance sidecars are loaded and attached; share-groups are translated
+        covariance sidecars are loaded through ``covariance_core.load_covariance``
+        and attached (a file that cannot be loaded fits that dataset without it,
+        with a downgrade warning: spec 17 6.5, fit-time row; an x/y mismatch is
+        decided by ``JointFit.add_dataset``); ``covariance_mode`` and
+        ``covariance_notes`` are handed to the JointFit; share-groups are translated
         into the engine's ``share_endpoints`` and applied via
         ``build_master_params(groups=...)``. ``on_mismatch`` ('raise' | 'first')
         is passed through: a share-group whose endpoints disagree on
@@ -257,24 +302,27 @@ class JointFitSpec:
                 "(the GUI does this on data removal) or re-add them." % missing)
 
         jf = JointFit()
+        jf.covariance_mode = self.covariance_mode
         name_to_idx = {}
         multi_curve = []
         for idx, e in enumerate(self.datasets):
             x, y, yerr, n_curves = _primary_curve(data[e.name])
             if n_curves > 1:
                 multi_curve.append((e.name, n_curves, next(iter(data[e.name]))))
-            cov = None
-            if e.cov_path:
-                cov = jcov.load_dataset_cov(e.cov_path, x=x, raw_path=e.raw_path)
+            cov, note = e.cov, None
+            if cov is None and e.cov_path:
+                cov, note = load_or_note(e.name, e.cov_path, e.raw_path)
             if e.model is not None:
-                jf.add_dataset(e.name, func=e.model, x=x, y=y, yerr=yerr, cov=cov,
-                               mask=(masks or {}).get(e.name))
+                obj = jf.add_dataset(e.name, func=e.model, x=x, y=y, yerr=yerr, cov=cov,
+                                     mask=(masks or {}).get(e.name))
             else:
                 mc = e.model_class or self.default_model_class
                 if mc is None:
                     raise ValueError(f"dataset '{e.name}' has no model class")
-                jf.add_dataset(e.name, funcClass=mc, x=x, y=y, yerr=yerr, cov=cov,
-                               mask=(masks or {}).get(e.name))
+                obj = jf.add_dataset(e.name, funcClass=mc, x=x, y=y, yerr=yerr, cov=cov,
+                                     mask=(masks or {}).get(e.name))
+            if note is not None:            # re-added to every fit's warnings
+                obj["cov_notes"].append(note)
             name_to_idx[e.name] = idx
 
         # translate name-keyed groups -> engine (idx, local_key) endpoint groups,
@@ -298,7 +346,19 @@ class JointFitSpec:
         for (nm, n, ck) in multi_curve:
             jf.warnings.append("dataset %s has %d curves; only the first (%s) "
                                "enters the joint fit" % (nm, n, ck))
+        jf.warnings.extend(self.covariance_notes)
         return jf
+
+
+def load_or_note(name, path, raw_path=None):
+    """``(DatasetCovariance, None)``, or ``(None, downgrade)`` when the sidecar
+    cannot be loaded at compile/launch time (spec 17 6.5, fit-time row: the
+    dataset is fitted without it, and the warning names dataset, file and reason)."""
+    try:
+        return cc.load_covariance(path, raw_path=raw_path), None
+    except (cc.CovarianceError, OSError) as ex:
+        return None, _Downgrade("%s: covariance %s could not be loaded (%s); fitted "
+                                "without it" % (name, path, ex))
 
 
 # --------------------------------------------------------------------------- #

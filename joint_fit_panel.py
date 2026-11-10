@@ -242,8 +242,20 @@ class JointFitPanel(QWidget):
         self.covTable.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.covTable.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.covTable.cellDoubleClicked.connect(self._on_cov_double_clicked)
-        covl.addWidget(QLabel("Double-click a cell to attach a sidecar (.npz or *_c_factors.txt)."))
+        covl.addWidget(QLabel("Double-click a cell to attach a sidecar (*.cov.json, .npz or "
+                              "*_c_factors.txt); a covariance attached in the Data list "
+                              "is used unless overridden here."))
         covl.addWidget(self.covTable)
+        # one covariance mode per joint fit (spec 17 6.6: the mode is a fit option)
+        modeRow = QHBoxLayout()
+        modeRow.addWidget(QLabel("Covariance mode:"))
+        self.covModeCombo = QComboBox()
+        self.covModeCombo.addItems(['model', 'data'])
+        self.covModeCombo.setToolTip("model: intensity terms use the fitted model "
+                                     "(iterated); data: they use the measured y")
+        self.covModeCombo.currentTextChanged.connect(self._on_cov_mode_changed)
+        modeRow.addWidget(self.covModeCombo, 1)
+        covl.addLayout(modeRow)
         body.addWidget(covBox)
 
         # --- per-dataset fit range (xmin:xmax) ---
@@ -416,7 +428,7 @@ class JointFitPanel(QWidget):
         name = self.covTable.item(row, 0).data(Qt.UserRole) or self.covTable.item(row, 0).text()
         if col == 1:
             f, _ = QFileDialog.getOpenFileName(self, "Covariance sidecar", "",
-                                               "Sidecar (*.npz *_c_factors.txt)")
+                                               "Sidecar (*.cov.json *.npz *_c_factors.txt)")
             if f:
                 self.spec.add_dataset(name, cov_path=f)
         elif col == 2:
@@ -424,6 +436,20 @@ class JointFitPanel(QWidget):
             if f:
                 self.spec.add_dataset(name, raw_path=f)
         self._refresh_cov_table()
+
+    def _on_cov_mode_changed(self, mode):
+        if mode not in ('model', 'data'):
+            return
+        self.spec.covariance_mode = mode
+        self.spec.covariance_notes = []     # an explicit choice replaces a reload note
+
+    def _attached_covariances(self):
+        """{dataset name: (DatasetCovariance, path, raw_path)} attached in the host's
+        Data list (empty for a host without single-fit covariances)."""
+        covs = getattr(self.parent_app, "covariances", None) or {}
+        paths = getattr(self.parent_app, "covariance_paths", None) or {}
+        return {k: (c,) + tuple(paths.get(k, (getattr(c, "source", None), None)))
+                for k, c in covs.items()}
 
     # ---- dataset list drives the main-window view ----------------------- #
     def _on_dataset_list_selection(self):
@@ -619,6 +645,12 @@ class JointFitPanel(QWidget):
                 g.endpoints = [(n, lkey) for n in names]
 
     def _refresh_cov_table(self):
+        # entries without an explicit sidecar follow the Data list's attached
+        # covariance (spec 17 6.6); an explicit one (picker, .jpar) wins
+        self.spec.inherit_covariances(self._attached_covariances())
+        self.covModeCombo.blockSignals(True)
+        self.covModeCombo.setCurrentText(self.spec.covariance_mode)
+        self.covModeCombo.blockSignals(False)
         self.covTable.setRowCount(0)
         for e in self.spec.datasets:
             r = self.covTable.rowCount()

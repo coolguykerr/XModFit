@@ -468,6 +468,26 @@ points in `self.x` (only if `y()` is pointwise in x or looks x up as an index).
 `parameter_columns(names) -> None`-when-unmappable -> analytic Jacobian (`leastsq` only, >= 4
 varying params, no `expr`). `canonical_params(params)` -> fold periodic params before reporting.
 
+**Single-fit covariance (added 2026-11-10, COV T7; design `17-spec-general-covariance.md`
+§6.2/§6.6, plan `18-plan-general-covariance.md`).** Select ONE dataset in the Data list and
+click **Load covariance...** (`*.cov.json` v1 from LSS_Reader, a legacy `*.npz`, or a
+`*_c_factors.txt`, which then asks for its raw 4-column file). `attach_covariance_to(data_key,
+path, raw_path)` refuses, with a message, a multi-curve dataset, an unreadable file and any x/y
+mismatch (rtol 1e-4, naming the first mismatching index), and warns when the file names a
+different data file. The covariance belongs to the dataset (`XModFit.covariances[data_key]`,
+`covariance_paths`, `covariance_modes`), not to the one `Fit` the GUI moves between datasets: a
+dataset without one fits exactly as before. Attached datasets are bold with a tooltip naming the
+file; **Remove covariance** detaches; the **Covariance Mode** combo (`model` default / `data`) is
+per dataset and enabled only with a covariance. With a covariance the fit uses absolute errors
+(`scale_covar=False`, χ²_red reported next to them) and the χ² confidence interval targets
+χ²_min + χ².ppf(CL, 1). Persistence: `.xpar` / `.xfit` header lines `#Covariance=<path>`,
+`#Covariance Raw=<path>` (legacy text only) and `#Covariance Mode=<model|data>`, written only
+with a covariance so other files stay byte-identical. An `.xpar` with `#Covariance=` and no mode
+line reloads in `data` mode and the next fit's report says "saved before covariance modes
+existed; reloaded in data mode"; a missing covariance or raw file warns and the dataset
+continues without one. The joint panel inherits these attachments (doc 01 §3.4). Verified:
+`validate_covariance_gui.py` G1-G5 (single fit) and J2 (joint pre-fill), headless.
+
 **Multi-dataset individual fitting.** Ctrl+click several datasets in the Data list, then press
 **Fit**: each is fitted in turn from its own stored parameters (progress dialog with Abort), and
 the whole selection is restored afterwards so all fitted curves and EDPs stay co-plotted. Fitted

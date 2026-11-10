@@ -19,6 +19,8 @@ Grammar
     #Fit Method=<method>
     #Fit Scale=<scale>
     #Fit Iterations=<n>
+    #CovMode: <model|data>      (only when some dataset has a #Cov:; absent with a
+                                 #Cov: = saved before modes existed -> 'data')
     #Dataset: <path>
     #Category: <category>
     #Function: <funcname>
@@ -52,6 +54,10 @@ from __future__ import annotations
 _SPECIAL_KEYS = ('x', 'params', 'choices', 'output_params', '__mpar__', 'filepaths')
 
 _MAGIC = '#XModFit Joint Fit v1'
+
+# the report note of a .jpar with a covariance but no '#CovMode:' (same wording as
+# the single-fit .xpar reload, xmodfit._apply_loaded_covariance)
+PRE_MODE_NOTE = 'saved before covariance modes existed; reloaded in data mode'
 
 
 # --------------------------------------------------------------------------- #
@@ -200,6 +206,8 @@ def format_jpar(settings, blocks, shares):
            '#Fit Method=%s' % settings.get('fit_method', ''),
            '#Fit Scale=%s' % settings.get('fit_scale', ''),
            '#Fit Iterations=%s' % settings.get('fit_iterations', '')]
+    if any(b.get('cov') for b in blocks):     # files without a covariance stay unchanged
+        out.append('#CovMode: %s' % (settings.get('cov_mode') or 'model'))
     for b in blocks:
         out.append('#Dataset: %s' % b['path'])
         out.append('#Category: %s' % b.get('category', ''))
@@ -272,6 +280,8 @@ def parse_jpar(text):
             settings['fit_scale'] = line.split('=', 1)[1]; continue
         if line.startswith('#Fit Iterations='):
             settings['fit_iterations'] = line.split('=', 1)[1]; continue
+        if line.startswith('#CovMode:'):
+            settings['cov_mode'] = line.split(':', 1)[1].strip(); continue
         if line.startswith('#Dataset:'):
             cur = {'path': line.split(':', 1)[1].strip(), 'category': '', 'func': '',
                    'xrange': '', 'fitrange': '', 'collimits': '',
@@ -329,6 +339,24 @@ def parse_jpar(text):
             cur[section].append(line)
     _finish_group()
     return {'settings': settings, 'blocks': blocks, 'shares': shares}
+
+
+def jpar_cov_mode(parsed):
+    """``(mode, note)`` for a parsed ``.jpar`` (spec 17 6.6).
+
+    '#CovMode: model|data' -> that mode, no note. A '#Cov:' with no '#CovMode:' was
+    written by the engine before covariance modes existed -> 'data' plus
+    ``PRE_MODE_NOTE`` for the next fit's report (an unknown mode value -> 'data' with
+    a note naming it). No covariance at all -> the default 'model', no note."""
+    mode = parsed.get('settings', {}).get('cov_mode')
+    if mode in ('model', 'data'):
+        return mode, None
+    if mode:
+        return 'data', ('unknown covariance mode %r in the joint-fit file; reloaded in '
+                        'data mode' % mode)
+    if any(b.get('cov') for b in parsed.get('blocks', [])):
+        return 'data', PRE_MODE_NOTE
+    return 'model', None
 
 
 def parse_par(text):

@@ -42,6 +42,12 @@ workstream generalises it and keeps that case working.
 
 ## 2. What exists today (as of `7d2549e`)
 
+> **Status 2026-11-10: implemented (XModFit side) by doc 18, commits `b55bf41`..COV T8
+> (`git log --oneline --grep "COV T"`); the list below is the pre-implementation state.
+> Verified headless by `validate_covariance.py`, `validate_covariance_gui.py`,
+> `validate_cov_stitching.py`, `validate_joint_gls.py` and the full `tests/run_all.py`. The
+> LSS_Reader side (§8) is not started.**
+
 From reading `Joint_Fit_Routines.py`, `joint_covariance.py` and `Fit_Routines.py`:
 
 - **Joint only.** Covariance exists only in `JointFit`. `Fit` (single dataset) has none.

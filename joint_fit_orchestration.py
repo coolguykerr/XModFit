@@ -35,7 +35,7 @@ import warnings
 import numpy as np
 
 from Joint_Fit_Routines import JointFit
-import joint_covariance as jcov
+from joint_fit_spec import load_or_note
 
 
 def _multi_curve_msg(name, dataset):
@@ -65,7 +65,7 @@ def _primary_curve(dataset, warn=True, name=None):
 
 def build_jointfit_from_selection(data, fnames, funcClass,
                                   cov_paths=None, raw_paths=None,
-                                  shared=None, funcs=None):
+                                  shared=None, funcs=None, covariance_mode=None):
     """Assemble a ``JointFit`` from a GUI multi-selection.
 
     Parameters
@@ -73,34 +73,44 @@ def build_jointfit_from_selection(data, fnames, funcClass,
     data      : dict         XModFit's ``self.data`` (data[fname][curve] -> arrays).
     fnames    : list[str]    selected dataset file names, in display order.
     funcClass : type         model class (e.g. XLayers). Ignored where ``funcs`` given.
-    cov_paths : dict|None    {fname: sidecar path (.npz or *_c_factors.txt)}.
-                             If a fname has a path, its covariance is attached
-                             (turns on cross-dataset GLS whitening for the fit).
+    cov_paths : dict|None    {fname: sidecar path (*.cov.json, .npz or
+                             *_c_factors.txt)}, loaded with
+                             ``covariance_core.load_covariance``. If a fname has
+                             a path, its covariance is attached (turns on
+                             cross-dataset GLS whitening for the fit); a file
+                             that cannot be loaded fits that dataset without it,
+                             with a downgrade warning (spec 17 6.5).
     raw_paths : dict|None    {fname: original 4-column data file} -- required only
                              for *_c_factors.txt sidecars (to recover the sf column).
     shared    : list|None    bare parameter names tied across datasets (Axis 1).
                              None / [] -> share nothing (Axis 2 / independent).
     funcs     : dict|None    {fname: pre-built model instance} to override funcClass.
+    covariance_mode : 'model' | 'data' | None   the JointFit's covariance mode
+                             (None keeps the JointFit default, 'model').
     """
     cov_paths = cov_paths or {}
     raw_paths = raw_paths or {}
     funcs = funcs or {}
 
     jf = JointFit()
+    if covariance_mode is not None:
+        jf.covariance_mode = covariance_mode
     multi_curve = []
     for fname in fnames:
         x, y, yerr = _primary_curve(data[fname], warn=False)
         if len(data[fname]) > 1:
             multi_curve.append(_multi_curve_msg(fname, data[fname]))
-        cov = None
+        cov, note = None, None
         cp = cov_paths.get(fname)
         if cp:
-            cov = jcov.load_dataset_cov(cp, x=x, raw_path=raw_paths.get(fname))
+            cov, note = load_or_note(fname, cp, raw_paths.get(fname))
         f = funcs.get(fname)
         if f is not None:
-            jf.add_dataset(fname, func=f, x=x, y=y, yerr=yerr, cov=cov)
+            obj = jf.add_dataset(fname, func=f, x=x, y=y, yerr=yerr, cov=cov)
         else:
-            jf.add_dataset(fname, funcClass=funcClass, x=x, y=y, yerr=yerr, cov=cov)
+            obj = jf.add_dataset(fname, funcClass=funcClass, x=x, y=y, yerr=yerr, cov=cov)
+        if note is not None:                # re-added to every fit's warnings
+            obj["cov_notes"].append(note)
     jf.build_master_params(shared=shared)
     # 01 6.14, as in JointFitSpec.compile: appended after build_master_params,
     # which resets the build-time warnings.
