@@ -310,16 +310,21 @@ harnesses and the bilayer reproduction keep working.
 - Dict-x (multi-curve) functions with a covariance: the covariance is ignored, with a
   warning **[call]**.
 - `fiterr` / `stderr` come from the whitened Jacobian, so they reflect the covariance.
-- **OPEN, for the user: χ²_red rescaling of the structural fit's errors.** lmfit's default
-  (`scale_covar=True`, never overridden in XModFit) multiplies the parameter covariance by
-  the fit's χ²_red, and the profile confidence-interval target in
-  `xmodfit.setTargetChiSqr` is scaled by the minimum χ²_red the same way. For a nonlinear
-  structural model with unmodelled error sources, χ²_red is not a reliable estimate of an
-  error scale: the degrees of freedom are not N − p, and one common scale for every point
-  is not justified. Once a covariance states the errors absolutely, the rescaling may undo
-  exactly what the covariance adds. Options: keep rescaling as today; report absolute
-  errors; or report absolute errors with χ²_red shown beside them, so a misfit is visible
-  without being folded into the error bars. The no-covariance path is unchanged either way.
+- **Error bars with a covariance attached (decided by the user, 2026-11-10): absolute,
+  with χ²_red shown beside them.** lmfit's default `scale_covar=True` (never overridden in
+  XModFit) multiplies the parameter covariance by the fit's χ²_red. For a nonlinear
+  structural model with unmodelled error sources that is not a reliable error scale (the
+  degrees of freedom are not N − p, and one common scale for every point is not
+  justified), and it would partly undo what the covariance states. So, with a covariance:
+  - least-squares fits run with `scale_covar=False`;
+  - the profile confidence interval uses an absolute threshold, χ²_min + Δχ²(CL, 1 dof)
+    (Δχ² = 1 at 68.3 %), in place of `setTargetChiSqr`'s χ²_red-scaled target **[call]**;
+  - χ²_red is reported prominently next to the errors, with a warning line when it is
+    well above 1, so a misfit is visible rather than folded into the error bars **[call:
+    the threshold is the builder's, e.g. outside the central 99 % of χ²(nfree)/nfree]**.
+  This matches what MCMC already does: weighted scales sample with `is_weighted=True`,
+  which uses the residuals as absolute and never rescales by χ²_red. Without a
+  covariance, nothing changes.
 
 ### 6.3 Joint fits (`JointFit`)
 
@@ -686,7 +691,9 @@ to fail when its feature is reverted, as was done for WS0/WS1.
 10. Outer iteration stops below 0.1 σ of parameter movement, or after 5 rounds.
 11. Saved fits without a mode field reload in `"data"` mode.
 12. The legacy `beam_fwhm` term is converted to multiplicative (W = v/y_corr).
-13. In a mixed Log joint fit, datasets without a covariance use correct log statistics.
+13. (Superseded by the Log fix in 64babd9: every Log fit now uses correct log statistics.)
 14. The covariance lives with the dataset, and `set_x` without `cov` clears it.
 15. The fallback without a covariance: for v1 it is exactly today's fit, and for legacy
     files it is `y_corr` with σ_meas.
+16. With a covariance, the profile confidence interval uses χ²_min + Δχ²(CL, 1 dof), and
+    a χ²_red warning threshold is left to the builder (§6.2).
