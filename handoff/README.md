@@ -113,6 +113,7 @@ recommendation.
 | 13 | `13-global-search.md` | the per-dataset fast scan / Global Search tool | `fastscan/`, `Tools/GlobalSearch/` |
 | 14 | `14-roadmap.md` | prioritised plan (2026-11-02): open issues, the joint-fit reporting contract, the joint-fit library | — |
 | 16 | `16-plan-ws1-joint-correctness.md` | task-by-task plan for roadmap WS1: joint-path wrong results and crashes, `JointFit.warnings` | `Joint_Fit_Routines.py`, `joint_covariance.py`, seed workers |
+| 17 | `17-spec-general-covariance.md` | design spec (awaiting approval): covariance on any dataset and any function, single and joint, plus the LSS_Reader output contract; precedes WS2 | `covariance_core.py` (new), `Fit_Routines.py`, `Joint_Fit_Routines.py`, `joint_covariance.py`, LSS_Reader |
 | 15 | `15-plan-ws0-test-safety-net.md` | task-by-task plan for roadmap WS0: shared `check()`, runner, synthetic GLS regression, baseline | `tests/` |
 
 Two research write-ups that `05-xpr-julia.md` summarises — `STAGE2_SEEDING_PLAN.md` and
