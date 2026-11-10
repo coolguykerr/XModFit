@@ -11,6 +11,14 @@ validate_covariance.py -- general covariance fitting: data model and loaders (Qt
     C8  legacy loaders (npz, c_factors + raw, bundle) and from_legacy_meta
     J1  mixed joint fit (one dataset with a covariance, one without), Linear and Log
     J2  JointFit downgrades: Log y <= 0 point, w/o error scale, v1 mismatch, Sigma_logc conflict
+    S1  single-dataset Fit == one-dataset JointFit with the same covariance (Linear, Log)
+    S2  whitened analytic Jacobian == finite differences of the whitened residual
+    S3  set_x without cov clears the covariance; residual == stock residual
+    S4  window through a region + column mask + y <= 0 in Log: C is the restricted C;
+        update_plot's pre-sliced call reproduces chi2; a mask change refactorises
+    S5  Fit downgrades (spec 6.5): w/o error, dict-x, x changed (v1, legacy), round
+        limit, indefinite term, parallel emcee runs serial
+    S6  no change without a covariance (four scales): never-attached == attached+cleared
 
     python validate_covariance.py
 """
@@ -646,6 +654,409 @@ def section_j2(cc):
               False, repr(e))
 
 
+# ------------------------------------------------------------- single Fit ----
+class _ExpModel:
+    """y = A exp(-k x) + B + C x with an analytic dydp (4 parameters, so Fit.can_jac
+    accepts it)."""
+    NAMES = ('A', 'k', 'B', 'C')
+
+    def __init__(self, x=0, A=4.0, k=1.0, B=0.6, C=0.3):
+        self.x = x
+        self.A, self.k, self.B, self.C = A, k, B, C
+        self.__mpar__ = {}
+        self.choices = {}
+        self.filepaths = {}
+        self.__fit__ = False
+        self.output_params = {'scaler_parameters': {}}
+        self.init_params()
+
+    def init_params(self):
+        from lmfit import Parameters
+        self.params = Parameters()
+        for nm in self.NAMES:
+            self.params.add(nm, value=getattr(self, nm), vary=0, min=-np.inf, max=np.inf)
+
+    def y(self):
+        x = np.asarray(self.x, float)
+        return self.A * np.exp(-self.k * x) + self.B + self.C * x
+
+    def dydp(self, names):
+        x = np.asarray(self.x, float)
+        e = np.exp(-self.k * x)
+        col = {'A': e, 'k': -self.A * x * e, 'B': np.ones_like(x), 'C': x}
+        return np.column_stack([col[n] for n in names])
+
+    def parameter_columns(self, names):
+        return list(range(len(names))) if all(n in self.NAMES for n in names) else None
+
+
+class _DictLine:
+    """Multi-curve (dict-x) a*x + b, for the dict-x downgrade."""
+
+    def __init__(self, x=0, a=2.5, b=0.3):
+        self.x = x
+        self.a, self.b = a, b
+        self.__mpar__ = {}
+        self.choices = {}
+        self.filepaths = {}
+        self.__fit__ = False
+        self.output_params = {'scaler_parameters': {}}
+        self.init_params()
+
+    def init_params(self):
+        from lmfit import Parameters
+        self.params = Parameters()
+        self.params.add('a', value=self.a, vary=0, min=-np.inf, max=np.inf)
+        self.params.add('b', value=self.b, vary=0, min=-np.inf, max=np.inf)
+
+    def y(self):
+        return {k: self.a * np.asarray(v, float) + self.b for k, v in self.x.items()}
+
+
+def _s_fit(x, y, yerr, cov=None, model=None, names=('a', 'b'), mask=None):
+    from Fit_Routines import Fit
+    from validate_joint_gls import Line
+    f = Fit(model or (lambda: Line(a=2.5, b=0.3)), x, y=y, yerr=yerr, mask=mask)
+    for nm in names:
+        f.fit_params[nm].vary = True
+    if cov is not None:
+        f.attach_covariance(cov)
+    return f
+
+
+def _s_run(f, sc, xmin=None, xmax=None, **kw):
+    x = f.x if not isinstance(f.x, dict) else list(f.x.values())[0]
+    lo = x[0] if xmin is None else xmin
+    hi = x[-1] if xmax is None else xmax
+    return f.perform_fit(lo, hi, fit_scale=sc, fit_method=kw.pop('fit_method', 'leastsq'),
+                         maxiter=kw.pop('maxiter', 2000), **kw)
+
+
+def section_s1(cc):
+    from validate_joint_gls import rel
+    X, E, ya, yb, cov = _j_data()
+    for sc in ('Linear', 'Log'):
+        jf, _ = _j_fit([('A', ya, cov)], sc)
+        f = _s_fit(X, ya, E * np.ones_like(X), cov=cov)
+        rep, _ = _s_run(f, sc)
+        dp = max(rel(f.result.params[nm].value, jf.result.params['d0_' + nm].value)
+                 for nm in ('a', 'b'))
+        check('S1 (%s) Fit params == one-dataset JointFit to 1e-8' % sc, dp < 1e-8,
+              'max rel=%.2e' % dp)
+        dc = rel(f.result.chisqr, jf.result.chisqr)
+        check('S1 (%s) Fit chi2 == one-dataset JointFit to 1e-10' % sc, dc < 1e-10,
+              'fit=%.12e joint=%.12e rel=%.2e' % (f.result.chisqr, jf.result.chisqr, dc))
+        de = max(rel(f.result.params[nm].stderr, jf.result.params['d0_' + nm].stderr)
+                 for nm in ('a', 'b'))
+        check('S1 (%s) stderr == JointFit to 1e-6 (absolute, scale_covar off)' % sc,
+              de < 1e-6 and f.fitter.scale_covar is False, 'max rel=%.2e' % de)
+        check('S1 (%s) cov_info rounds/converged == JointFit' % sc,
+              f.cov_info.get('rounds') == jf.cov_info.get('rounds') and f.cov_info.get('rounds', 0) >= 1
+              and f.cov_info.get('converged') == jf.cov_info.get('converged')
+              and f.cov_info.get('mode') == 'model' and f.cov_info.get('scale') == sc,
+              '%s vs %s' % (f.cov_info, jf.cov_info))
+        check('S1 (%s) report: Covariance block, chi2_red line, not degraded' % sc,
+              'Covariance:' in rep and 'A.cov.json' in rep and 'chi2_red =' in rep
+              and not rep.startswith('DEGRADED'), rep[-500:])
+        check('S1 (%s) chi2_stat_for_ci -> absolute chisqr' % sc,
+              f.chi2_stat_for_ci() == ('chisqr', f.result.chisqr), str(f.chi2_stat_for_ci()))
+
+
+def _s2_data(cc):
+    rng = np.random.default_rng(11)
+    x = np.linspace(0.1, 3.0, 36)
+    m = _ExpModel(x=x, A=5.0, k=1.3, B=0.5, C=0.2)
+    y0 = m.y()
+    e = 0.02 * y0
+    y = y0 + e * rng.standard_normal(len(x))
+    n = len(x)
+    w = np.zeros((n, 2))
+    w[x <= 1.5, 0] = 1.0
+    w[x > 1.5, 1] = 1.0
+    terms = [cc.CovTerm('stitch', 'multiplicative', np.array([[4e-4, 1e-4], [1e-4, 9e-4]]), w,
+                        ['r0', 'r1'], 'dataset'),
+             cc.CovTerm('bkg', 'additive', np.array([[1e-4]]), np.ones((n, 1)), None, 'dataset')]
+    return x, y, e, cc.DatasetCovariance(x.copy(), e.copy(), terms, y.copy(), source='S2.cov.json',
+                                         loader='xmodfit-covariance-v1')
+
+
+def section_s2(cc):
+    x, y, e, cov = _s2_data(cc)
+    names = list(_ExpModel.NAMES)
+    for sc in ('Linear', 'Log'):
+        f = _s_fit(x, y, e, cov=cov, model=lambda: _ExpModel(A=4.0, k=1.0, B=0.6, C=0.3),
+                   names=names)
+        check('S2 (%s) can_jac accepts the harness model' % sc, f.can_jac(f.fit_params, sc))
+        _s_run(f, sc)
+        check('S2 (%s) the fit used the analytic Jacobian' % sc, 'Dfun' in f.fitter.kws)
+        base = f.result.params.copy()
+        snap = {nm: base[nm].value for nm in names}
+
+        def pset(vals):
+            p = base.copy()
+            for nm, v in vals.items():
+                p[nm].value = v
+            return p
+        J = f.residual_jac(pset(snap), sc)
+        Jfd = np.zeros_like(J)
+        for j, nm in enumerate(names):
+            h = 1e-6 * max(abs(snap[nm]), 1e-3)
+            rp = f.residual(pset(dict(snap, **{nm: snap[nm] + h})), sc)
+            rm = f.residual(pset(dict(snap, **{nm: snap[nm] - h})), sc)
+            Jfd[:, j] = (rp - rm) / (2 * h)
+        err = np.max(np.abs(J - Jfd)) / np.max(np.abs(J))
+        check('S2 (%s) whitened residual_jac == central FD of whitened residual (< 1e-6)' % sc,
+              J.shape == Jfd.shape and err < 1e-6, 'shape %s, max rel err %.2e' % (J.shape, err))
+
+
+def section_s3(cc):
+    X, E, ya, yb, cov = _j_data()
+    ee = E * np.ones_like(X)
+    f = _s_fit(X, ya, ee, cov=cov)
+    check('S3 attach_covariance stores it', f.cov is cov)
+    f.set_x(X, y=ya, yerr=ee)
+    check('S3 set_x without cov clears the covariance', f.cov is None)
+    f0 = _s_fit(X, ya, ee)
+    for sc in ('Linear', 'Log'):
+        p = f0.fit_params.copy()
+        r, r0 = f.residual(p, sc), f0.residual(p, sc)
+        check('S3 (%s) residual after clearing == stock residual exactly' % sc,
+              np.array_equal(r, r0), 'len %d vs %d' % (len(r), len(r0)))
+    f.set_x(X, y=ya, yerr=ee, cov=cov)
+    check('S3 set_x(cov=...) attaches', f.cov is cov)
+    f.set_x(X, y=yb, yerr=ee)
+    check('S3 moving to another dataset (set_x without cov) drops it', f.cov is None)
+    try:
+        f.set_x(X, y=ya * 1.01, yerr=ee, cov=cov)
+        check('S3 set_x with a mismatching v1 covariance refuses', False, 'no error')
+    except cc.CovarianceError as ex:
+        check('S3 set_x with a mismatching v1 covariance refuses, naming y',
+              'y mismatch' in str(ex) and f.cov is None, str(ex))
+
+
+def _s4_setup(cc):
+    X, E, ya, yb, cov = _j_data()
+    y = ya.copy()
+    y[8] = -0.05                                     # y <= 0 inside the window (Log)
+    stitch = cov.terms[0]                            # multiplicative only: C(model) == C(data)
+    c4 = cc.DatasetCovariance(X.copy(), E * np.ones_like(X), [stitch], y.copy(),
+                              source='S4.cov.json', loader='xmodfit-covariance-v1')
+    mask = np.ones(len(X), bool)
+    mask[[4, 11, 25]] = False                        # three interior points
+    return X, E * np.ones_like(X), y, c4, mask
+
+
+def _s4_expected(X, xmax, mask, y):
+    i1 = int(np.where(X <= xmax)[0][-1]) + 1
+    return np.array([i for i in range(0, i1) if mask[i] and y[i] > 0])
+
+
+def section_s4(cc):
+    from validate_joint_gls import rel
+    X, ee, y, c4, mask = _s4_setup(cc)
+    xmax = 1.5                                       # region 2 is x > 1.0
+    full, _ = cc.assemble([cc.Block(c4, y, ee, y)], 'Log')
+    f = _s_fit(X, y, ee, cov=c4, mask=mask)
+    try:
+        _s_run(f, 'Log', xmax=xmax)
+        ok = True
+    except Exception as ex:
+        ok = False
+        check('S4 window + mask + y <= 0 in Log: fit completes', False, repr(ex))
+    if not ok:
+        return
+    check('S4 window + mask + y <= 0 in Log: fit completes', f.result is not None)
+    act = _s4_expected(X, xmax, mask, y)
+    L = f._cov_cache['L']
+    dev = np.max(np.abs(L @ L.T - full[np.ix_(act, act)])) if L.shape[0] == len(act) else np.inf
+    check('S4 factorised C == full Log C restricted to the active indices (1e-14)',
+          dev < 1e-14, 'L %s, expected %d active, dev %.3g' % (L.shape, len(act), dev))
+    check('S4 window really cuts region 2 and the mask is inside it',
+          X[act[-1]] > 1.0 and f.imax < len(X) - 1 and not mask[25] and 25 < f.imax)
+    chi2_fit = f.result.chisqr
+    i0, i1 = f.imin, f.imax + 1
+    f.set_x(X[i0:i1], y=y[i0:i1], yerr=ee[i0:i1], mask=mask[i0:i1],
+            cov=c4.subset(np.arange(i0, i1)))
+    r = f.residual(f.result.params, 'Log')
+    d = rel(float(np.sum(r ** 2)), chi2_fit)
+    check('S4 update_plot pre-sliced call (set_x + cov.subset + residual) == fit chi2 (1e-10)',
+          d < 1e-10 and len(r) == len(act), 'rel %.2e, len %d vs %d' % (d, len(r), len(act)))
+    f.set_x(X, y=y, yerr=ee, mask=mask, cov=c4)
+    m2 = mask.copy()
+    m2[[4, 11]] = True
+    m2[[2, 14, 17, 30]] = False
+    _s_run(f, 'Log', xmax=xmax, mask=m2)
+    act2 = _s4_expected(X, xmax, m2, y)
+    L = f._cov_cache['L']
+    dev = np.max(np.abs(L @ L.T - full[np.ix_(act2, act2)])) if L.shape[0] == len(act2) else np.inf
+    check('S4 mask change refactorises: new size and == restricted C (1e-14)',
+          len(act2) != len(act) and dev < 1e-14,
+          'L %s, expected %d, dev %.3g' % (L.shape, len(act2), dev))
+
+
+def _first(rep):
+    return rep.splitlines()[0] if rep else ''
+
+
+def section_s5(cc):
+    from validate_joint_gls import rel, K2, SIG2
+    X, E, ya, yb, cov = _j_data()
+    ee = E * np.ones_like(X)
+    # w/o error scales: ignored, residual == stock
+    for sc in ('Linear w/o error', 'Log w/o error'):
+        f = _s_fit(X, ya, ee, cov=cov)
+        f0 = _s_fit(X, ya, ee)
+        rep, _ = _s_run(f, sc)
+        _s_run(f0, sc)
+        p = f0.result.params
+        check('S5 %s: residual == stock residual exactly' % sc,
+              np.array_equal(f.residual(p, sc), f0.residual(p, sc)))
+        check('S5 %s: fit == stock fit' % sc, f.result.chisqr == f0.result.chisqr)
+        check('S5 %s: warning + DEGRADED FIT first line naming the ignored covariance' % sc,
+              any('ignored' in w for w in f.warnings) and _first(rep).startswith('DEGRADED FIT:')
+              and 'ignored' in _first(rep), _first(rep))
+        check('S5 %s: chi2_stat_for_ci stays redchi' % sc,
+              f.chi2_stat_for_ci()[0] == 'redchi')
+    # dict-x
+    xd = {'c1': X, 'c2': X}
+    f = _s_fit(xd, {'c1': ya, 'c2': yb}, {'c1': ee, 'c2': ee}, model=lambda: _DictLine())
+    f.attach_covariance(cov)
+    f0 = _s_fit(xd, {'c1': ya, 'c2': yb}, {'c1': ee, 'c2': ee}, model=lambda: _DictLine())
+    try:
+        rep, _ = _s_run(f, 'Linear')
+        _s_run(f0, 'Linear')
+        check('S5 dict-x: covariance stored, fit == stock fit',
+              f.cov is cov and f.result.chisqr == f0.result.chisqr)
+        check('S5 dict-x: warning + DEGRADED FIT first line',
+              any('dict-x' in w for w in f.warnings) and 'dict-x' in _first(rep)
+              and _first(rep).startswith('DEGRADED FIT:'), _first(rep))
+    except Exception as ex:
+        check('S5 dict-x: covariance stored, fit == stock fit', False, repr(ex))
+    # x changed after attach: v1 -> no covariance at all
+    f = _s_fit(X, ya, ee, cov=cov)
+    f.x = X * 1.01
+    rep, _ = _s_run(f, 'Linear')
+    f0 = _s_fit(X * 1.01, ya, ee)
+    _s_run(f0, 'Linear')
+    check('S5 v1 x changed: fit == stock fit without the covariance',
+          f.result.chisqr == f0.result.chisqr and f.chi2_stat_for_ci()[0] == 'redchi')
+    check('S5 v1 x changed: warning + DEGRADED FIT naming the mismatch',
+          _first(rep).startswith('DEGRADED FIT:') and 'x mismatch' in _first(rep), _first(rep))
+    # legacy: fallback is y_corr with diag sigma_meas^2
+    leg = cc.from_legacy_meta(dict(y_corr=ya, sigma_meas=ee, k_index=K2, Sigma_logc=SIG2),
+                              X, 'leg.npz', 'legacy-npz')
+    f = _s_fit(X, 0.9 * ya, 2 * ee, cov=leg)
+    f.x = X * 1.01
+    rep, _ = _s_run(f, 'Linear')
+    f0 = _s_fit(X * 1.01, ya, ee)
+    _s_run(f0, 'Linear')
+    d = rel(f.result.chisqr, f0.result.chisqr)
+    dp = max(rel(f.result.params[nm].value, f0.result.params[nm].value) for nm in ('a', 'b'))
+    check('S5 legacy x changed: fit == stock fit of y_corr with sigma_meas (1e-10)',
+          d < 1e-10 and dp < 1e-8, 'chi2 rel %.2e, params rel %.2e' % (d, dp))
+    check('S5 legacy x changed: warning + DEGRADED FIT, no correlated terms in the report',
+          _first(rep).startswith('DEGRADED FIT:') and 'x mismatch' in _first(rep)
+          and 'no terms' in rep, _first(rep))
+    # model rounds hit the limit
+    w = cov.terms[0].weights
+    big = cc.DatasetCovariance(X.copy(), ee.copy(),
+                               [cc.CovTerm('stitch', 'multiplicative',
+                                           np.array([[0.04, 0.0], [0.0, 0.09]]), w, ['r0', 'r1'])],
+                               ya.copy(), source='big.cov.json')
+    f = _s_fit(X, ya, ee, cov=big)
+    f.fit_params['a'].value, f.fit_params['b'].value = 0.5, 5.0
+    f.cov_max_rounds = 1
+    rep, _ = _s_run(f, 'Linear')
+    check('S5 round limit: fit completes, not converged, last result kept',
+          f.result is not None and f.cov_info.get('rounds') == 1
+          and f.cov_info.get('converged') is False, str(f.cov_info))
+    check('S5 round limit: warning + DEGRADED FIT',
+          any('did not converge' in w for w in f.warnings)
+          and _first(rep).startswith('DEGRADED FIT:') and 'converge' in _first(rep), _first(rep))
+    # indefinite term -> eigenvalue floor
+    bad = cc.DatasetCovariance(X.copy(), ee.copy(),
+                               [cc.CovTerm('bad', 'multiplicative',
+                                           np.array([[0.01, 0.02], [0.02, 0.01]]), w, None)],
+                               ya.copy(), source='bad.cov.json')
+    f = _s_fit(X, ya, ee, cov=bad)
+    try:
+        rep, _ = _s_run(f, 'Linear', covariance_mode='data')
+        check('S5 indefinite term: fit completes, floor warning, DEGRADED FIT',
+              any('not positive definite' in w for w in f.warnings)
+              and _first(rep).startswith('DEGRADED FIT:')
+              and 'not positive definite' in _first(rep), _first(rep))
+        check('S5 indefinite term: report jitter/floor line filled',
+              'jitter/floor: none' not in rep)
+    except Exception as ex:
+        check('S5 indefinite term: fit completes, floor warning, DEGRADED FIT', False, repr(ex))
+    # emcee with emcee_cores=4: serial (workers=1 for sampling and the seed scan)
+    import lmfit
+    import Fit_Routines as FR
+    seen = []
+
+    class _Spy(lmfit.Minimizer):
+        def __init__(self, *a, **k):
+            seen.append(('init', k.get('workers', 'absent')))
+            lmfit.Minimizer.__init__(self, *a, **k)
+
+        def minimize(self, *a, **k):
+            if k.get('method', a[0] if a else None) == 'emcee':
+                seen.append(('minimize', k.get('workers', 'absent')))
+            return lmfit.Minimizer.minimize(self, *a, **k)
+    f = _s_fit(X, ya, ee, cov=cov)
+    _s_run(f, 'Linear')
+    orig = FR.Minimizer
+    FR.Minimizer = _Spy
+    try:
+        rep, _ = _s_run(f, 'Linear', fit_method='emcee', emcee_walkers=8, emcee_steps=5,
+                        emcee_cores=4)
+        ws = [v for k, v in seen]
+        check('S5 emcee cores=4 with a covariance: minimiser received workers=1 throughout',
+              len(seen) >= 2 and all(v == 1 for v in ws), str(seen))
+        check('S5 emcee: warning + DEGRADED FIT naming serial sampling',
+              any('serial' in w for w in f.warnings) and _first(rep).startswith('DEGRADED FIT:')
+              and 'serial' in _first(rep), _first(rep))
+        check('S5 emcee: C frozen at the best-fit model, reported',
+              f.cov_info.get('mcmc_frozen') == 'model' and 'C frozen for the run' in rep,
+              str(f.cov_info))
+    except Exception as ex:
+        check('S5 emcee cores=4 with a covariance: minimiser received workers=1 throughout',
+              False, repr(ex))
+    finally:
+        FR.Minimizer = orig
+
+
+def section_s6(cc):
+    X, E, ya, yb, cov = _j_data()
+    ee = E * np.ones_like(X)
+    base = {}
+    for sc in ('Linear', 'Log', 'Linear w/o error', 'Log w/o error'):
+        fa = _s_fit(X, ya, ee)                      # never saw a covariance
+        rep, _ = _s_run(fa, sc)
+        base[sc] = (rep, {n: p.value for n, p in fa.result.params.items()}, fa.result.chisqr)
+    for sc, (rep_a, pa, ca) in base.items():
+        fb = _s_fit(X, ya, ee, cov=cov)
+        fb.set_x(X, y=ya, yerr=ee, cov=None)
+        rep_b, _ = _s_run(fb, sc)
+        pb = {n: p.value for n, p in fb.result.params.items()}
+        check('S6 (%s) attached+cleared == never attached: params, chi2, report bit-for-bit' % sc,
+              pa == pb and ca == fb.result.chisqr and rep_a == rep_b and fb.warnings == [],
+              'chi2 %r vs %r' % (ca, fb.result.chisqr))
+        # stronger: a covariance fit first, then cleared and refitted from the same start
+        fc = _s_fit(X, ya, ee, cov=cov)
+        _s_run(fc, 'Linear')
+        fc.set_x(X, y=ya, yerr=ee)
+        for nm, v in (('a', 2.5), ('b', 0.3)):
+            fc.fit_params[nm].value = v
+            fc.params[nm] = v
+        rep_c, _ = _s_run(fc, sc)
+        pc = {n: p.value for n, p in fc.result.params.items()}
+        check('S6 (%s) after a covariance fit + clear: identical to never attached' % sc,
+              pa == pc and ca == fc.result.chisqr and rep_a == rep_c
+              and fc.chi2_stat_for_ci()[0] == 'redchi',
+              'chi2 %r vs %r' % (ca, fc.result.chisqr))
+
+
 def main():
     try:
         import covariance_core as cc
@@ -659,7 +1070,8 @@ def main():
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     from PyQt5.QtWidgets import QApplication
     app = QApplication.instance() or QApplication(sys.argv)
-    for sec in (section_j1, section_j2):
+    for sec in (section_j1, section_j2, section_s6, section_s1, section_s2, section_s3,
+                section_s4, section_s5):
         try:
             sec(cc)
         except Exception as e:
