@@ -588,7 +588,7 @@ class Fit(QObject):
         self._cov_dec = None
         self._cov_fit_mode = None
         # new data -> no report state from the previous dataset survives (the GUI
-        # moves one Fit between datasets; _report/chi2_stat_for_ci read these)
+        # moves one Fit between datasets; _report reads these)
         for k, v in (('warnings', []), ('cov_info', {}), ('_cov_last_active', False),
                      ('_cov_reported', False), ('_cov_warnings', []), ('_cov_notes', []),
                      ('_cov_factor_warnings', []), ('_cov_jitter', 0.0),
@@ -623,9 +623,11 @@ class Fit(QObject):
         self.cov = cov
 
     def chi2_stat_for_ci(self):
-        """('chisqr', chi2) when a covariance was active in the last fit (absolute
+        """('chisqr', chi2) when the current result came from a covariance fit (absolute
         errors: the CI threshold is chi2_min + delta-chi2), else ('redchi', redchi)."""
-        if getattr(self, '_cov_last_active', False):
+        # keyed on the result (stamped by _cov_finish), not on transient Fit state that
+        # every set_x clears: the CI dialog may read it after update_plot's set_x
+        if getattr(self.result, '_cov_stamp', None) is not None:
             return 'chisqr', self.result.chisqr
         return 'redchi', self.result.redchi
 

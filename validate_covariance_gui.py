@@ -265,6 +265,27 @@ def section_g4(w, kA, kB, tmp):
     check('G4 missing covariance file: warning, dataset continues without one',
           kA not in w.covariances and any('not found' in m and gone in m for m in MSGS)
           and not any('Import Error' in m for m in MSGS), str(MSGS))
+    # a legacy *_c_factors.txt whose raw data file is missing
+    cf = os.path.join(tmp, 'a_c_factors.txt')
+    with open(cf, 'w') as fh:
+        fh.write('# SF c sigma(log c)\n1 1.0 0.0\n10 0.9 0.02\n'
+                 '# Sigma_logc matrix\n0 0\n0 4e-4\n')
+    raw_gone = os.path.join(tmp, 'a_raw_gone.txt')
+    xp5 = os.path.join(tmp, 'a_cf_rawmissing.xpar')
+    with open(xp5, 'w') as fh:
+        fh.write(open(xp).read().replace('#Covariance=%s\n' % os.path.abspath(GOOD),
+                                         '#Covariance=%s\n#Covariance Raw=%s\n' % (cf, raw_gone)))
+    _select(w, kA)
+    MSGS.clear()
+    try:
+        w.loadParameters(fname=xp5)
+        err = None
+    except Exception as ex:
+        err = repr(ex)
+    check('G4 legacy c_factors with a missing raw file: warning naming it, continues without',
+          err is None and kA not in w.covariances
+          and any(raw_gone in m for m in MSGS)
+          and not any('Import Error' in m for m in MSGS), '%s %s' % (err, MSGS))
     w.attach_covariance_to(kA, GOOD)
     # no covariance -> no covariance lines
     _select(w, kB)
@@ -294,7 +315,36 @@ def _ci(w, key, fpar='A', cl=68.3):
     return prof, at_min, chi2
 
 
+def _target_after_update(w, key, cl=68.3):
+    """fit -> update_plot (set_x) -> open the CI dialog -> change the CL spinbox
+    (valueChanged -> setTargetChiSqr), before any Calculate."""
+    _fit(w, key)
+    w.update_plot()
+    res = w.fit.result
+    w.confInterval_ChiSqrDist()
+    sb = w.confIntervalWidget.confIntervalSpinBox
+    sb.value = lambda: cl
+    sb.valueChanged.emit(int(cl))
+    out = (w.minchisqr, w.targetchisqr, res)
+    w.confIntervalWidget.close()
+    return out
+
+
 def section_g5(w, kA, kB):
+    from scipy.stats import chi2
+    _select(w, kA)
+    w.covModeComboBox.setCurrentText('data')
+    mn, tg, res = _target_after_update(w, kA)
+    check('G5 with a covariance, spinbox changed after update_plot: min = chisqr, '
+          'target - min == chi2.ppf(CL, 1)',
+          mn == res.chisqr and abs((tg - mn) - chi2.ppf(0.683, 1)) < 1e-12,
+          'min %r chisqr %r target %r' % (mn, res.chisqr, tg))
+    _select(w, kB)
+    mn, tg, res = _target_after_update(w, kB)
+    want = res.redchi * chi2.isf(1.0 - 0.683, res.nfree) / res.nfree
+    check("G5 without a covariance, same sequence: today's redchi formula",
+          mn == res.redchi and abs(tg - want) <= 1e-12 * want,
+          'min %r redchi %r target %r want %r' % (mn, res.redchi, tg, want))
     _select(w, kA)
     w.covModeComboBox.setCurrentText('data')
     prof, at_min, chi2 = _ci(w, kA)

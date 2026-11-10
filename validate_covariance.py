@@ -19,7 +19,8 @@ validate_covariance.py -- general covariance fitting: data model and loaders (Qt
     S5  Fit downgrades (spec 6.5): w/o error, dict-x, x changed (v1, legacy), round
         limit, indefinite term, parallel emcee runs serial
     S6  no change without a covariance (four scales): never-attached == attached+cleared
-    S7  one Fit moved between datasets: set_x resets report state; the cached L is keyed
+    S7  one Fit moved between datasets: set_x resets report state (the CI statistic
+        follows the result); the cached L is keyed
         on the active rows; dict-x + legacy dict downgrades; MCMC freezes C only at a
         result of the same data
 
@@ -1074,10 +1075,15 @@ def section_s7(cc):
         rep = f._report()
     except Exception as ex:
         rep = 'raised %r' % ex
-    check('S7a set_x to another dataset: cov_info, warnings, CI statistic and report reset',
-          f.cov_info == {} and f.warnings == [] and st == 'redchi'
+    check('S7a set_x to another dataset: cov_info, warnings and report reset',
+          f.cov_info == {} and f.warnings == []
           and 'Covariance:' not in rep and not rep.startswith('raised'),
-          'cov_info=%s warnings=%s stat=%s' % (f.cov_info, f.warnings, st))
+          'cov_info=%s warnings=%s' % (f.cov_info, f.warnings))
+    _s_run(f, 'Linear')                               # B's own fit, no covariance
+    check('S7a the CI statistic follows the result: chisqr for the covariance fit (even '
+          'after set_x), redchi for the next fit without one',
+          st == 'chisqr' and f.chi2_stat_for_ci()[0] == 'redchi',
+          'after set_x %s, after B fit %s' % (st, f.chi2_stat_for_ci()[0]))
     # (b) the cached L belongs to the active rows, not just to their count
     f = _s_fit(X, ya, ee, cov=cov)
     p = f.fit_params.copy()

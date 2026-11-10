@@ -4414,7 +4414,7 @@ class XModFit(QWidget):
         raw_path = os.path.abspath(raw_path) if raw_path else None
         try:
             cov = cc.load_covariance(path, raw_path=raw_path)
-        except cc.CovarianceError as e:
+        except (cc.CovarianceError, OSError) as e:     # e.g. a legacy loader's missing raw file
             QMessageBox.warning(self, 'Covariance', 'Covariance not attached to %s:\n%s' % (name, e),
                                 QMessageBox.Ok)
             return False
@@ -5236,7 +5236,15 @@ class XModFit(QWidget):
             self._cov_status(msg)
             QMessageBox.warning(self, 'Covariance', msg, QMessageBox.Ok)
             return
-        if not self.attach_covariance_to(key, path, raw_path=info.get('raw') or None):
+        raw = info.get('raw') or None
+        if raw is not None and not os.path.isfile(raw):
+            msg = ('Raw data file of covariance %s not found: %s%s%s continues without a '
+                   'covariance.' % (os.path.basename(path), raw, os.linesep,
+                                    os.path.basename(key.split('<>', 1)[-1])))
+            self._cov_status(msg)
+            QMessageBox.warning(self, 'Covariance', msg, QMessageBox.Ok)
+            return
+        if not self.attach_covariance_to(key, path, raw_path=raw):
             return
         mode = info.get('mode')
         if mode in ('model', 'data'):
