@@ -114,6 +114,7 @@ recommendation.
 | 14 | `14-roadmap.md` | prioritised plan (2026-11-02): open issues, the joint-fit reporting contract, the joint-fit library | — |
 | 16 | `16-plan-ws1-joint-correctness.md` | task-by-task plan for roadmap WS1: joint-path wrong results and crashes, `JointFit.warnings` | `Joint_Fit_Routines.py`, `joint_covariance.py`, seed workers |
 | 17 | `17-spec-general-covariance.md` | design spec (awaiting approval): covariance on any dataset and any function, single and joint, plus the LSS_Reader output contract; precedes WS2 | `covariance_core.py` (new), `Fit_Routines.py`, `Joint_Fit_Routines.py`, `joint_covariance.py`, LSS_Reader |
+| 18 | `18-plan-general-covariance.md` | task-by-task plan for the general covariance spec (doc 17): XModFit side, 8 tasks; task 1 = `covariance_core.py` data model and v1 JSON loader | `covariance_core.py` (new), `validate_covariance.py`, `tests/fixtures/cov_v1/` |
 | 15 | `15-plan-ws0-test-safety-net.md` | task-by-task plan for roadmap WS0: shared `check()`, runner, synthetic GLS regression, baseline | `tests/` |
 
 Two research write-ups that `05-xpr-julia.md` summarises — `STAGE2_SEEDING_PLAN.md` and

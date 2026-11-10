@@ -90,6 +90,8 @@ Each item is specified in the fix list. All are small.
 
 ## WS2 — The reporting contract: statistics the program computes for the user
 
+> The general covariance workstream (docs 17 and 18) precedes WS2.
+
 New module **`joint_fit_stats.py`** (Qt-free). It consumes a fitted `JointFit`. Every
 function returns plain data plus a `format_*` text renderer, so the GUI, the `.jpar` and
 scripts share one implementation.
