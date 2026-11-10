@@ -587,11 +587,13 @@ class Fit(QObject):
         self._cov_cache = None
         self._cov_dec = None
         self._cov_fit_mode = None
+        # new data -> no report state from the previous dataset survives (the GUI
+        # moves one Fit between datasets; _report/chi2_stat_for_ci read these)
         for k, v in (('warnings', []), ('cov_info', {}), ('_cov_last_active', False),
                      ('_cov_reported', False), ('_cov_warnings', []), ('_cov_notes', []),
-                     ('_cov_factor_warnings', []), ('_cov_jitter', 0.0)):
-            if not hasattr(self, k):
-                setattr(self, k, v)
+                     ('_cov_factor_warnings', []), ('_cov_jitter', 0.0),
+                     ('pending_warnings', [])):
+            setattr(self, k, v)
         if cov is not None:
             self.attach_covariance(cov)
 
@@ -635,7 +637,7 @@ class Fit(QObject):
         cov = getattr(self, 'cov', None)
         if cov is None:
             return None, []
-        src = cov.source or '<in memory>'
+        src = getattr(cov, 'source', None) or '<in memory>'   # a legacy dict has none
         if type(self.x) == dict:
             return None, ['covariance %s ignored: %s is a multi-curve (dict-x) dataset, '
                           'which the covariance path does not support; fitted without it'
@@ -739,13 +741,13 @@ class Fit(QObject):
             if w not in self._cov_warnings:
                 self._cov_warnings.append(w)
         self._cov_factor_warnings = list(fwarn)
-        self._cov_cache = {'key': (fit_scale, len(idx), self._cov_mode()), 'L': L, 'rows': m}
+        self._cov_cache = {'key': (fit_scale, idx.tobytes(), self._cov_mode()), 'L': L, 'rows': m}
 
     def _cov_state(self, fit_scale, idx, d, sig, f):
         """The cached (L, rows), built now if missing or keyed differently. A lazy
         build in model mode uses the model ``f`` when a term depends on it."""
         st = self._cov_cache
-        if st is None or st['key'] != (fit_scale, len(idx), self._cov_mode()):
+        if st is None or st['key'] != (fit_scale, idx.tobytes(), self._cov_mode()):
             model = self._cov_mode() == 'model' and self._cov_needs(fit_scale)
             self._cov_build(fit_scale, idx, d, sig, f if model else d)
             st = self._cov_cache
@@ -798,7 +800,8 @@ class Fit(QObject):
         if covariance_mode is not None and covariance_mode not in ('model', 'data'):
             raise ValueError("covariance_mode must be 'model' or 'data', got %r"
                              % (covariance_mode,))
-        self.warnings = []
+        self.warnings = list(getattr(self, 'pending_warnings', None) or [])   # e.g. a reload note
+        self.pending_warnings = []
         self.cov_info = {}
         self._cov_warnings = []
         self._cov_notes = []
@@ -832,6 +835,20 @@ class Fit(QObject):
         for w in self._cov_notes:
             self.warnings.append(w)
         self._cov_last_active = True
+        self.result._cov_stamp = self._cov_data_stamp()   # model-mode MCMC freezes C only on this
+
+    def _cov_data_stamp(self):
+        """Identity of the data on the active rows (x and y), for the MCMC freeze."""
+        idx = self._cov_index()
+        return hash((np.asarray(self.x, float)[idx].tobytes(),
+                     np.asarray(self.y, float)[idx].tobytes()))
+
+    def cov_residual_index(self, fit_scale):
+        """Indices into x of the rows of the whitened residual the last residual()
+        call returned, or None when no covariance applied (the GUI's residual plot)."""
+        if not self._cov_active(fit_scale) or self._cov_cache is None:
+            return None
+        return self._cov_index()[self._cov_cache['rows']]
 
     def _cov_perform_fit(self, fit_scale, fit_method, maxiter, emcee_walkers, emcee_steps,
                          emcee_burn, emcee_cores, reuse_sampler, emcee_thin, backend,
@@ -850,6 +867,12 @@ class Fit(QObject):
                     self.warnings.append(_CovDowngrade(
                         'model-based covariance needs a prior fit to freeze C at; none '
                         'exists, so MCMC uses the data-based covariance'))
+                elif getattr(self.result, '_cov_stamp', None) != self._cov_data_stamp():
+                    self.warnings.append(_CovDowngrade(
+                        'model-based covariance needs a prior covariance fit of these data '
+                        'to freeze C at; the last result belongs to other data (or was '
+                        'fitted without the covariance), so MCMC uses the data-based '
+                        'covariance'))
                 else:
                     self._cov_rebuild_model(fit_scale, self.result.params)
                     frozen = 'model'

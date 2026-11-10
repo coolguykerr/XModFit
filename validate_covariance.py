@@ -19,6 +19,9 @@ validate_covariance.py -- general covariance fitting: data model and loaders (Qt
     S5  Fit downgrades (spec 6.5): w/o error, dict-x, x changed (v1, legacy), round
         limit, indefinite term, parallel emcee runs serial
     S6  no change without a covariance (four scales): never-attached == attached+cleared
+    S7  one Fit moved between datasets: set_x resets report state; the cached L is keyed
+        on the active rows; dict-x + legacy dict downgrades; MCMC freezes C only at a
+        result of the same data
 
     python validate_covariance.py
 """
@@ -1057,6 +1060,77 @@ def section_s6(cc):
               'chi2 %r vs %r' % (ca, fc.result.chisqr))
 
 
+def section_s7(cc):
+    """GUI-driven Fit state (one Fit moved between datasets)."""
+    from validate_joint_gls import K2, SIG2
+    X, E, ya, yb, cov = _j_data()
+    ee = E * np.ones_like(X)
+    # (a) set_x to another dataset resets the report state of the covariance fit
+    f = _s_fit(X, ya, ee, cov=cov)
+    _s_run(f, 'Linear')
+    f.set_x(X, y=yb, yerr=ee)
+    st = f.chi2_stat_for_ci()[0]
+    try:
+        rep = f._report()
+    except Exception as ex:
+        rep = 'raised %r' % ex
+    check('S7a set_x to another dataset: cov_info, warnings, CI statistic and report reset',
+          f.cov_info == {} and f.warnings == [] and st == 'redchi'
+          and 'Covariance:' not in rep and not rep.startswith('raised'),
+          'cov_info=%s warnings=%s stat=%s' % (f.cov_info, f.warnings, st))
+    # (b) the cached L belongs to the active rows, not just to their count
+    f = _s_fit(X, ya, ee, cov=cov)
+    p = f.fit_params.copy()
+    f.imin, f.imax = 0, 19
+    f.residual(p, 'Linear')                           # builds and caches L on rows 0..19
+    f.imin, f.imax = 10, 29                           # same count, different rows
+    r = f.residual(p, 'Linear')
+    g = _s_fit(X, ya, ee, cov=cov)
+    g.imin, g.imax = 10, 29
+    r0 = g.residual(p, 'Linear')
+    check('S7b same-length window on other rows refactorises (== fresh Fit, 1e-12)',
+          len(r) == len(r0) and np.max(np.abs(r - r0)) < 1e-12,
+          'max dev %.3g' % (np.max(np.abs(r - r0)) if len(r) == len(r0) else np.inf))
+    # (c) a legacy dict / DatasetCovariance on dict-x data downgrades, never raises
+    xd = {'c1': X, 'c2': X}
+    leg = dict(y_corr=ya, sigma_meas=ee, k_index=K2, Sigma_logc=SIG2)
+    for lab, c in (('legacy dict', leg), ('DatasetCovariance', cov)):
+        f = _s_fit(xd, {'c1': ya, 'c2': yb}, {'c1': ee, 'c2': ee}, model=lambda: _DictLine())
+        try:
+            f.attach_covariance(c)
+            rep, _ = _s_run(f, 'Linear')
+            ok = (any('dict-x' in w for w in f.warnings)
+                  and _first(rep).startswith('DEGRADED FIT:') and 'dict-x' in _first(rep))
+            msg = _first(rep)
+        except Exception as ex:
+            ok, msg = False, repr(ex)
+        check('S7c %s on dict-x data: downgrade warning, no exception' % lab, ok, msg)
+    # (d) model-mode emcee freezes C only at a result that belongs to these data
+    f = _s_fit(X, yb, ee)
+    _s_run(f, 'Linear')                               # dataset B, no covariance
+    f.set_x(X, y=ya, yerr=ee, cov=cov)                # move to dataset A (with covariance)
+    try:
+        rep, _ = _s_run(f, 'Linear', fit_method='emcee', emcee_walkers=8, emcee_steps=5)
+        check('S7d emcee after a fit of OTHER data: C frozen in data mode, with a warning',
+              f.cov_info.get('mcmc_frozen') == 'data'
+              and any('other data' in w for w in f.warnings)
+              and 'other data' in _first(rep), '%s | %s' % (f.cov_info, _first(rep)))
+    except Exception as ex:
+        check('S7d emcee after a fit of OTHER data: C frozen in data mode, with a warning',
+              False, repr(ex))
+    f = _s_fit(X, ya, ee, cov=cov)
+    _s_run(f, 'Linear')                               # a covariance fit of A itself
+    f.set_x(X[:30], y=ya[:30], yerr=ee[:30], cov=cov.subset(np.arange(30)))
+    f.set_x(X, y=ya, yerr=ee, cov=cov)                # GUI round trip (update_plot, doFit)
+    try:
+        _s_run(f, 'Linear', fit_method='emcee', emcee_walkers=8, emcee_steps=5)
+        check('S7d emcee after a covariance fit of the same data: C frozen at the model',
+              f.cov_info.get('mcmc_frozen') == 'model', str(f.cov_info))
+    except Exception as ex:
+        check('S7d emcee after a covariance fit of the same data: C frozen at the model',
+              False, repr(ex))
+
+
 def main():
     try:
         import covariance_core as cc
@@ -1071,7 +1145,7 @@ def main():
     from PyQt5.QtWidgets import QApplication
     app = QApplication.instance() or QApplication(sys.argv)
     for sec in (section_j1, section_j2, section_s6, section_s1, section_s2, section_s3,
-                section_s4, section_s5):
+                section_s4, section_s5, section_s7):
         try:
             sec(cc)
         except Exception as e:

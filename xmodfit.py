@@ -545,6 +545,12 @@ class XModFit(QWidget):
         # Each dataset owns its own model instance + params + result, so switching
         # datasets restores that dataset's model/params/curve (see _fit_for_dataset).
         self.dataset_fits={}
+        # Per-dataset covariance (spec 17 6.2): data key -> covariance_core.DatasetCovariance,
+        # its (path, raw path), its mode ('model'|'data') and one-shot report notes.
+        self.covariances={}
+        self.covariance_paths={}
+        self.covariance_modes={}
+        self._cov_pending_notes={}
         self._template_fit=None        # model shown with no dataset selected; seeds new datasets
         self._switching_dataset=False  # re-entrancy guard for the select->tables->plot path
         self.jointFit=None             # persistent compiled JointFit (retains joint results
@@ -949,6 +955,19 @@ class XModFit(QWidget):
         self.removeDataButton.clicked.connect(self.removeData)
         self.removeDataShortCut = QShortcut(QKeySequence.Delete, self)
         self.removeDataShortCut.activated.connect(self.removeData)
+        self.dataLayoutWidget.nextRow()
+        self.loadCovButton=QPushButton('Load covariance...')
+        self.loadCovButton.setToolTip('Attach a covariance file to the selected dataset (single fits)')
+        self.dataLayoutWidget.addWidget(self.loadCovButton)
+        self.loadCovButton.clicked.connect(lambda x: self._load_covariance_dialog())
+        self.removeCovButton=QPushButton('Remove covariance')
+        self.dataLayoutWidget.addWidget(self.removeCovButton,col=1)
+        self.removeCovButton.clicked.connect(lambda x: self._remove_covariance_selected())
+        self.dataLayoutWidget.nextRow()
+        self.covStatusLabel=QLabel('')     # last covariance message (attach/remove/reload)
+        self.covStatusLabel.setWordWrap(True)
+        self.covStatusLabel.setVisible(False)
+        self.dataLayoutWidget.addWidget(self.covStatusLabel,colspan=2)
         
         
         self.dataLayoutWidget.nextRow()
@@ -993,6 +1012,17 @@ class XModFit(QWidget):
         self.fitScaleComboBox = QComboBox()
         self.fitScaleComboBox.addItems(['Linear', 'Linear w/o error', 'Log', 'Log w/o error'])
         self.fitLayoutWidget.addWidget(self.fitScaleComboBox, col=1)
+
+        self.fitLayoutWidget.nextRow()
+        covModeLabel = QLabel('Covariance Mode')
+        self.fitLayoutWidget.addWidget(covModeLabel)
+        self.covModeComboBox = QComboBox()
+        self.covModeComboBox.addItems(['model', 'data'])
+        self.covModeComboBox.setToolTip("Selected dataset's covariance: 'model' builds the intensity-"
+                                        "dependent terms from the model, 'data' from the data")
+        self.covModeComboBox.setEnabled(False)       # enabled only for a dataset with a covariance
+        self.covModeComboBox.currentTextChanged.connect(self._cov_mode_changed)
+        self.fitLayoutWidget.addWidget(self.covModeComboBox, col=1)
 
         self.fitLayoutWidget.nextRow()
         fitIterationLabel = QLabel('Fit Iterations')
@@ -1117,6 +1147,7 @@ class XModFit(QWidget):
         # CI ("Calculate Param Error") reflects THIS dataset's fit status and persists
         # across switches (the dataset's Fit keeps its result/_is_fitted).
         self._update_ci_button_state()
+        self._cov_sync_mode_combo()
         # Item B2 selection model: a PLAIN click is mutually exclusive with the joint
         # list (classic one-view behaviour -- selecting here releases the joint
         # selection). Hold Ctrl to KEEP the joint selection and overlay the individual
@@ -1614,8 +1645,9 @@ class XModFit(QWidget):
             stored = self.dataset_fits.get(txt)
             has_fit = stored is not None and (getattr(stored, '_is_fitted', False)
                                               or getattr(stored, 'result', None) is not None)
+            _cov = getattr(self, 'covariances', {}).get(txt)
             f = it.font()
-            f.setBold(bool(has_fit))
+            f.setBold(bool(has_fit) or _cov is not None)   # covariance marker: bold + tooltip
             it.setFont(f)
             it.setForeground(QBrush(QColor('#1a7f37')) if has_fit else QBrush())
             tips = []
@@ -1623,6 +1655,8 @@ class XModFit(QWidget):
                 tips.append('has individual fit')
             if txt in joint_names:
                 tips.append('in joint fit')
+            if _cov is not None:
+                tips.append('covariance: %s' % os.path.basename(_cov.source or '<in memory>'))
             it.setToolTip('; '.join(tips))
 
     def openDataDialog(self,item):
@@ -1870,7 +1904,7 @@ class XModFit(QWidget):
 
             # full-length column mask: perform_fit slices it to the x window and
             # freezes it, so len(residual) is constant across iterations
-            self.fit.set_x(x,y=y,yerr=yerr,mask=self._column_mask(fname))
+            self._cov_set_x(self.fit,fname,x,y=y,yerr=yerr,mask=self._column_mask(fname),consume_notes=True)
             #self.update_plot()
             self.oldParams=copy.copy(self.fit.params)
             self.fit_stopped=False
@@ -1968,6 +2002,8 @@ class XModFit(QWidget):
                             _cl = self._format_column_limits()
                             if _cl:
                                 header += 'Column Limits=%s\n' % _cl
+                            for _cvl in self._covariance_header_lines(fname):
+                                header += _cvl + '\n'
                             header += 'Fit Method=%s\n' % self.fitMethodComboBox.currentText()
                             header += 'Fit Scale=%s\n' % self.fitScaleComboBox.currentText()
                             header += 'Fit Iterations=%s\n' % self.fitIterationLineEdit.text()
@@ -2157,6 +2193,33 @@ class XModFit(QWidget):
         self._refresh_data_labels()
 
 
+    def _cov_set_x(self, fit, data_key, x, slice_=None, consume_notes=False, **kw):
+        """``fit.set_x(x, **kw)`` with ``data_key``'s covariance (spec 17 6.2). The
+        covariance belongs to the dataset: it is passed on every call (set_x without
+        it clears it), only for single-curve x, restricted to ``slice_`` when the
+        arrays are pre-sliced (update_plot), and the dataset's mode is set on the Fit
+        first so residual() outside perform_fit uses it too. ``consume_notes`` hands
+        the dataset's one-shot report notes to this fit. No covariance -> exactly
+        ``fit.set_x(x, **kw)``."""
+        cov = getattr(self, 'covariances', {}).get(data_key)
+        if cov is None or type(x) == dict:
+            fit.set_x(x, **kw)
+            return
+        import covariance_core as cc
+        fit.covariance_mode = self.covariance_modes.get(data_key, 'model')
+        try:
+            if slice_ is not None:
+                cov = cov.subset(np.arange(slice_[0], cov.n if slice_[1] is None else slice_[1]))
+            fit.set_x(x, cov=cov, **kw)
+        except (cc.CovarianceError, IndexError):
+            # the data changed since the covariance was attached (fit-time row of
+            # spec 6.5): keep it on the Fit unchecked, so the fit runs without it
+            # and its report says why
+            fit.set_x(x, **kw)
+            fit.cov = cov
+        if consume_notes:
+            fit.pending_warnings = list(self._cov_pending_notes.pop(data_key, []))
+
     def disconnect_fit_function(self):
         try:
             self.fit.functionCalled.disconnect()
@@ -2201,7 +2264,7 @@ class XModFit(QWidget):
                 yerr = {k: d[k]['yerr'] for k in d}
             else:
                 k0 = list(d.keys())[0]; x = d[k0]['x']; y = d[k0]['y']; yerr = d[k0]['yerr']
-            self.fit.set_x(x, y=y, yerr=yerr, mask=self._column_mask(key))
+            self._cov_set_x(self.fit, key, x, y=y, yerr=yerr, mask=self._column_mask(key))
             self.fit_scale = self.fitScaleComboBox.currentText()
             self.fit.perform_fit(self.xmin[key], self.xmax[key], fit_scale=self.fit_scale,
                                  fit_method='leastsq', maxiter=1000)
@@ -2301,8 +2364,20 @@ class XModFit(QWidget):
     def stopErrCalc(self):
         self.stopCalc=True
 
+    def _ci_stat(self):
+        """('chisqr'|'redchi', value) the CI profile uses for the last fit: chisqr when a
+        covariance was active in it (absolute errors, spec 17 6.2), else today's redchi."""
+        stat = getattr(self.fit, 'chi2_stat_for_ci', None)
+        return stat() if stat is not None else ('redchi', self.fit.result.redchi)
+
     def setTargetChiSqr(self):
         self.confInterval = self.confIntervalWidget.confIntervalSpinBox.value()
+        if self._ci_stat()[0] == 'chisqr':   # covariance: absolute chi2_min + dchi2(CL, 1 dof)
+            self.minchisqr = self.fit.result.chisqr
+            self.confIntervalWidget.minChiSqrLineEdit.setText(self.format % self.minchisqr)
+            self.targetchisqr = self.minchisqr + chi2.ppf(self.confInterval * 0.01, 1)
+            self.confIntervalWidget.targetChiSqrLineEdit.setText(self.format % self.targetchisqr)
+            return
         self.minchisqr = self.fit.result.redchi
         self.confIntervalWidget.minChiSqrLineEdit.setText(self.format % self.minchisqr)
         self.targetchisqr = self.fit.result.redchi * chi2.isf((1.0 - self.confInterval * 0.01),
@@ -2352,7 +2427,7 @@ class XModFit(QWidget):
         fit_report, mesg = self.fit.perform_fit(xmin, xmax, fit_scale=self.fit_scale,
                                                 fit_method=self.fit_method,
                                                 maxiter=int(self.fitIterationLineEdit.text()))
-        if self.fit.result.redchi>self.targetchisqr or self.fit.fit_params[fpar].min>vmin:
+        if self._ci_stat()[1]>self.targetchisqr or self.fit.fit_params[fpar].min>vmin:
             left_limit_ok=True
         else:
             left_limit_ok=False
@@ -2362,7 +2437,7 @@ class XModFit(QWidget):
         fit_report, mesg = self.fit.perform_fit(xmin, xmax, fit_scale=self.fit_scale,
                                                 fit_method=self.fit_method,
                                                 maxiter=int(self.fitIterationLineEdit.text()))
-        if self.fit.result.redchi>self.targetchisqr or self.fit.fit_params[fpar].max<vmax:
+        if self._ci_stat()[1]>self.targetchisqr or self.fit.fit_params[fpar].max<vmax:
             right_limit_ok=True
         else:
             right_limit_ok=False
@@ -2385,7 +2460,7 @@ class XModFit(QWidget):
         fit_report, mesg =self.fit.perform_fit(xmin, xmax, fit_scale=self.fit_scale, fit_method=self.fit_method,
                              maxiter=int(self.fitIterationLineEdit.text()))
         self.setTargetChiSqr()
-        redchi_r.append([self.fit.fit_params[fpar].value, self.fit.result.redchi])
+        redchi_r.append([self.fit.fit_params[fpar].value, self._ci_stat()[1]])
         self.errProgressBars[fpar].setValue(1)
         value=self.fit.result.params[fpar].value
         vmax = value*(1.0+float(self.confIntervalWidget.fitParamTableWidget.item(row, 3).text())/100.0)
@@ -2410,7 +2485,7 @@ class XModFit(QWidget):
                                                         fit_method=self.fit_method,
                                                         maxiter=int(self.fitIterationLineEdit.text()))
                 if self.fit.result.success:
-                    redchi_r.append([parvalue,self.fit.result.redchi])
+                    redchi_r.append([parvalue,self._ci_stat()[1]])
                 i+=1
                 self.errProgressBars[fpar].setValue(i)
                 QApplication.processEvents()
@@ -2433,7 +2508,7 @@ class XModFit(QWidget):
                                                         fit_method=self.fit_method,
                                                         maxiter=int(self.fitIterationLineEdit.text()))
                 if self.fit.result.success:
-                    redchi_l.append([parvalue, self.fit.result.redchi])
+                    redchi_l.append([parvalue, self._ci_stat()[1]])
                 i+=1
                 self.errProgressBars[fpar].setValue(i)
                 QApplication.processEvents()
@@ -4287,6 +4362,7 @@ class XModFit(QWidget):
             del self.data[txt]
             del self.meta[txt]
             self.dataset_fits.pop(txt, None)   # drop this dataset's remembered fit
+            self._cov_forget(txt)              # and its covariance
             if hasattr(self, 'jointFitPanel'):
                 self.jointFitPanel.sync_available_datasets(list(self.data.keys()))
             del self.xmin[txt]
@@ -4310,6 +4386,125 @@ class XModFit(QWidget):
             
         
         
+    # ------------------------------------------------ covariance (single fits) ---
+    def _cov_status(self, msg):
+        """The data dock's covariance status line (this widget has no status bar)."""
+        lab = getattr(self, 'covStatusLabel', None)
+        if lab is not None:
+            lab.setText(msg)
+            lab.setVisible(bool(msg))
+
+    def attach_covariance_to(self, data_key, path, raw_path=None):
+        """Load the covariance at ``path`` (``raw_path``: a legacy *_c_factors.txt's raw
+        data file) and attach it to dataset ``data_key``. Refuses, with a message, a
+        multi-curve dataset, an unreadable file and any x/y mismatch; warns when the
+        file was made for a differently named data file. Returns True if attached."""
+        import covariance_core as cc
+        name = os.path.basename(data_key.split('<>', 1)[-1])
+        if data_key not in self.data:
+            QMessageBox.warning(self, 'Covariance', 'No dataset %s is loaded.' % data_key, QMessageBox.Ok)
+            return False
+        if len(self.data[data_key].keys()) > 1:
+            QMessageBox.warning(self, 'Covariance',
+                                'Covariance not attached: %s is a multi-curve dataset (%s); a '
+                                'covariance can only be attached to a single-curve dataset.'
+                                % (name, ', '.join(self.data[data_key].keys())), QMessageBox.Ok)
+            return False
+        path = os.path.abspath(path)
+        raw_path = os.path.abspath(raw_path) if raw_path else None
+        try:
+            cov = cc.load_covariance(path, raw_path=raw_path)
+        except cc.CovarianceError as e:
+            QMessageBox.warning(self, 'Covariance', 'Covariance not attached to %s:\n%s' % (name, e),
+                                QMessageBox.Ok)
+            return False
+        d = self.data[data_key][list(self.data[data_key].keys())[0]]
+        probs = cov.match_problems(np.asarray(d['x'], float), np.asarray(d['y'], float))
+        if cov.n != len(d['x']) and not probs:
+            probs = ['covariance has %d points but the dataset has %d' % (cov.n, len(d['x']))]
+        if probs:
+            QMessageBox.warning(self, 'Covariance',
+                                'Covariance %s does not match dataset %s; not attached:\n%s'
+                                % (os.path.basename(path), name, '\n'.join(probs)), QMessageBox.Ok)
+            return False
+        self.covariances[data_key] = cov
+        self.covariance_paths[data_key] = (path, raw_path)
+        self.covariance_modes.setdefault(data_key, 'model')
+        if cov.data_file and os.path.basename(cov.data_file) != name:
+            msg = ('Covariance %s was made for data file %s but is attached to %s (x and y '
+                   'match within rtol 1e-4).' % (os.path.basename(path),
+                                                 os.path.basename(cov.data_file), name))
+            self._cov_status(msg)
+            QMessageBox.warning(self, 'Covariance', msg, QMessageBox.Ok)
+        else:
+            self._cov_status('Covariance %s attached to %s.' % (os.path.basename(path), name))
+        self._refresh_data_labels()
+        self._cov_sync_mode_combo()
+        return True
+
+    def remove_covariance_from(self, data_key):
+        """Detach dataset ``data_key``'s covariance (its next fit runs without one)."""
+        had = data_key in self.covariances
+        self._cov_forget(data_key)
+        if had:
+            self._cov_status('Covariance removed from %s.'
+                             % os.path.basename(data_key.split('<>', 1)[-1]))
+        self._refresh_data_labels()
+        self._cov_sync_mode_combo()
+
+    def _cov_forget(self, data_key):
+        for d in (self.covariances, self.covariance_paths, self.covariance_modes,
+                  self._cov_pending_notes):
+            d.pop(data_key, None)
+
+    def _load_covariance_dialog(self):
+        sel = [it.text() for it in self.dataListWidget.selectedItems()]
+        if len(sel) != 1:
+            QMessageBox.warning(self, 'Covariance', 'Select one dataset to attach a covariance to.',
+                                QMessageBox.Ok)
+            return
+        name = os.path.basename(sel[0].split('<>', 1)[-1])
+        path = QFileDialog.getOpenFileName(self, caption='Load covariance for %s' % name,
+                                           directory=self.curDir,
+                                           filter='Covariance files (*.json *.npz *_c_factors.txt);;'
+                                                  'All files (*)')[0]
+        if not path:
+            return
+        raw = None
+        if path.endswith('_c_factors.txt'):
+            raw = QFileDialog.getOpenFileName(self, caption='Raw 4-column data file for %s'
+                                              % os.path.basename(path),
+                                              directory=os.path.dirname(path))[0] or None
+        if self.attach_covariance_to(sel[0], path, raw_path=raw):
+            self.update_plot()
+
+    def _remove_covariance_selected(self):
+        sel = [it.text() for it in self.dataListWidget.selectedItems()]
+        for key in sel:
+            self.remove_covariance_from(key)
+        if sel:
+            self.update_plot()
+
+    def _cov_sync_mode_combo(self):
+        """Show the selected dataset's covariance mode; disabled without a covariance."""
+        cb = getattr(self, 'covModeComboBox', None)
+        if cb is None:
+            return
+        key = self.sfnames[-1] if getattr(self, 'sfnames', None) else None
+        has = key in self.covariances
+        cb.blockSignals(True)
+        cb.setCurrentText(self.covariance_modes.get(key, 'model') if has else 'model')
+        cb.blockSignals(False)
+        cb.setEnabled(has)
+
+    def _cov_mode_changed(self, mode):
+        key = self.sfnames[-1] if getattr(self, 'sfnames', None) else None
+        if key not in self.covariances:
+            return
+        self.covariance_modes[key] = mode
+        if getattr(self, 'fit', None) is not None and not hasattr(self.fit, 'objectives'):
+            self.fit.covariance_mode = mode
+
     def create_paramDock(self):
         self.parSplitter=QSplitter(Qt.Vertical)
 
@@ -4944,6 +5139,8 @@ class XModFit(QWidget):
             _cl=self._format_column_limits()
             if _cl:                    # only when a non-x limit exists, so
                 fh.write('#Column Limits=%s\n'%_cl)   # old files stay identical
+            for _cvl in self._covariance_header_lines():   # likewise only with a covariance
+                fh.write('#%s\n'%_cvl)
             fh.write('#Fit Method=%s\n'%self.fitMethodComboBox.currentText())
             fh.write('#Fit Scale=%s\n'%self.fitScaleComboBox.currentText())
             fh.write('#Fit Iterations=%s\n'%self.fitIterationLineEdit.text())
@@ -5002,6 +5199,55 @@ class XModFit(QWidget):
             fh.close()
         
         
+    def _covariance_header_lines(self, data_key=None):
+        """The .xpar / fit-result header lines (without '#') for ``data_key``'s
+        covariance (default: the selected dataset); [] without one, so files written
+        without a covariance stay identical."""
+        if data_key is None:
+            data_key = self.sfnames[-1] if getattr(self, 'sfnames', None) else None
+        cov = getattr(self, 'covariances', {}).get(data_key)
+        if cov is None:
+            return []
+        path, raw = self.covariance_paths.get(data_key, (cov.source, None))
+        out = ['Covariance=%s' % path]
+        if raw:
+            out.append('Covariance Raw=%s' % raw)
+        out.append('Covariance Mode=%s' % self.covariance_modes.get(data_key, 'model'))
+        return out
+
+    def _apply_loaded_covariance(self, info):
+        """Reattach the covariance named in a loaded .xpar to the selected dataset.
+        No mode line -> the file predates covariance modes: data mode, and the next
+        fit's report says so. A missing or non-matching file warns and the dataset
+        continues without a covariance (spec 17 6.5, 6.6)."""
+        path = info.get('path')
+        if not path:
+            return
+        key = self.sfnames[-1] if getattr(self, 'sfnames', None) else None
+        if key is None:
+            msg = ('The parameter file names covariance %s, but no dataset is selected; '
+                   'loaded without it.' % path)
+            self._cov_status(msg)
+            QMessageBox.warning(self, 'Covariance', msg, QMessageBox.Ok)
+            return
+        if not os.path.isfile(path):
+            msg = ('Covariance file not found: %s\n%s continues without a covariance.'
+                   % (path, os.path.basename(key.split('<>', 1)[-1])))
+            self._cov_status(msg)
+            QMessageBox.warning(self, 'Covariance', msg, QMessageBox.Ok)
+            return
+        if not self.attach_covariance_to(key, path, raw_path=info.get('raw') or None):
+            return
+        mode = info.get('mode')
+        if mode in ('model', 'data'):
+            self.covariance_modes[key] = mode
+        else:
+            self.covariance_modes[key] = 'data'
+            self._cov_pending_notes[key] = [
+                'saved before covariance modes existed; reloaded in data mode' if mode is None
+                else 'unknown covariance mode %r in the parameter file; reloaded in data mode' % mode]
+        self._cov_sync_mode_combo()
+
     def loadParameters(self,fname=None):
         """
         loads parameters from a parameter file
@@ -5034,6 +5280,7 @@ class XModFit(QWidget):
                     lnum=3
                     sfline=None
                     mfline=None
+                    _cov_lines={}
                     for line in lines[3:]:
                         if '#Xrange=' in line:
                             self.xLineEdit.setText(line.strip().split('=')[1])
@@ -5043,6 +5290,15 @@ class XModFit(QWidget):
                         elif '#Column Limits=' in line:
                             # split('=',1): the value can contain '=' in future
                             self._apply_column_limits(line.strip().split('=',1)[1])
+                            fline=lnum+1
+                        elif '#Covariance=' in line:
+                            _cov_lines['path']=line.strip().split('=',1)[1]
+                            fline=lnum+1
+                        elif '#Covariance Raw=' in line:
+                            _cov_lines['raw']=line.strip().split('=',1)[1]
+                            fline=lnum+1
+                        elif '#Covariance Mode=' in line:
+                            _cov_lines['mode']=line.strip().split('=',1)[1]
                             fline=lnum+1
                         elif '#Fit Method=' in line:
                             self.fitMethodComboBox.setCurrentText(line.strip().split('=')[1])
@@ -5188,6 +5444,8 @@ class XModFit(QWidget):
                     # Mark the just-loaded dataset as fitted (green) immediately, rather
                     # than only after the user reselects it.
                     self._refresh_data_labels()
+                    if _cov_lines:
+                        self._apply_loaded_covariance(_cov_lines)
                 else:
                     QMessageBox.warning(self, 'File error',
                                         'This parameter file does not belong to function: %s' % func, QMessageBox.Ok)
@@ -6259,9 +6517,9 @@ class XModFit(QWidget):
             if len(self.dataListWidget.selectedItems()) > 0:
                 # x/y/yerr were pre-sliced to [xmin,xmax] above, so the mask has
                 # to be sliced identically (see Fit.imask_for on the two paths)
-                self.fit.set_x(x, y=y, yerr=yerr,
-                               mask=self._column_mask(self.sfnames[-1],
-                                                      slice_=(_pi0, _pi1)))
+                self._cov_set_x(self.fit, self.sfnames[-1], x, y=y, yerr=yerr,
+                                mask=self._column_mask(self.sfnames[-1],
+                                                       slice_=(_pi0, _pi1)), slice_=(_pi0, _pi1))
                 try:
                     residual = self.fit.residual(self.fit.fit_params, self.fitScaleComboBox.currentText())
 
@@ -6311,6 +6569,8 @@ class XModFit(QWidget):
                                                                      'y': (self.fit.y[
                                                                            self.fit.imin:self.fit.imax + 1] - self.fit.yfit) / self.fit.yerr[
                                                                                                                                self.fit.imin:self.fit.imax + 1]}
+                    if getattr(self.fit, 'cov', None) is not None:   # plot the whitened residual
+                        self._cov_whitened_residuals(locals().get('residual'))
                 # else:
                 #     self.fit.params['output_params']['Residuals'] = {'x': self.fit.x[self.fit.imin:self.fit.imax + 1],
                 #                                                      'y':np.zeros_like(self.fit.x[self.fit.imin:self.fit.imax + 1])}
@@ -6393,6 +6653,18 @@ class XModFit(QWidget):
         self.plotWidget.Plot(self._legend_order(pfnames))
         # QApplication.processEvents()
         QApplication.processEvents()
+
+    def _cov_whitened_residuals(self, residual):
+        """With a covariance active, the plotted residual is the whitened one the fit
+        minimised, against x of its rows (spec 17 6.2)."""
+        try:
+            idx = self.fit.cov_residual_index(self.fitScaleComboBox.currentText())
+        except Exception:
+            idx = None
+        if idx is None or residual is None or len(idx) != len(residual):
+            return
+        self.fit.params['output_params']['Residuals'] = {'x': np.asarray(self.fit.x)[idx],
+                                                         'y': np.asarray(residual)}
 
     def _eval_individual_curve(self, name):
         """(x, y, color) for dataset ``name``'s stored INDIVIDUAL fit curve, or None.
