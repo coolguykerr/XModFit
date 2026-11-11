@@ -38,6 +38,7 @@ no-op shim stands in for QObject / pyqtSignal so the numerical core runs under
 plain Python for validation.
 """
 
+import contextlib
 import numpy as np
 from lmfit import fit_report, Minimizer, Parameters
 from Fit_Routines import _window_indices   # one definition of the x window
@@ -168,6 +169,12 @@ class JointFit(QObject):
         self._priors = {}
         # human-readable notes about the fit set-up (see _add_run_warning)
         self.warnings = []
+        # WS2 reporting plumbing: quiet-evaluation flag, the masked blocks of the
+        # last _build_chol, and the scale / method of the last perform_fit
+        self._quiet = False
+        self._last_blocks = None
+        self._fit_scale = None
+        self._fit_method = None
 
     # ----------------------------------------------------------------- #
     #  dataset registration
@@ -642,6 +649,52 @@ class JointFit(QObject):
         residual()'s assembly, or the whitening rows silently misalign with the
         data rows -- no exception, no warning, just a plausible wrong answer."""
         scale = 'Log' if fit_scale == 'Log' else 'Linear'
+        blocks, ycat, scat, icat = self._raw_blocks(model)
+
+        if model and self._cov_mask is not None and len(self._cov_mask) == len(ycat):
+            # the mask is frozen once per fit (rule 4): a model intensity that is
+            # unusable on an active row falls back to the data there, with a note
+            m = self._cov_mask
+            self._cov_warnings.extend(self._substitute_unusable(blocks, icat, m, scale))
+        else:
+            m = np.isfinite(ycat) & np.isfinite(scat) & (scat > 0) & np.isfinite(icat)
+            if scale == 'Log':
+                with np.errstate(invalid='ignore'):
+                    m &= (ycat > 0) & (icat > 0)
+            self._cov_mask = m
+            off, dropped = 0, []
+            for b in blocks:
+                nb = len(b.y)
+                nd = int(nb - m[off:off + nb].sum())
+                if nd:
+                    dropped.append('%s: %d' % (b.name, nd))
+                off += nb
+            if dropped:
+                self._cov_info_notes.append(
+                    'covariance fit (%s): points excluded (non-finite, sigma <= 0%s): %s'
+                    % (scale, ' or y <= 0' if scale == 'Log' else '', ', '.join(dropped)))
+
+        masked = self._mask_blocks(blocks, m)
+        self._last_blocks = masked
+        C, awarn = cc.assemble(masked, scale)
+        self._L, fwarn = cc.factorize(C)
+        self._jitter = 0.0
+        if any('jitter' in w for w in fwarn):
+            self._jitter = float(jcov.cholesky_with_jitter(C)[1])
+        for w in awarn + fwarn:
+            if w not in self._cov_warnings:
+                self._cov_warnings.append(w)
+        self._cov_factor_warnings = list(fwarn)
+        self._cov_scale = fit_scale
+        self._cov_ready = True
+
+    # ----------------------------------------------------------------- #
+    #  quiet evaluation, row ranges, covariance blocks (WS2 reporting)
+    # ----------------------------------------------------------------- #
+    def _raw_blocks(self, model):
+        """One ``Block`` per objective over its active points (no covariance mask
+        yet) and the concatenated y, sigma and intensity. ``model=False`` takes the
+        data as the intensity, ``model=True`` the model at the pushed parameters."""
         yfits = self.evaluate() if model else None
         blocks, ycat, scat, icat = [], [], [], []
         for k, obj in enumerate(self.objectives):
@@ -663,43 +716,30 @@ class JointFit(QObject):
             scat.append(yerr if cs is None else np.asarray(cs.sigma_meas, dtype=float))
             icat.append(inten)
         ycat, scat, icat = (np.concatenate(a) for a in (ycat, scat, icat))
+        return blocks, ycat, scat, icat
 
-        if model and self._cov_mask is not None and len(self._cov_mask) == len(ycat):
-            # the mask is frozen once per fit (rule 4): a model intensity that is
-            # unusable on an active row falls back to the data there, with a note
-            m = self._cov_mask
-            bad = m & ~np.isfinite(icat)
-            if scale == 'Log':
+    @staticmethod
+    def _substitute_unusable(blocks, icat, m, scale):
+        """Where the frozen mask keeps a row whose model intensity is non-finite
+        (or <= 0 in Log), put the data there. Mutates ``blocks``; returns the notes."""
+        bad = m & ~np.isfinite(icat)
+        if scale == 'Log':
+            with np.errstate(invalid='ignore'):
                 bad |= m & (icat <= 0)
-            if bad.any():
-                self._cov_warnings.append(
-                    'model intensity not usable at %d active points (non-finite%s); '
-                    'the data are used there' % (int(bad.sum()),
-                                                 ' or <= 0' if scale == 'Log' else ''))
-                off = 0
-                for b in blocks:
-                    nb = len(b.y)
-                    sub = bad[off:off + nb]
-                    b.intensity = np.where(sub, b.y, b.intensity)
-                    off += nb
-        else:
-            m = np.isfinite(ycat) & np.isfinite(scat) & (scat > 0) & np.isfinite(icat)
-            if scale == 'Log':
-                with np.errstate(invalid='ignore'):
-                    m &= (ycat > 0) & (icat > 0)
-            self._cov_mask = m
-            off, dropped = 0, []
-            for b in blocks:
-                nb = len(b.y)
-                nd = int(nb - m[off:off + nb].sum())
-                if nd:
-                    dropped.append('%s: %d' % (b.name, nd))
-                off += nb
-            if dropped:
-                self._cov_info_notes.append(
-                    'covariance fit (%s): points excluded (non-finite, sigma <= 0%s): %s'
-                    % (scale, ' or y <= 0' if scale == 'Log' else '', ', '.join(dropped)))
+        if not bad.any():
+            return []
+        off = 0
+        for b in blocks:
+            nb = len(b.y)
+            sub = bad[off:off + nb]
+            b.intensity = np.where(sub, b.y, b.intensity)
+            off += nb
+        return ['model intensity not usable at %d active points (non-finite%s); '
+                'the data are used there' % (int(bad.sum()),
+                                             ' or <= 0' if scale == 'Log' else '')]
 
+    @staticmethod
+    def _mask_blocks(blocks, m):
         masked, off = [], 0
         for b in blocks:
             nb = len(b.y)
@@ -708,17 +748,97 @@ class JointFit(QObject):
             masked.append(cc.Block(None if b.cov is None else b.cov.subset(keep),
                                    b.y[keep], b.yerr[keep], np.asarray(b.intensity)[keep],
                                    name=b.name))
-        C, awarn = cc.assemble(masked, scale)
-        self._L, fwarn = cc.factorize(C)
-        self._jitter = 0.0
-        if any('jitter' in w for w in fwarn):
-            self._jitter = float(jcov.cholesky_with_jitter(C)[1])
-        for w in awarn + fwarn:
-            if w not in self._cov_warnings:
-                self._cov_warnings.append(w)
-        self._cov_factor_warnings = list(fwarn)
-        self._cov_scale = fit_scale
-        self._cov_ready = True
+        return masked
+
+    def model_blocks(self, params, fit_scale):
+        """The masked blocks ``_build_chol(fit_scale, model=True)`` would assemble at
+        ``params`` (model intensity; data substituted where it is unusable) and the
+        substitution notes. Touches no fit state: not ``_L``, ``_cov_mask``,
+        ``_cov_warnings``, ``_jitter`` nor any model (evaluated inside ``quiet()``)."""
+        if self._cov_mask is None:
+            raise RuntimeError("model_blocks needs the frozen covariance mask "
+                               "(run a covariance fit first)")
+        scale = 'Log' if fit_scale == 'Log' else 'Linear'
+        with self.quiet():
+            self.push_params(params)
+            blocks, ycat, _scat, icat = self._raw_blocks(True)
+        m = self._cov_mask
+        if len(m) != len(ycat):
+            raise RuntimeError("covariance mask length %d != active rows %d"
+                               % (len(m), len(ycat)))
+        notes = self._substitute_unusable(blocks, icat, m, scale)
+        return self._mask_blocks(blocks, m), notes
+
+    @contextlib.contextmanager
+    def quiet(self):
+        """Evaluate without side effects: ``residual`` neither counts ``Niter`` nor
+        emits ``functionCalled``; on exit (also on an exception) ``Niter``, every
+        model's ``x`` / ``__fit__``, the pushed parameter values (attribute and
+        ``params`` entry) and ``yfit_masked`` are restored."""
+        _missing = object()
+        saved = []
+        for i, obj in enumerate(self.objectives):
+            func = obj["func"]
+            pv = {}
+            for targets in self.param_map.values():
+                for (idx, lkey) in targets:
+                    if idx == i and lkey not in pv:
+                        lp = func.params[lkey]
+                        pv[lkey] = (func.__dict__.get(lkey, _missing), lp.value, lp.expr)
+            saved.append((getattr(func, 'x', _missing), getattr(func, '__fit__', _missing),
+                          pv, obj.get("yfit_masked", _missing)))
+        n0, q0 = self.Niter, self._quiet
+        self._quiet = True
+        try:
+            yield self
+        finally:
+            self._quiet = q0
+            self.Niter = n0
+            for obj, (x, fitflag, pv, ym) in zip(self.objectives, saved):
+                func = obj["func"]
+                if x is not _missing:
+                    func.x = x
+                if fitflag is not _missing:
+                    func.__fit__ = fitflag
+                for lkey, (attr, val, expr) in pv.items():
+                    if attr is _missing:
+                        func.__dict__.pop(lkey, None)
+                    else:
+                        func.__dict__[lkey] = attr
+                    lp = func.params[lkey]
+                    lp.value = val
+                    lp.expr = expr
+                if ym is _missing:
+                    obj.pop("yfit_masked", None)
+                else:
+                    obj["yfit_masked"] = ym
+
+    def prior_rows(self, params):
+        """The Gaussian-prior residual elements ``(value - mu)/sigma`` (length 0
+        without priors)."""
+        return np.asarray([(params[k].value - mu) / sig
+                           for k, (mu, sig) in self._priors.items()], dtype=float)
+
+    def row_ranges(self):
+        """Per objective, in fit order, the half-open ``(start, stop)`` of its rows in
+        the residual vector (prior rows excluded)."""
+        cov_path = self._use_cov and self._fit_scale in ('Linear', 'Log')
+        if cov_path:
+            if self._cov_mask is None:
+                raise RuntimeError("row_ranges on the covariance path needs the frozen "
+                                   "covariance mask (run a covariance fit first)")
+            sizes, off = [], 0
+            for k in range(len(self.objectives)):
+                n = len(self.active_index(k))
+                sizes.append(int(np.count_nonzero(self._cov_mask[off:off + n])))
+                off += n
+        else:
+            sizes = [len(self.active_index(k)) for k in range(len(self.objectives))]
+        out, a = [], 0
+        for n in sizes:
+            out.append((a, a + n))
+            a += n
+        return out
 
     # ----------------------------------------------------------------- #
     #  residual
@@ -790,12 +910,11 @@ class JointFit(QObject):
         # A prior constrains a PARAMETER, not a data point, so it is appended
         # after any whitening (it must not enter the data covariance C).
         if self._priors:
-            extra = [(params[k].value - mu) / sig
-                     for k, (mu, sig) in self._priors.items()]
-            y = np.concatenate([y, np.asarray(extra, dtype=float)])
+            y = np.concatenate([y, self.prior_rows(params)])
 
-        self.Niter += 1
-        self.functionCalled.emit(params, self.Niter, y, fit_scale)
+        if not self._quiet:
+            self.Niter += 1
+            self.functionCalled.emit(params, self.Niter, y, fit_scale)
         return y
 
     def callback(self, params, iterations, residual, fit_scale):
@@ -1296,6 +1415,8 @@ class JointFit(QObject):
                 "(error-weighted) for a comparable joint objective")
         self._set_ranges(xmin, xmax, ranges=ranges)
         self._L = None                      # force Cholesky rebuild for new range
+        self._last_blocks = None
+        self._fit_scale, self._fit_method = fit_scale, fit_method
         self._cov_mask = None               # refrozen by the first build below
         self._cov_ready = False
         needs, frozen = False, 'data'
