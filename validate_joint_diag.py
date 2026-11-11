@@ -1,5 +1,5 @@
 """
-validate_joint_diag.py -- WS2 reporting harness, sections D (Task 6), later I, F, L.
+validate_joint_diag.py -- WS2 reporting harness, sections D (Task 6), I (Task 7), later F, L.
 
 Section D: the "Joint-fit diagnostics:" block of JointFit._report() -- quality,
 heterogeneity, q-range, shared-parameter warnings, degeneracy, failure safety.
@@ -369,13 +369,219 @@ def test_d12_render_failure():
           and 'objective:' in txt, ascii(txt))
 
 
+# ----------------------------------------------------------------- section I --
+def _indiv_fits(jf, scale='Linear', skip=(), scales=None):
+    """Real Fit_Routines.Fit objects on Line, one per joint dataset, fitted with the same
+    scale and no covariance (a and b free)."""
+    from Fit_Routines import Fit
+    out = {}
+    for k, obj in enumerate(jf.objectives):
+        if obj['name'] in skip:
+            continue
+        sc = scale if scales is None else scales.get(obj['name'], scale)
+        fit = Fit(Line, np.array(obj['x'], float), y=np.array(obj['y'], float),
+                  yerr=np.array(obj['yerr'], float))
+        for key in ('a', 'b'):
+            fit.fit_params[key].vary = True
+        fit.perform_fit(X[0], X[-1], fit_scale=sc, maxiter=200)
+        out[obj['name']] = fit
+    return out
+
+
+def test_i1_i2_joint_vs_individual():
+    jf = make_jf(3)
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear')
+    fits = _indiv_fits(jf)
+    check('I1 userargs carry the scale', fits['D0'].fitter.userargs[0] == 'Linear')
+    rows = jfs.individual_terms(jf, jf.last_snapshot, fits)
+    check('I1 one row per dataset, available',
+          len(rows) == 3 and all(r['unavailable'] is None for r in rows), str(rows))
+    check('I1 delta >= -1e-8 for all', all(r['delta'] >= -1e-8 for r in rows),
+          str([r['delta'] for r in rows]))
+    check('I1 none flagged', not any(r['flagged'] for r in rows))
+    check('I1 delta == joint_nll2 - indiv_nll2', all(
+        abs(r['delta'] - (r['joint_nll2'] - r['indiv_nll2'])) < 1e-9 for r in rows))
+    d = jfs.diagnostics(jf, jf.last_snapshot, individual_fits=fits)
+    q = d['quality']
+    check('I1 quality rows carry the individual columns',
+          all({'indiv_chi2_per_point', 'delta', 'flagged'} <= set(r) for r in q), str(q[0]))
+    check('I1 indiv chi2 per point = indiv_m / n',
+          all(abs(r['indiv_chi2_per_point'] - rr['indiv_m'] / r['n']) < 1e-12
+              for r, rr in zip(q, rows)))
+    check('I1 plain diagnostics keep the old row keys',
+          'delta' not in jfs.diagnostics(jf, jf.last_snapshot)['quality'][0])
+    check('I1 text shows the columns', 'indiv chi2/n' in jfs.format_diagnostics(d),
+          ascii(jfs.format_diagnostics(d)))
+    # I2: D2 generated with a = 4.0
+    jf = make_jf(3)
+    rng = np.random.default_rng(5)
+    jf.objectives[2]['y'] = 4.0 * X + B_TRUE + E * rng.standard_normal(len(X))
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear')
+    fits = _indiv_fits(jf)
+    rows = jfs.individual_terms(jf, jf.last_snapshot, fits)
+    fl = [r['flagged'] for r in rows]
+    check('I2 only D2 flagged', fl == [False, False, True],
+          str([(r['name'], round(r['delta'], 2), r['flagged']) for r in rows]))
+    d = jfs.diagnostics(jf, jf.last_snapshot, individual_fits=fits)
+    check('I2 flag reaches the quality rows',
+          [r['flagged'] for r in d['quality']] == [False, False, True])
+
+
+def test_i3_unavailable():
+    jf = make_jf(3)
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear')
+    fits = _indiv_fits(jf, skip=('D1',), scales={'D0': 'Log'})
+    rows = jfs.individual_terms(jf, jf.last_snapshot, fits)
+    r0, r1, r2 = rows
+    check('I3 Log individual vs Linear joint unavailable',
+          r0['unavailable'] and 'fit scale' in r0['unavailable'], str(r0['unavailable']))
+    check('I3 missing entry', r1['unavailable'] and 'no individual fit' in r1['unavailable'],
+          str(r1['unavailable']))
+    check('I3 the third row is available', r2['unavailable'] is None and np.isfinite(r2['delta']))
+    check('I3 unavailable rows carry no numbers',
+          all(r[k] is None for r in (r0, r1) for k in ('indiv_m', 'indiv_nll2', 'delta'))
+          and not r0['flagged'] and not r1['flagged'])
+    from Fit_Routines import Fit
+    f = Fit(Line, np.array(X), y=np.ones_like(X), yerr=E * np.ones_like(X))
+    rows = jfs.individual_terms(jf, jf.last_snapshot, {'D0': f})
+    check('I3 no result', rows[0]['unavailable'] and 'result' in rows[0]['unavailable'],
+          str(rows[0]['unavailable']))
+    d = jfs.diagnostics(jf, jf.last_snapshot, individual_fits=fits)
+    txt = jfs.format_diagnostics(d)
+    check('I3 diagnostics survive unavailable rows',
+          d['quality'][0]['delta'] is None and d['quality'][2]['delta'] is not None
+          and 'fit scale' in txt, ascii(txt))
+
+
+def test_i4_side_effects():
+    jf = make_jf(3)
+    hits = []
+    jf.functionCalled.connect(lambda *a: hits.append(1))
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear')
+    fits = _indiv_fits(jf)
+    n0, nit = len(hits), jf.Niter
+    # perturb the individuals' live attributes so a missing restore would show
+    for f in fits.values():
+        f.func.a = 99.0
+        f.func.params['a'].value = 99.0
+    before = {k: (f.func.x, np.array(f.func.x, float).copy(), f.func.a, f.func.b,
+                  f.func.params['a'].value, f.func.params['a'].expr, f.func.__fit__,
+                  {kk: (p.value, p.stderr) for kk, p in f.result.params.items()},
+                  f.Niter, f.fitter) for k, f in fits.items()}
+    jb = [(o['func'].x.copy(), o['func'].a, o['func'].params['a'].value, o['func'].__fit__)
+          for o in jf.objectives]
+    jfs.individual_terms(jf, jf.last_snapshot, fits)
+    jfs.format_joint_vs_individuals(jf, fits)
+    jfs.diagnostics(jf, jf.last_snapshot, individual_fits=fits)
+    ok = True
+    for k, f in fits.items():
+        b = before[k]
+        ok &= (f.func.x is b[0] and np.array_equal(f.func.x, b[1]) and f.func.a == b[2]
+               and f.func.b == b[3] and f.func.params['a'].value == b[4]
+               and f.func.params['a'].expr == b[5] and f.func.__fit__ == b[6]
+               and {kk: (p.value, p.stderr) for kk, p in f.result.params.items()} == b[7]
+               and f.Niter == b[8] and f.fitter is b[9])
+    check('I4 individual Fit func.x/params/result unchanged', ok)
+    check('I4 jf emission count and Niter unchanged', len(hits) == n0 and jf.Niter == nit)
+    check('I4 jf models restored', all(
+        np.array_equal(b[0], o['func'].x) and b[1] == o['func'].a
+        and b[2] == o['func'].params['a'].value and b[3] == o['func'].__fit__
+        for b, o in zip(jb, jf.objectives)))
+
+
+def test_i5_private_cov():
+    import covariance_core as cc
+    jf = make_jf(3, cov=private_cov)
+    jf.covariance_mode = 'data'
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear')
+    fits = _indiv_fits(jf)
+    rows = jfs.individual_terms(jf, jf.last_snapshot, fits)
+    p = fits['D0'].result.params
+    d0 = jf.last_snapshot.datasets[0]
+    r = d0.y[d0.used] - (p['a'].value * d0.x[d0.used] + p['b'].value)
+    C = cc.assemble([jf._last_blocks[0]], 'Linear')[0]
+    hand = float(r @ np.linalg.solve(C, r))
+    check('I5 indiv_m == r C_00^-1 r (1e-10)', abs(rows[0]['indiv_m'] - hand) <= 1e-10 * hand,
+          '%.12g vs %.12g' % (rows[0]['indiv_m'], hand))
+    n = len(r)
+    nll = hand + np.linalg.slogdet(C)[1] + n * np.log(2 * np.pi)
+    check('I5 indiv_nll2 includes the log det and n ln 2pi',
+          abs(rows[0]['indiv_nll2'] - nll) <= 1e-10 * abs(nll))
+    check('I5 data mode: delta == joint_m - indiv_m',
+          abs(rows[0]['delta'] - (rows[0]['joint_m'] - rows[0]['indiv_m'])) < 1e-8)
+
+
+def test_i6_format():
+    jf = make_jf(3)
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear')
+    fits = _indiv_fits(jf)
+    txt = jfs.format_joint_vs_individuals(jf, fits)
+    check('I6 label', 'joint vs individual fits (marginal terms)' in txt, ascii(txt))
+    check('I6 all dataset names', all(('D%d' % i) in txt for i in range(3)))
+    check('I6 small-N sentence present, no z', jfs.NO_Z_NOTE in txt and '(z =' not in txt,
+          ascii(txt))
+    check('I6 explicit snap argument accepted',
+          jfs.format_joint_vs_individuals(jf, fits, snap=jf.last_snapshot) == txt)
+    txt2 = jfs.format_joint_vs_individuals(jf, {})
+    check('I6 nothing available degrades to a message', 'no individual fit' in txt2, ascii(txt2))
+    jf = make_jf(5)
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear')
+    txt = jfs.format_joint_vs_individuals(jf, _indiv_fits(jf))
+    check('I6 five datasets carry z', '(z =' in txt and jfs.NO_Z_NOTE not in txt, ascii(txt))
+
+
+def test_i7_model_mode():
+    import covariance_core as cc
+    jf = make_jf(2, cov=private_cov)
+    jf.covariance_mode = 'model'
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear')
+    snap = jf.last_snapshot
+    check('I7 model mode, intensity needed',
+          snap.cov_mode == 'model' and cc.needs_intensity(jfs._snap_blocks(snap), 'Linear'))
+    fits = _indiv_fits(jf)
+    rows = jfs.individual_terms(jf, snap, fits)
+    p = fits['D0'].result.params
+    d0 = snap.datasets[0]
+    check('I7 individual theta differs from the joint',
+          abs(p['a'].value - snap.params['a']) > 1e-6, '%g %g' % (p['a'].value, snap.params['a']))
+    f = p['a'].value * d0.x[d0.used] + p['b'].value
+    r = d0.y[d0.used] - f
+    C = cc.assemble([cc.Block(d0.cov, d0.y[d0.used], d0.yerr[d0.used], f)], 'Linear')[0]
+    n = len(r)
+    hand = float(r @ np.linalg.solve(C, r)) + np.linalg.slogdet(C)[1] + n * np.log(2 * np.pi)
+    check('I7 indiv_nll2 == hand value with C from the individual f (1e-10)',
+          abs(rows[0]['indiv_nll2'] - hand) <= 1e-10 * abs(hand),
+          '%.12g vs %.12g' % (rows[0]['indiv_nll2'], hand))
+    Cj = jfs._block_of(jfs.rebuild_L(snap), *d0.rows)
+    check('I7 that C_00 differs from the joint block', np.max(np.abs(C - Cj)) > 1e-9,
+          '%.3e' % np.max(np.abs(C - Cj)))
+    check('I7 delta == joint_nll2 - indiv_nll2',
+          all(abs(r_['delta'] - (r_['joint_nll2'] - r_['indiv_nll2'])) < 1e-9 for r_ in rows))
+    check('I7 joint_nll2 equals the per-dataset marginal nll2',
+          abs(rows[0]['joint_nll2'] - jfs.per_dataset_objective(snap)[0][0].nll2_marg) < 1e-8)
+    # the substitution rule agrees with JointFit._substitute_unusable (Log: <= 0 too)
+    from Joint_Fit_Routines import JointFit
+    yy = np.array([1., 2., 3.])
+    ii = np.array([np.nan, 2., -1.])
+    blocks = [cc.Block(None, yy, np.ones(3), ii.copy())]
+    JointFit._substitute_unusable(blocks, ii, np.ones(3, bool), 'Log')
+    check('I7 substitution rule agrees with _build_chol (Log)',
+          np.array_equal(jfs._usable_intensity(ii, yy, 'Log'), blocks[0].intensity))
+    blocks = [cc.Block(None, yy, np.ones(3), ii.copy())]
+    JointFit._substitute_unusable(blocks, ii, np.ones(3, bool), 'Linear')
+    check('I7 substitution rule agrees with _build_chol (Linear)',
+          np.array_equal(jfs._usable_intensity(ii, yy, 'Linear'), blocks[0].intensity))
+
+
 def main():
     app = QApplication.instance() or QApplication([])
     for t in (test_d1_block_and_identity, test_d2_heterogeneity, test_d3_qrange,
               test_d4_shared_warnings, test_d5_degeneracy, test_d5c_exactly_singular, test_d5b_text_and_scaling,
               test_d6_no_covar, test_d7_section_failure, test_d7b_all_sections_fail,
               test_d8_snapshot_fails, test_d9_empty_dataset, test_d10_objective_extras, test_d11_rescaled_heterogeneity,
-              test_d12_render_failure):
+              test_d12_render_failure,
+              test_i1_i2_joint_vs_individual, test_i3_unavailable, test_i4_side_effects,
+              test_i5_private_cov, test_i6_format, test_i7_model_mode):
         t()
     return finish()
 

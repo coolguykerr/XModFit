@@ -15,6 +15,7 @@ splits the same way row by row (§3.5): ``ln det C = 2 Σ ln L_jj``.
 
 This module must stay out of ``Functions/<category>/`` (CLAUDE.md rule 1).
 """
+import contextlib
 import hashlib
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
@@ -811,6 +812,262 @@ def format_comparison(c, ic_a=None, ic_b=None):
     return '\n'.join(lines)
 
 
+
+# ------------------------------------------------- joint vs individual (§6.1) --
+@contextlib.contextmanager
+def _saved_model_state(func, keys):
+    """Save a model's ``x``, ``__fit__`` and, for each of ``keys``, its scalar attribute and
+    ``params`` entry (value and expr); restore them on exit, also on an exception. The same
+    save/restore as ``JointFit.quiet`` applies to one model."""
+    _missing = object()
+    x = getattr(func, 'x', _missing)
+    fitflag = getattr(func, '__fit__', _missing)
+    pv = {}
+    for k in keys:
+        if k in func.params and k not in pv:
+            lp = func.params[k]
+            pv[k] = (func.__dict__.get(k, _missing), lp.value, lp.expr)
+    try:
+        yield func
+    finally:
+        if x is not _missing:
+            func.x = x
+        if fitflag is not _missing:
+            func.__fit__ = fitflag
+        for k, (attr, val, expr) in pv.items():
+            if attr is _missing:
+                func.__dict__.pop(k, None)
+            else:
+                func.__dict__[k] = attr
+            lp = func.params[k]
+            lp.value = val
+            lp.expr = expr
+
+
+def _usable_intensity(inten, y, scale):
+    """The rule of ``JointFit._substitute_unusable`` / ``_build_chol``: the data stand in
+    where the model intensity is non-finite (or <= 0 in Log)."""
+    inten = np.asarray(inten, float)
+    bad = ~np.isfinite(inten)
+    if scale == 'Log':
+        with np.errstate(invalid='ignore'):
+            bad = bad | (inten <= 0)
+    return np.where(bad, np.asarray(y, float), inten)
+
+
+def _residual_of(fit_scale, data, fit):
+    """The raw residual ``raw_parts`` forms, for an arbitrary model ``fit``."""
+    if fit_scale == 'Log':
+        return np.log(data) - np.log(fit)
+    if fit_scale == 'Log w/o error':
+        return np.log10(data) - np.log10(fit)
+    if fit_scale == 'Linear w/o error':
+        return (data - fit) / np.max(data) if len(data) else data - fit
+    return data - fit
+
+
+def _quad_logdet(C, r):
+    """``(r C⁻¹ r, ln det C)`` from the Cholesky factor (log det from its diagonal)."""
+    C = 0.5 * (np.asarray(C, float) + np.asarray(C, float).T)
+    try:
+        Lc = np.linalg.cholesky(C)
+    except np.linalg.LinAlgError:
+        Lc = cc.factorize(C)[0]
+    z = cc.whiten(Lc, r)
+    return float(z @ z), float(2.0 * np.sum(np.log(np.diag(Lc))))
+
+
+def _individual_scale(fit):
+    ua = getattr(getattr(fit, 'fitter', None), 'userargs', None)
+    if ua is None or len(ua) == 0:
+        return None
+    return ua[0]
+
+
+def _individual_model(fit, d):
+    """The individual model at its fitted parameters on dataset ``d``'s active x, quietly.
+    The ``Fit`` is left exactly as it was."""
+    func = fit.func
+    params = fit.result.params
+    with _saved_model_state(func, list(params.keys())):
+        func.__fit__ = True
+        for k in params.keys():
+            if k in func.params:
+                v = params[k].value
+                func.__dict__[k] = v
+                func.params[k].value = v
+                func.params[k].expr = None
+        func.x = d.x
+        f = np.asarray(func.y(), float)
+    return f
+
+
+def _mad_flags(deltas, available):
+    """``delta > median + 3·1.4826·MAD and delta > 2`` over the available rows."""
+    v = np.array([deltas[i] for i in available], float)
+    flags = [False] * len(deltas)
+    if len(v) == 0:
+        return flags
+    med = float(np.median(v))
+    mad = float(np.median(np.abs(v - med)))
+    thr = med + 3.0 * 1.4826 * mad
+    for i in available:
+        flags[i] = bool(deltas[i] > thr and deltas[i] > 2.0)
+    return flags
+
+
+def individual_terms(jf, snap, individual_fits):
+    """Joint vs individual fits per dataset (spec §6.1). ``individual_fits`` maps dataset
+    name -> ``Fit_Routines.Fit`` (``fit.func``, ``fit.result.params``, and its fit scale in
+    ``fit.fitter.userargs[0]``). Each side is scored on the joint fit's used rows under its
+    own C_ii (the joint side under the snapshot's exact marginal block; the individual side,
+    in model mode when C depends on the model, under C built from the individual model's
+    intensity). An error rescaling of the joint fit is ignored on both sides (the
+    individual fit was never rescaled). ``delta = joint_nll2 - indiv_nll2``, in -2 ln L
+    units. Returns one dict per dataset: name, n, joint_m, indiv_m, joint_nll2, indiv_nll2,
+    delta, flagged, unavailable. ``jf`` is not read (the snapshot is self-contained)."""
+    fits = individual_fits or {}
+    scale = snap.fit_scale
+    cscale = 'Log' if scale == 'Log' else 'Linear'
+    weighted = _weighted(scale)
+    L = rebuild_L(snap) if snap.cov_in_use else None
+    model_mode = snap.cov_in_use and snap.cov_mode == 'model'
+    rows = []
+    for d in snap.datasets:
+        row = {'name': d.name, 'n': int(np.sum(d.used)), 'joint_m': None, 'indiv_m': None,
+               'joint_nll2': None, 'indiv_nll2': None, 'delta': None, 'flagged': False,
+               'unavailable': None}
+        rows.append(row)
+        fit = fits.get(d.name)
+        if fit is None:
+            row['unavailable'] = 'no individual fit supplied for this dataset'
+            continue
+        if getattr(fit, 'result', None) is None:
+            row['unavailable'] = 'the individual fit has no result'
+            continue
+        sc = _individual_scale(fit)
+        if sc is None:
+            row['unavailable'] = 'the individual fit scale is unknown (no fitter.userargs)'
+            continue
+        if sc != scale:
+            row['unavailable'] = ('the individual fit scale %s differs from the joint fit '
+                                  'scale %s' % (sc, scale))
+            continue
+        n = row['n']
+        if n == 0:
+            row['unavailable'] = 'no points left in the joint fit for this dataset'
+            continue
+        try:
+            f_all = _individual_model(fit, d)
+        except Exception as e:                    # noqa: BLE001 -- degrade, report
+            row['unavailable'] = 'the individual model failed: %s: %s' % (type(e).__name__, e)
+            continue
+        if f_all.shape != d.x.shape:
+            row['unavailable'] = ('the individual model returned %d points for %d'
+                                  % (f_all.size, d.x.size))
+            continue
+        u = d.used
+        y, f = d.y[u], f_all[u]
+        with np.errstate(invalid='ignore', divide='ignore'):
+            r_i = _residual_of(scale, y, f)
+        if not np.all(np.isfinite(r_i)):
+            row['unavailable'] = 'the individual model is not finite on the joint fit\'s used rows'
+            continue
+        a, b = d.rows
+        if snap.cov_in_use:
+            C_j = _block_of(L, a, b)
+            C_i = C_j
+            if model_mode:
+                blk = cc.Block(d.cov, y, d.yerr[u], _usable_intensity(f, y, cscale), name=d.name)
+                if cc.needs_intensity([blk], cscale):
+                    C_i = cc.assemble([blk], cscale)[0]
+        elif weighted:
+            sig = d.yerr[u] / y if scale == 'Log' else d.yerr[u]
+            C_j = C_i = np.diag(sig ** 2)
+        else:
+            C_j = C_i = None
+        if C_j is None:                              # unweighted: a sum of squares
+            mj, mi = float(np.sum(d.r ** 2)), float(np.sum(r_i ** 2))
+            lj = li = 0.0
+            const = 0.0
+        else:
+            mj, lj = _quad_logdet(C_j, d.r)
+            mi, li = _quad_logdet(C_i, r_i)
+            const = n * LN2PI
+        row.update(joint_m=mj, indiv_m=mi, joint_nll2=mj + lj + const,
+                   indiv_nll2=mi + li + const)
+        row['delta'] = row['joint_nll2'] - row['indiv_nll2']
+    avail = [i for i, r in enumerate(rows) if r['unavailable'] is None]
+    flags = _mad_flags([r['delta'] for r in rows], avail) if avail else []
+    for i in avail:
+        rows[i]['flagged'] = flags[i]
+    return rows
+
+
+def _fmt_indiv_calibrated(rows, likelihood):
+    """The §5 calibrated comparison over ``d_i = ½ delta_i`` (positive: the individual fit
+    is better than the shared one), small-N rule included."""
+    d = [0.5 * r['delta'] for r in rows if r['unavailable'] is None]
+    N = len(d)
+    if N == 0:
+        return ['nothing to compare: no individual fit is available']
+    sum_d = float(sum(d))
+    form = 'd_i = ½ delta_i' if likelihood else 'd_i = ½(s^joint − s^individual)'
+    cnt = int(sum(1 for v in d if v > 0))
+    if N >= 2:
+        sd = float(np.std(d, ddof=1))
+        spread = sd * np.sqrt(N)
+        head = 'Σd = %+.4g ± %.3g' % (sum_d, spread)
+        z = None
+        note = None
+        if N < 4:
+            note = NO_Z_NOTE
+        elif sd > 0:
+            z = abs(sum_d) / spread
+        else:
+            note = 'no calibrated z: the per-dataset differences have zero spread'
+        if z is not None:
+            head += ' (z = %.2f)' % z
+    else:
+        head = 'Σd = %+.4g' % sum_d
+        note = NO_Z_NOTE
+    out = ['%s   [%s; positive favours the individual fits]' % (head, form)]
+    if note:
+        out.append(note)
+    out.append('the individual fits are better on %d/%d datasets' % (cnt, N))
+    if not likelihood:
+        out.append('difference in sum of squares; not a likelihood')
+    return out
+
+
+def format_joint_vs_individuals(jf, individual_fits, snap=None):
+    """The full joint-vs-individual table and its calibrated comparison (spec §6.1)."""
+    if snap is None:
+        snap = getattr(jf, 'last_snapshot', None)
+    if snap is None:
+        raise RuntimeError('format_joint_vs_individuals needs a finished joint fit (no snapshot)')
+    rows = individual_terms(jf, snap, individual_fits)
+    label, lik = objective_label(snap.fit_scale, snap.cov_in_use, snap.cov_mode, None)
+    out = ['joint vs individual fits (marginal terms)%s'
+           % (' (unrescaled)' if snap.rescale is not None else ''),
+          'objective: %s' % label,
+          'each side scored on the joint fit\'s used rows under its own C_ii; '
+          'delta = joint − individual in %s' % ('−2 ln L units' if lik or _weighted(snap.fit_scale)
+                                                 else 'sum of squares')]
+    out.append('  %-16s %-5s %12s %12s %12s' % ('dataset', 'n', 'joint chi2/n', 'indiv chi2/n', 'delta'))
+    for r in rows:
+        if r['unavailable'] is not None:
+            out.append('  %-16s %-5d unavailable: %s' % (r['name'], r['n'], r['unavailable']))
+            continue
+        n = r['n']
+        out.append('  %-16s %-5d %12.4g %12.4g %+12.4g%s' % (
+            r['name'], n, r['joint_m'] / n, r['indiv_m'] / n, r['delta'],
+            '  FLAGGED: the shared value fits this dataset worse than the others'
+            if r['flagged'] else ''))
+    out.extend(_fmt_indiv_calibrated(rows, lik))
+    return '\n'.join(out)
+
+
 # ------------------------------------------------------------- diagnostics --
 _DEG_UNAVAILABLE = 'no parameter covariance (the Hessian failed)'
 
@@ -900,8 +1157,19 @@ def diagnostics(jf, snap, individual_fits=None, *, qrange_tol=0.10, hetero_ratio
     def quality():
         ts, _ = terms()
         vals, unresc = chi2n()
-        return [{'name': t.name, 'n': t.n_points, 'chi2_per_point': v,
+        rows = [{'name': t.name, 'n': t.n_points, 'chi2_per_point': v,
                  'unrescaled': unresc} for t, v in zip(ts, vals)]
+        if individual_fits is not None:
+            try:
+                for row, it in zip(rows, individual_terms(jf, snap, individual_fits)):
+                    ok = it['unavailable'] is None
+                    row['indiv_chi2_per_point'] = (it['indiv_m'] / it['n']) if ok and it['n'] else None
+                    row['delta'] = it['delta']
+                    row['flagged'] = it['flagged']
+                    row['indiv_unavailable'] = it['unavailable']
+            except Exception as e:               # noqa: BLE001 -- degrade, report
+                d['unavailable'].append(('individual_fits', '%s: %s' % (type(e).__name__, e)))
+        return rows
 
     def heterogeneity():
         v = [c for c in chi2n()[0] if c is not None]
@@ -970,9 +1238,22 @@ def _fmt_quality(diag, th, L):
     L.append('  per-dataset quality (chi2 per point%s, each dataset scored under its own block):'
              % (' (unrescaled)' if any(r.get('unrescaled') for r in q) else ''))
     for r in q:
-        L.append('    %-16s n = %-5d %s' % (r['name'], r['n'], 'no points'
-                 if r['chi2_per_point'] is None or not r['n']
-                 else 'chi2/n = %.4g' % r['chi2_per_point']))
+        line = '    %-16s n = %-5d %s' % (r['name'], r['n'], 'no points'
+               if r['chi2_per_point'] is None or not r['n']
+               else 'chi2/n = %.4g' % r['chi2_per_point'])
+        if 'delta' in r:
+            if r.get('indiv_unavailable'):
+                line += '  indiv: unavailable (%s)' % r['indiv_unavailable']
+            elif r['delta'] is not None:
+                line += '  indiv chi2/n = %.4g  delta = %+.4g%s' % (
+                    r['indiv_chi2_per_point'], r['delta'],
+                    '  FLAGGED (shared value fits this dataset worse than the others)'
+                    if r['flagged'] else '')
+        L.append(line)
+    if any('delta' in r for r in q):
+        L.append('  indiv: the individual fit re-scored on the joint fit\'s used rows under its own '
+                 'C_ii%s; delta = joint - indiv in -2 ln L units'
+                 % (' (unrescaled)' if any(r.get('unrescaled') for r in q) else ''))
 
 
 def _fmt_heterogeneity(diag, th, L):
