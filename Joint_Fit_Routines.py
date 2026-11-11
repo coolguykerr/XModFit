@@ -176,6 +176,13 @@ class JointFit(QObject):
         self._fit_scale = None
         self._fit_method = None
         self.last_snapshot = None     # joint_fit_stats.JointSnapshot of the last fit
+        # opt-in per-dataset error rescaling by sqrt(chi2_red) (WS2 spec 6.3), off by
+        # default: None | 'per_dataset'; rescale_s are the factors in use (one per
+        # objective, None when off) and rescale_info {'rounds','converged','nu'}
+        self.rescale_errors = None
+        self.rescale_inflate_only = False
+        self.rescale_s = None
+        self.rescale_info = {}
 
     # ----------------------------------------------------------------- #
     #  dataset registration
@@ -875,6 +882,9 @@ class JointFit(QObject):
             # drop the masked rows BEFORE any log (Log: y <= 0 rows are masked)
             d, f = d[self._cov_mask], f[self._cov_mask]
             r = d - f if fit_scale == 'Linear' else np.log(d) - np.log(f)
+            if self.rescale_s is not None:
+                # C -> S C S: chol(S C S) = S L, so divide by s_i BEFORE whitening
+                r = r / self._rescale_rows()
             # L is lower-triangular (Cholesky): O(N^2) forward-substitution, NOT
             # a general O(N^3) solve -- this matters a lot at N~10^3 over many
             # least-squares iterations.
@@ -882,7 +892,7 @@ class JointFit(QObject):
         else:
             # ---- no covariance: byte-identical to Fit per-curve behaviour ----
             y = []
-            for obj, fit in zip(self.objectives, yfits):
+            for _k, (obj, fit) in enumerate(zip(self.objectives, yfits)):
                 i0, i1 = obj["imin"], obj["imax"] + 1
                 data = obj["y"][i0:i1]
                 err = obj["yerr"][i0:i1]
@@ -898,13 +908,16 @@ class JointFit(QObject):
                 err = err / maxd
                 fit = fit / maxd
                 if fit_scale == "Log":
-                    y.append((np.log(data) - np.log(fit)) * data / err)
+                    yi = (np.log(data) - np.log(fit)) * data / err
                 elif fit_scale == "Log w/o error":
-                    y.append(np.log10(data) - np.log10(fit))
+                    yi = np.log10(data) - np.log10(fit)
                 elif fit_scale == "Linear w/o error":
-                    y.append(data - fit)
+                    yi = data - fit
                 else:
-                    y.append((data - fit) / err)
+                    yi = (data - fit) / err
+                if self.rescale_s is not None and 'w/o' not in fit_scale:
+                    yi = yi / self.rescale_s[_k]          # sigma -> sigma * s_i
+                y.append(yi)
             y = np.concatenate(y)
 
         # ---- optional Gaussian priors: append (value - mu)/sigma terms -------
@@ -917,6 +930,16 @@ class JointFit(QObject):
             self.Niter += 1
             self.functionCalled.emit(params, self.Niter, y, fit_scale)
         return y
+
+    def _rescale_rows(self):
+        """The per-row error factor on the covariance path: ``rescale_s[i]`` repeated over
+        dataset i's rows kept by the frozen ``_cov_mask``."""
+        sizes, off = [], 0
+        for k in range(len(self.objectives)):
+            n = len(self.active_index(k))
+            sizes.append(int(np.count_nonzero(self._cov_mask[off:off + n])))
+            off += n
+        return np.repeat(np.asarray(self.rescale_s, float), sizes)
 
     def callback(self, params, iterations, residual, fit_scale):
         return True if self.fit_abort else None
@@ -1407,6 +1430,14 @@ class JointFit(QObject):
         self.cov_info = {}
         self._cov_warnings = []
         self._cov_info_notes = []
+        rescale = self.rescale_errors
+        if rescale not in (None, 'per_dataset'):
+            raise ValueError("rescale_errors must be None or 'per_dataset', got %r" % (rescale,))
+        self.rescale_s, self.rescale_info = None, {}
+        if rescale and ('w/o' in fit_scale or fit_method == "emcee"):
+            self.warnings.append(_Downgrade(
+                "error rescaling needs a weighted least-squares fit; not applied"))
+            rescale = None
         if (len(self.objectives) >= 2 and not cov_on
                 and fit_scale == 'Linear w/o error'):
             # 01 6.7: per-dataset 1/max(y) weighting is silent otherwise
@@ -1486,9 +1517,14 @@ class JointFit(QObject):
                                     fcn_args=(fit_scale,), iter_cb=self.callback,
                                     nan_policy="raise", max_nfev=maxiter, **_sc)
 
-        if needs:
+        def ls_round(start):
+            """One least-squares fit from ``start`` (the whole model-based outer iteration
+            when C depends on the model). Returns ``(rounds, converged, aborted)``."""
+            if not needs:
+                self.result = self.fitter.minimize(method=fit_method, params=start, **fit_kws)
+                return 0, True, False
             # model-based C by outer iteration (spec 4.4); L frozen within a round
-            state = {'params': self.master_params, 'last': None}
+            state = {'params': start, 'last': None}
 
             def fit_once():
                 if self.fit_abort and state['last'] is not None:
@@ -1503,7 +1539,14 @@ class JointFit(QObject):
                 self._build_chol(fit_scale, model=True)
 
             self.result, rounds, converged = cc.outer_iterate(fit_once, rebuild)
-            aborted = bool(self.fit_abort)
+            return rounds, converged, bool(self.fit_abort)
+
+        rounds, converged, aborted = ls_round(self.master_params)
+        if rescale:
+            self._last_ls = (rounds, converged, aborted)
+            self._rescale_loop(ls_round, cov_on, mode, fit_scale)
+            rounds, converged, aborted = self._last_ls
+        if needs:
             if aborted:
                 self._add_run_warning(
                     "fit stopped by the user during the model-based covariance iteration "
@@ -1514,16 +1557,47 @@ class JointFit(QObject):
                     "parameter still moved >= 0.1 stderr); the last result is kept"
                     % rounds))
             self._finish_cov(mode, fit_scale, rounds, converged, aborted=aborted)
-            self._take_snapshot()
-            return self._report(), self.result.message
-
-        self.result = self.fitter.minimize(method=fit_method,
-                                           params=self.master_params,
-                                           **fit_kws)
-        if cov_on:
+        elif cov_on:
             self._finish_cov(mode, fit_scale, 0, True)
         self._take_snapshot()
         return self._report(), self.result.message
+
+    def _rescale_loop(self, ls_round, cov_on, mode, fit_scale):
+        """Spec 6.3: fit -> snapshot -> factors s -> refit warm-started from
+        ``result.params`` under the rescaled errors (the whole model-based outer
+        iteration again when C depends on the model) -> repeat until every s_i moves
+        by < 1 % or 5 refits. Leaves ``rescale_s`` (the factors the last fit used) and
+        ``rescale_info``; a failure of the snapshot stops the loop and is reported."""
+        import joint_fit_stats as jfs
+        cur, rnd, conv, nu = None, 0, False, []
+        while True:
+            try:
+                if cov_on:      # the snapshot reads cov_info; no warnings are recorded here
+                    self._finish_cov(mode, fit_scale, self._last_ls[0], self._last_ls[1],
+                                     notes=False)
+                snap = jfs.snapshot(self)
+                notes = []
+                s_new, nu = jfs.rescale_factors(snap, self.rescale_inflate_only, notes)
+            except Exception as e:                       # noqa: BLE001 -- degrade, report
+                self._add_run_warning('error rescaling stopped: %s' % e)
+                break
+            if rnd == 0:
+                for nt in notes:
+                    self._add_run_warning(nt)
+            if cur is not None and max(abs(a / b - 1.0) for a, b in zip(s_new, cur)) < 0.01:
+                conv = True
+                break
+            if rnd >= 5 or self.fit_abort:
+                break
+            cur = list(s_new)
+            self.rescale_s = list(s_new)
+            rnd += 1
+            self.rescale_info = {'rounds': rnd, 'converged': False, 'nu': list(nu)}
+            self._last_ls = ls_round(self.result.params)
+        self.rescale_info = {'rounds': rnd, 'converged': conv, 'nu': list(nu)}
+        if not conv:
+            self._add_run_warning("error rescaling did not converge in %d rounds (a factor "
+                                  "still moved >= 1%%); the last fit is kept" % rnd)
 
     def _take_snapshot(self):
         """Record ``last_snapshot`` (WS2 reporting) at the end of ``perform_fit``. A
@@ -1536,7 +1610,8 @@ class JointFit(QObject):
         except Exception as e:                       # noqa: BLE001 -- degrade, report
             self._add_run_warning('diagnostics unavailable: snapshot failed: %s' % e)
 
-    def _finish_cov(self, mode, fit_scale, rounds, converged, mcmc_frozen=None, aborted=False):
+    def _finish_cov(self, mode, fit_scale, rounds, converged, mcmc_frozen=None, aborted=False,
+                    notes=True):
         """Record ``cov_info`` and turn this fit's assembly/factorisation warnings
         into run warnings (downgrades) and its point-exclusion notes into plain
         run warnings. Stamps the result with the identity of the data it fitted
@@ -1550,6 +1625,8 @@ class JointFit(QObject):
         if mcmc_frozen:
             self.cov_info['mcmc_frozen'] = mcmc_frozen
         self.result._cov_stamp = self._cov_data_stamp()
+        if not notes:
+            return
         for w in self._cov_warnings:
             self.warnings.append(_Downgrade(w))
         for w in self._cov_info_notes:
@@ -1619,6 +1696,8 @@ class JointFit(QObject):
             rep = rep + '\n\n' + cc.report_block(
                 [(o["name"], o["cov"]) for o in self.objectives], self.cov_info,
                 downgrades, self.result)
+        if self.rescale_s is not None:
+            rep = rep + '\n\n' + self._rescale_block()
         warns = list(self.warnings) + [w for w in downgrades if w not in self.warnings]
         if warns:
             rep = rep + '\n\nJoint-fit warnings:\n' + ''.join(
@@ -1626,6 +1705,32 @@ class JointFit(QObject):
         if downgrades:
             rep = 'DEGRADED FIT: %s\n\n' % '; '.join(downgrades) + rep
         return rep
+
+    def _rescale_block(self):
+        """The report lines of an error-rescaled fit (spec 6.3): the factors, the dof, how
+        the loop ended, and the UNRESCALED per-dataset chi2/n beside them."""
+        info = self.rescale_info or {}
+        s = ['%.4g' % v for v in self.rescale_s]
+        nu = ['%.4g' % v for v in info.get('nu', [])]
+        lines = ['Errors rescaled per dataset by \u221a\u03c7\u00b2_red (opt-in): s = [%s], '
+                 '\u03bd = [%s], %d rounds, %s' % (', '.join(s), ', '.join(nu),
+                                                    int(info.get('rounds', 0)),
+                                                    'converged' if info.get('converged')
+                                                    else 'not converged')]
+        try:
+            import joint_fit_stats as jfs
+            snap = self.last_snapshot
+            if snap is None or snap.rescale is None:
+                snap = jfs.snapshot(self)
+            m = jfs.marginal_terms(snap, scaled=False)
+            parts = []
+            for d, mi in zip(snap.datasets, m):
+                n = int(d.rows[1] - d.rows[0])
+                parts.append('%s %s' % (d.name, ('%.4g' % (mi / n)) if n else 'no points'))
+            lines.append('  unrescaled \u03c7\u00b2/n per dataset: ' + ', '.join(parts))
+        except Exception as e:                           # noqa: BLE001 -- degrade, report
+            lines.append('  unrescaled \u03c7\u00b2/n unavailable: %s' % e)
+        return '\n'.join(lines)
 
     def _derived_keymaps(self, keys=('protins', 'theta', 'phi')):
         """Per objective, {local key: master key driving it} for ``keys``.

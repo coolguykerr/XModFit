@@ -1023,6 +1023,243 @@ def test_m10_fix_round():
           str(c.notes))
 
 
+# ----------------------------------------------------------------------- R --
+def _rfit(nds=2, cov=None, scale_err=(1.0, 2.0), share='a', inflate_only=False, mode=None,
+          scale='Linear', seed=4, rescale='per_dataset'):
+    jf = make_jf(nds, cov=cov, share=share, scale_err=list(scale_err), seed=seed)
+    if mode:
+        jf.covariance_mode = mode
+    jf.rescale_errors = rescale
+    jf.rescale_inflate_only = inflate_only
+    jf.perform_fit(X[0], X[-1], fit_scale=scale)
+    return jf
+
+
+def _row_s(snap):
+    s = snap.rescale['s']
+    return np.concatenate([np.full(d.rows[1] - d.rows[0], si) for d, si in zip(snap.datasets, s)])
+
+
+def test_r1_off_bit_identical():
+    ja = make_jf(2, scale_err=[1.0, 2.0]); ja.perform_fit(X[0], X[-1])
+    jb = make_jf(2, scale_err=[1.0, 2.0]); jb.rescale_errors = None
+    jb.perform_fit(X[0], X[-1])
+    check('R1 defaults: rescale off, no factors, empty info',
+          ja.rescale_errors is None and ja.rescale_inflate_only is False
+          and ja.rescale_s is None and ja.rescale_info == {} and ja.last_snapshot.rescale is None)
+    check('R1 params, chisqr, nfev, Niter bit-identical',
+          all(ja.result.params[k].value == jb.result.params[k].value for k in ja.result.params)
+          and ja.result.chisqr == jb.result.chisqr and ja.result.nfev == jb.result.nfev
+          and ja.Niter == jb.Niter)
+    p = ja.result.params
+    r0 = ja.residual(p, 'Linear')
+    ja.rescale_s = [1.0, 1.0]
+    check('R1 s == 1 reproduces the unrescaled residual exactly',
+          np.array_equal(ja.residual(p, 'Linear'), r0))
+    ja.rescale_s = None
+    check('R1 residual unchanged when rescale_s is None', np.array_equal(ja.residual(p, 'Linear'), r0))
+
+
+def test_r2_two_noise_levels():
+    import joint_fit_stats as jfs
+    jf = _rfit(2, scale_err=(1.0, 2.0))
+    snap = jf.last_snapshot
+    rs = snap.rescale
+    check('R2 snapshot carries the rescale dict', rs is not None and rs['mode'] == 'per_dataset'
+          and rs['inflate_only'] is False and set(rs) >= {'s', 'nu', 'rounds', 'converged'}, str(rs))
+    s = rs['s']
+    check('R2 s ~ (1, 2) within 15 percent', abs(s[0] - 1) < 0.15 and abs(s[1] - 2) < 0.30,
+          str(s))
+    _close('R2 sum(nu) == N - p', sum(rs['nu']), snap.ndata - snap.nvarys, rtol=1e-12)
+    check('R2 jf attributes mirror it', tuple(jf.rescale_s) == tuple(s)
+          and jf.rescale_info['rounds'] == rs['rounds'] and jf.rescale_info['converged'] == rs['converged']
+          and 1 <= rs['rounds'] <= 5, str(jf.rescale_info))
+    _close('R2 sum z_fit^2 + prior == result.chisqr', np.sum(snap.z_fit ** 2) + np.sum(snap.prior ** 2),
+           jf.result.chisqr, rtol=1e-10)
+    _close('R2 z == z_fit off the covariance path', snap.z, snap.z_fit)
+    # the rescaled residual is the unscaled weighted residual divided by s_i
+    p = jf.result.params
+    jf.rescale_s = None
+    r_un = jf.residual(p, 'Linear')
+    jf.rescale_s = list(s)
+    r_sc = jf.residual(p, 'Linear')
+    want = np.concatenate([r_un[a:b] / si for (a, b), si in zip(jf.row_ranges(), s)])
+    _close('R2 residual = unscaled / s_i per dataset', r_sc, want)
+    terms, _ex = jfs.per_dataset_objective(snap)
+    check('R2 rescaled chi2 per point ~ 1 on each dataset',
+          all(0.4 < t.chi2_per_point < 1.8 for t in terms), str([t.chi2_per_point for t in terms]))
+    check('R2 DatasetTerm.rescale_s filled', [t.rescale_s for t in terms] == list(s))
+    s2, nu2 = jfs.rescale_factors(snap)
+    check('R2 rescale_factors at the fixed point moves < 2 percent',
+          max(abs(a / b - 1) for a, b in zip(s2, s)) < 0.02, str((s2, s)))
+    _close('R2 nu from rescale_factors', nu2, rs['nu'])
+    rep = jf._report()
+    check('R2 report line with s, nu, rounds, converged and the unrescaled chi2/n',
+          'Errors rescaled per dataset by √χ²_red (opt-in): s = [' in rep and 'ν = [' in rep
+          and 'rounds' in rep and 'converged' in rep and 'unrescaled χ²/n' in rep, ascii(rep[-700:]))
+
+
+def test_r3_shared_psd():
+    import joint_fit_stats as jfs
+    from scipy.linalg import solve_triangular
+    jf = _rfit(2, cov=shared_cov, scale_err=(1.0, 2.0))
+    snap = jf.last_snapshot
+    L = jfs.rebuild_L(snap)
+    sv = _row_s(snap)
+    C = L @ L.T
+    SCS = np.diag(sv) @ C @ np.diag(sv)
+    ev = np.linalg.eigvalsh(SCS)
+    check('R3 S C S is PSD', ev.min() >= -1e-10 * ev.max(), '%.3e' % (ev.min() / ev.max()))
+    _close('R3 chol(S C S) == S L', np.linalg.cholesky(SCS), np.diag(sv) @ L, rtol=1e-12, atol=1e-14)
+    check('R3 the shared term really couples the datasets', abs(C[0, len(X) + 3]) > 0)
+    # the whitened rows are (S L)^-1 r, the same as the fit minimised (data mode: C is frozen)
+    jd = _rfit(2, cov=shared_cov, scale_err=(1.0, 2.0), mode='data')
+    sd = jd.last_snapshot
+    Ld = jfs.rebuild_L(sd)
+    rcat = np.concatenate([d.r for d in sd.datasets])
+    zz = solve_triangular(np.diag(_row_s(sd)) @ Ld, rcat, lower=True)
+    check('R3 z == (S L)^-1 r at the fitted point (data mode)',
+          np.allclose(zz, sd.z, rtol=1e-8, atol=1e-10), '%.3e' % np.max(np.abs(zz - sd.z)))
+    _close('R3 z_fit is the same vector', sd.z_fit, sd.z)
+
+
+def test_r4_inflate_only():
+    jf = _rfit(2, scale_err=(0.5, 2.0), inflate_only=True)
+    s = jf.last_snapshot.rescale['s']
+    check('R4 inflate_only: s_0 == 1.0 exactly', s[0] == 1.0, repr(s))
+    check('R4 inflate_only: s_1 inflated', s[1] > 1.3, repr(s))
+    check('R4 mode recorded', jf.last_snapshot.rescale['inflate_only'] is True)
+    jn = _rfit(2, scale_err=(0.5, 2.0), inflate_only=False)
+    check('R4 both directions: s_0 < 1', jn.last_snapshot.rescale['s'][0] < 0.8,
+          repr(jn.last_snapshot.rescale['s']))
+
+
+def test_r5_label_key():
+    import joint_fit_stats as jfs
+    ja = _rfit(2)
+    jb = make_jf(2, scale_err=[1.0, 2.0], seed=4); jb.perform_fit(X[0], X[-1])
+    a, b = ja.last_snapshot, jb.last_snapshot
+    t, ex = jfs.per_dataset_objective(a)
+    check('R5 label starts with rescaled and is not a likelihood',
+          ex['objective_label'].startswith('rescaled ') and ex['likelihood'] is False,
+          ascii(ex['objective_label']))
+    check('R5 label names s', 'errors rescaled per dataset by √χ²_red, s = ' in ex['objective_label'])
+    check('R5 key has the rescale field',
+          jfs.comparability_key(a)['rescale'] == ('per_dataset', False)
+          and jfs.comparability_key(b)['rescale'] is None)
+    msg = _raises(a, b)
+    check('R5 rescaled vs unrescaled: NotComparable naming rescale', msg is not None and 'rescale' in msg,
+          str(msg))
+    jc = _rfit(2, inflate_only=True)
+    msg = _raises(a, jc.last_snapshot)
+    check('R5 per_dataset vs inflate_only: not comparable', msg is not None and 'rescale' in msg, str(msg))
+
+
+def test_r6_jpar_spec():
+    import joint_fit_io as jio
+    from joint_fit_spec import JointFitSpec
+    st = {'fit_range': '', 'fit_method': 'leastsq', 'fit_scale': 'Linear', 'fit_iterations': '100',
+          'rescale_errors': 'per_dataset inflate_only'}
+    txt = jio.format_jpar(st, [], [])
+    check('R6 written when on', '#RescaleErrors: per_dataset inflate_only' in txt.splitlines())
+    check('R6 round trip',
+          jio.parse_jpar(txt)['settings'].get('rescale_errors') == 'per_dataset inflate_only')
+    st['rescale_errors'] = 'per_dataset'
+    t2 = jio.format_jpar(st, [], [])
+    check('R6 plain per_dataset round trip',
+          '#RescaleErrors: per_dataset' in t2.splitlines()
+          and jio.parse_jpar(t2)['settings'].get('rescale_errors') == 'per_dataset')
+    st['rescale_errors'] = None
+    t3 = jio.format_jpar(st, [], [])
+    check('R6 off: no line, parses as None', 'RescaleErrors' not in t3
+          and jio.parse_jpar(t3)['settings'].get('rescale_errors') is None)
+    check('R6 jpar_rescale helper',
+          jio.jpar_rescale(jio.parse_jpar(txt)) == ('per_dataset', True)
+          and jio.jpar_rescale(jio.parse_jpar(t3)) == (None, False)
+          and jio.jpar_rescale(jio.parse_jpar(t2)) == ('per_dataset', False))
+    data = {}
+    for nm in ('A', 'B'):
+        data[nm] = {'c': {'x': X, 'y': A_TRUE * X + B_TRUE, 'yerr': E * np.ones_like(X)}}
+    sp = JointFitSpec(default_model_class=Line)
+    for nm in ('A', 'B'):
+        sp.add_dataset(nm, model=Line(x=X))
+    jf0 = sp.compile(data)
+    check('R6 spec default off', sp.rescale_errors is None and sp.rescale_inflate_only is False
+          and jf0.rescale_errors is None and jf0.rescale_inflate_only is False)
+    sp.rescale_errors, sp.rescale_inflate_only = 'per_dataset', True
+    jf1 = sp.compile(data)
+    check('R6 compile copies onto the JointFit', jf1.rescale_errors == 'per_dataset'
+          and jf1.rescale_inflate_only is True)
+
+
+def test_r7_degrade():
+    jf = _rfit(2, scale='Linear w/o error')
+    ref = make_jf(2, scale_err=[1.0, 2.0], seed=4); ref.perform_fit(X[0], X[-1], fit_scale='Linear w/o error')
+    check('R7 w/o error: the fit is the unrescaled fit',
+          jf.rescale_s is None and jf.last_snapshot.rescale is None
+          and jf.result.chisqr == ref.result.chisqr and jf.result.nfev == ref.result.nfev)
+    rep, _ = jf.perform_fit(X[0], X[-1], fit_scale='Linear w/o error')
+    check('R7 report starts with DEGRADED FIT naming error rescaling',
+          rep.startswith('DEGRADED FIT:') and 'error rescaling needs a weighted least-squares fit; '
+          'not applied' in rep.split('\n')[0], ascii(rep[:200]))
+    je = make_jf(2, scale_err=[1.0, 2.0]); je.perform_fit(X[0], X[-1])    # emcee needs a prior fit
+    je.rescale_errors = 'per_dataset'
+    rep, _ = je.perform_fit(X[0], X[-1], fit_method='emcee', emcee_walkers=10, emcee_steps=20)
+    check('R7 emcee: not applied, degraded', je.rescale_s is None and je.last_snapshot.rescale is None
+          and rep.startswith('DEGRADED FIT:') and 'error rescaling' in rep.split('\n')[0],
+          ascii(rep[:200]))
+    jx = make_jf(2); jx.rescale_errors = 'bogus'
+    try:
+        jx.perform_fit(X[0], X[-1])
+        check('R7 unknown mode raises', False, 'no exception')
+    except ValueError as ex:
+        check('R7 unknown mode raises', 'rescale_errors' in str(ex), str(ex))
+
+
+def test_r8_logdet_compare():
+    import dataclasses as dc
+    import joint_fit_stats as jfs
+    for mode in ('model', 'data'):
+        jf = _rfit(2, cov=shared_cov, scale_err=(1.0, 2.0), mode=mode)
+        snap = jf.last_snapshot
+        check('R8 %s: fit is on the covariance path' % mode, snap.cov_in_use and snap.cov_mode == mode)
+        s = np.asarray(snap.rescale['s'])
+        terms, ex = jfs.per_dataset_objective(snap)
+        sv = _row_s(snap)
+        undone = dc.replace(snap, rescale=None, logdiag=snap.logdiag - np.log(sv))
+        tu, _ = jfs.per_dataset_objective(undone)
+        for i, (t, u) in enumerate(zip(terms, tu)):
+            n = t.n_points
+            _close('R8 %s logdet_seq_%d gains 2 n ln s' % (mode, i), t.logdet_seq - u.logdet_seq,
+                   2 * n * np.log(s[i]), rtol=1e-10)
+            _close('R8 %s logdet_marg_%d gains 2 n ln s' % (mode, i), t.logdet_marg - u.logdet_marg,
+                   2 * n * np.log(s[i]), rtol=1e-10)
+        L = jfs.rebuild_L(snap)
+        SCS = np.diag(sv) @ (L @ L.T) @ np.diag(sv)
+        _close('R8 %s sum logdet_seq == slogdet(S C S)' % mode,
+               sum(t.logdet_seq for t in terms), np.linalg.slogdet(SCS)[1], rtol=1e-10)
+        mu = jfs.marginal_terms(snap, scaled=False)
+        _close('R8 %s marginal = unscaled / s^2' % mode, [t.marginal for t in terms],
+               np.asarray(mu) / s ** 2, rtol=1e-10)
+        check('R8 %s coupling is finite' % mode, np.isfinite(ex['coupling']), str(ex['coupling']))
+        if mode == 'data':
+            _close('R8 data: sum sequential + prior == result.chisqr',
+                   sum(t.sequential for t in terms) + ex['prior'], snap.chisqr, rtol=1e-8)
+    ja = _rfit(2, scale_err=(1.0, 2.0))
+    jb = _rfit(2, scale_err=(1.0, 2.0), share=None)
+    a, b = ja.last_snapshot, jb.last_snapshot
+    c = jfs.compare_fits(a, b)
+    check('R8 two rescaled fits compare: rescaled, not a likelihood, lr_p None',
+          c.rescaled and c.lr_p is None, str(c.notes))
+    ia, ib = jfs.information_criteria(a), jfs.information_criteria(b)
+    check('R8 information_criteria k == nvarys + N', ia['k'] == a.nvarys + len(a.datasets), str(ia))
+    check('R8 IC note', 'fitted s' in ia.get('note', ''))
+    check('R8 format_comparison renders', isinstance(jfs.format_comparison(c, ia, ib), str))
+    jm = _rfit(2, cov=private_cov, scale_err=(1.0, 2.0), mode='model')
+    check('R8 model mode (outer_iterate rerun): info consistent', jm.cov_info['mode'] == 'model'
+          and jm.last_snapshot.rescale['rounds'] >= 1)
+
+
 def main():
     app = QApplication.instance() or QApplication([])
     for t in (test_q1_quiet_restores, test_q2_no_emission, test_q3_row_ranges,
@@ -1034,7 +1271,10 @@ def main():
               test_k1_fields, test_k2_allowed, test_k3_model_mode,
               test_m1_hand_values, test_m2_text, test_m3_coupling, test_m4_small_n,
               test_m5_line_vs_quad, test_m6_nested, test_m7_ic,
-              test_m8_model_mode_exact, test_m9_log_logdet_zero, test_m10_fix_round):
+              test_m8_model_mode_exact, test_m9_log_logdet_zero, test_m10_fix_round,
+              test_r1_off_bit_identical, test_r2_two_noise_levels, test_r3_shared_psd,
+              test_r4_inflate_only, test_r5_label_key, test_r6_jpar_spec, test_r7_degrade,
+              test_r8_logdet_compare):
         t()
     return finish()
 

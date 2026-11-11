@@ -208,6 +208,8 @@ def format_jpar(settings, blocks, shares):
            '#Fit Iterations=%s' % settings.get('fit_iterations', '')]
     if any(b.get('cov') for b in blocks):     # files without a covariance stay unchanged
         out.append('#CovMode: %s' % (settings.get('cov_mode') or 'model'))
+    if settings.get('rescale_errors'):        # opt-in error rescaling (WS2 6.3); off = no line
+        out.append('#RescaleErrors: %s' % settings['rescale_errors'])
     for b in blocks:
         out.append('#Dataset: %s' % b['path'])
         out.append('#Category: %s' % b.get('category', ''))
@@ -282,6 +284,8 @@ def parse_jpar(text):
             settings['fit_iterations'] = line.split('=', 1)[1]; continue
         if line.startswith('#CovMode:'):
             settings['cov_mode'] = line.split(':', 1)[1].strip(); continue
+        if line.startswith('#RescaleErrors:'):
+            settings['rescale_errors'] = line.split(':', 1)[1].strip() or None; continue
         if line.startswith('#Dataset:'):
             cur = {'path': line.split(':', 1)[1].strip(), 'category': '', 'func': '',
                    'xrange': '', 'fitrange': '', 'collimits': '',
@@ -357,6 +361,15 @@ def jpar_cov_mode(parsed):
     if any(b.get('cov') for b in parsed.get('blocks', [])):
         return 'data', PRE_MODE_NOTE
     return 'model', None
+
+
+def jpar_rescale(parsed):
+    """``(rescale_errors, inflate_only)`` of a parsed ``.jpar``: ``(None, False)`` without
+    a ``#RescaleErrors:`` line (or with an unknown mode), else ``('per_dataset', flag)``."""
+    toks = (parsed.get('settings', {}).get('rescale_errors') or '').split()
+    if toks and toks[0] == 'per_dataset':
+        return 'per_dataset', 'inflate_only' in toks[1:]
+    return None, False
 
 
 def parse_par(text):

@@ -146,6 +146,10 @@ class JointFitSpec:
         # the notes after the fit that reported them.
         self.covariance_mode: str = 'model'
         self.covariance_notes: List[str] = []
+        # opt-in per-dataset error rescaling (WS2 6.3): None | 'per_dataset', persisted as
+        # the .jpar '#RescaleErrors:' line; copied onto the JointFit by compile()
+        self.rescale_errors: Optional[str] = None
+        self.rescale_inflate_only: bool = False
 
     # ---- dataset selection / add / remove --------------------------------- #
     def add_dataset(self, name, model_class=None, model=None,
@@ -311,6 +315,8 @@ class JointFitSpec:
 
         jf = JointFit()
         jf.covariance_mode = self.covariance_mode
+        jf.rescale_errors = self.rescale_errors
+        jf.rescale_inflate_only = self.rescale_inflate_only
         name_to_idx = {}
         multi_curve = []
         for idx, e in enumerate(self.datasets):

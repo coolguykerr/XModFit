@@ -222,6 +222,14 @@ def snapshot(jf):
         if cov_mode == 'model':
             exact_blocks, _notes = jf.model_blocks(params, scale)
     needs = cov_path and cov_mode == 'model' and cc.needs_intensity(fit_blocks, cscale)
+    # opt-in error rescaling (§6.3): the residual the fit minimised was r_i / s_i whitened by
+    # the unscaled L, i.e. whitened by chol(S C S) = S L; z and logdiag follow suit
+    s_use = getattr(jf, 'rescale_s', None)
+    s_use = None if s_use is None else [float(v) for v in s_use]
+    if s_use is not None and not _weighted(scale):
+        s_use = None
+    sizes = [int(b - a) for (a, b) in ranges]
+    row_s = None if s_use is None else np.repeat(np.asarray(s_use, float), sizes)
 
     # (2) z and logdiag under C(θ̂)
     if not cov_path:
@@ -236,6 +244,8 @@ def snapshot(jf):
                     e = e / np.asarray(obj["y"], float)[idx]
                 sig.append(e)
             logdiag = np.log(np.concatenate(sig)) if sig else np.zeros(0)
+            if row_s is not None and len(logdiag) == len(row_s):
+                logdiag = logdiag + np.log(row_s)       # sigma -> sigma * s_i
         else:
             logdiag = np.zeros(0)
     elif needs:
@@ -244,11 +254,15 @@ def snapshot(jf):
         L, fwarn = cc.factorize(C)
         jitter = _jitter_of(C, fwarn)
         rcat = np.concatenate([p[0] for p in parts]) if parts else np.zeros(0)
-        z = cc.whiten(L, rcat)
+        z = cc.whiten(L, rcat if row_s is None else rcat / row_s)
         logdiag = np.log(np.diag(L))
+        if row_s is not None:
+            logdiag = logdiag + np.log(row_s)
     else:
         z = z_fit
         logdiag = np.log(np.diag(jf._L))
+        if row_s is not None:
+            logdiag = logdiag + np.log(row_s)
         jitter = float(jf._jitter)
 
     datasets = []
@@ -283,6 +297,12 @@ def snapshot(jf):
     elif info.get('aborted'):
         label = LABEL_ABORTED
 
+    rescale = None
+    if s_use is not None:
+        info = getattr(jf, 'rescale_info', None) or {}
+        rescale = {'mode': jf.rescale_errors, 'inflate_only': bool(jf.rescale_inflate_only),
+                   's': tuple(s_use), 'nu': tuple(float(v) for v in info.get('nu', ())),
+                   'rounds': int(info.get('rounds', 0)), 'converged': bool(info.get('converged', False))}
     covar = getattr(res, 'covar', None)
     chisqr = getattr(res, 'chisqr', None)
     if chisqr is None:
@@ -302,7 +322,7 @@ def snapshot(jf):
         covar=None if covar is None else np.array(covar, float),
         var_names=tuple(getattr(res, 'var_names', None) or ()),
         param_map={k: tuple((int(i), str(lk)) for (i, lk) in v) for k, v in jf.param_map.items()},
-        warnings=tuple(str(w) for w in jf.warnings), label=label, rescale=None)
+        warnings=tuple(str(w) for w in jf.warnings), label=label, rescale=rescale)
 
 
 # --------------------------------------------------------------- rebuild L --
@@ -333,11 +353,25 @@ def _block_of(L, a, b):
     return Li @ Li.T
 
 
-def marginal_terms(snap, L=None):
+def _s_of(snap):
+    rs = snap.rescale
+    if not rs or rs.get('s') is None:
+        return None
+    return [float(v) for v in rs['s']]
+
+
+def marginal_terms(snap, L=None, scaled=True):
     """``m_i = r_iᵀ (L Lᵀ)_ii⁻¹ r_i`` with the exact L; equals the sequential term off
-    the covariance path. (Task 5's rescale divides r_i by s_i here.)"""
+    the covariance path. For a rescaled snapshot the C in use is S C S, whose i-th
+    diagonal block is s_i² (C)_ii, so ``scaled=True`` (the term of the objective that was
+    minimised) is the unscaled term over s_i²; ``scaled=False`` undoes the rescaling
+    exactly (what ``rescale_factors`` needs)."""
+    s = _s_of(snap)
     if not snap.cov_in_use:
-        return [float(np.sum(snap.z[a:b] ** 2)) for (a, b) in (d.rows for d in snap.datasets)]
+        out = [float(np.sum(snap.z[a:b] ** 2)) for (a, b) in (d.rows for d in snap.datasets)]
+        if s is not None and not scaled:
+            out = [m * si ** 2 for m, si in zip(out, s)]
+        return out
     if L is None:
         L = rebuild_L(snap)
     out = []
@@ -346,9 +380,34 @@ def marginal_terms(snap, L=None):
         if b <= a:
             out.append(0.0)
             continue
-        r = d.r                               # rescale hook (Task 5): r / s_i
-        out.append(float(r @ cho_solve(cho_factor(_block_of(L, a, b), lower=True), r)))
+        r = d.r
+        m = float(r @ cho_solve(cho_factor(_block_of(L, a, b), lower=True), r))
+        out.append(m / s[len(out)] ** 2 if (s is not None and scaled) else m)
     return out
+
+
+def rescale_factors(snap, inflate_only=False, notes=None):
+    """``(s, nu)`` for the opt-in per-dataset error rescaling (spec §6.3):
+    ``nu_i = n_i − p n_i / N`` (so ``Σ nu_i = N − p``) and ``s_i = √(m_i / nu_i)`` with
+    ``m_i`` the marginal term of the UNSCALED objective (the current ``s`` undone), or
+    ``max(1, s_i)`` when ``inflate_only``. A dataset with ``nu_i <= 0`` keeps ``s_i = 1``
+    and a note is appended to ``notes`` (when given)."""
+    m = marginal_terms(snap, scaled=False)
+    n = [int(d.rows[1] - d.rows[0]) for d in snap.datasets]
+    N = float(sum(n))
+    p = float(snap.nvarys)
+    s, nu = [], []
+    for d, mi, ni in zip(snap.datasets, m, n):
+        v = ni - p * ni / N if N > 0 else 0.0
+        nu.append(float(v))
+        if v <= 0 or not np.isfinite(mi):
+            s.append(1.0)
+            if notes is not None:
+                notes.append('%s: no degrees of freedom left for an error scale; s = 1' % d.name)
+            continue
+        si = float(np.sqrt(mi / v))
+        s.append(max(1.0, si) if inflate_only else si)
+    return s, nu
 
 
 def objective_label(fit_scale, cov_in_use, cov_mode, rescaled=None):
@@ -375,6 +434,7 @@ def objective_label(fit_scale, cov_in_use, cov_mode, rescaled=None):
             s_txt = '…'
         lab = ('rescaled ' + lab + ' (errors rescaled per dataset by √χ²_red, s = %s; '
                'error scales fitted per dataset; approximate)' % s_txt)
+        return lab, False        # errors fitted per dataset: not a known-error likelihood
     return lab, True
 
 
@@ -384,6 +444,7 @@ def per_dataset_objective(snap):
     weighted = _weighted(snap.fit_scale)
     L = rebuild_L(snap) if snap.cov_in_use else None
     marg = marginal_terms(snap, L)
+    s_all = _s_of(snap)
     terms = []
     for d, m in zip(snap.datasets, marg):
         a, b = d.rows
@@ -398,6 +459,8 @@ def per_dataset_objective(snap):
             else:
                 sign, ldm = np.linalg.slogdet(_block_of(L, a, b))
                 ldm = float(ldm) if sign > 0 else float('nan')
+                if s_all is not None:
+                    ldm += 2.0 * n * np.log(s_all[len(terms)])     # (S C S)_ii = s_i² C_ii
             nls = s + lds + n * LN2PI
             nlm = m + ldm + n * LN2PI
         terms.append(DatasetTerm(
@@ -405,7 +468,7 @@ def per_dataset_objective(snap):
             chi2_per_point=(m / n) if n else None, logdet_seq=lds, logdet_marg=ldm,
             nll2_seq=nls, nll2_marg=nlm, window=d.window, index_hash=d.index_hash,
             scale=snap.fit_scale, cov=d.cov is not None, cov_mode=snap.cov_mode,
-            rescale_s=None))
+            rescale_s=None if s_all is None else s_all[len(terms)]))
     prior = float(np.sum(snap.prior ** 2))
     label, lik = objective_label(snap.fit_scale, snap.cov_in_use, snap.cov_mode, snap.rescale)
     fit_gap = None
