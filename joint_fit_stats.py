@@ -499,3 +499,231 @@ def check_comparable(a, b):
     msg = _first_difference(comparability_key(a), comparability_key(b))
     if msg is not None:
         raise NotComparable(msg)
+
+
+# --------------------------------------------------------------- comparison --
+@dataclass
+class Comparison:
+    """The calibrated comparison of two fits of the same data (spec §5). Positive
+    ``sum_d`` prefers B. ``coupled`` and ``rescaled`` are rendering aids beyond the
+    brief's field list."""
+    names: list
+    d: list
+    sum_d: float
+    sd_d: Optional[float]
+    N: int
+    z: Optional[float]
+    preferred: Optional[str]
+    sign_count: Tuple[int, int]
+    delta_k: Optional[int]
+    nested: Optional[str]
+    lr_p: Optional[float]
+    worst_dataset: str
+    objective_label: str
+    likelihood: bool
+    delta_chi2: float
+    delta_logdet: float
+    prior_difference: float
+    model_differences: list
+    notes: list
+    coupled: bool = False
+    rescaled: bool = False
+
+
+NO_Z_NOTE = 'no calibrated z: too few datasets to estimate the spread'
+COUPLING_SENTENCE = ('datasets treated as independent after conditioning on shared '
+                     'error terms in the listed order')
+LR_CAVEAT = 'the model is likely misspecified; leave-one-out is the honest check'
+
+
+def _endpoint_sets(snap):
+    return {m: frozenset(v) for m, v in snap.param_map.items()}
+
+
+def _free_endpoints(snap):
+    out = set()
+    for m, ends in _endpoint_sets(snap).items():
+        if snap.vary.get(m, False):
+            out |= ends
+    return out
+
+
+def _coarsens(a, b):
+    """True when B is a restriction of A: every B master's endpoint set is a union of
+    A masters' endpoint sets, every endpoint free in B is free in A, and per dataset
+    the model class and model files agree."""
+    for da, db in zip(a.datasets, b.datasets):
+        if da.model_class != db.model_class or da.model_files != db.model_files:
+            return False
+    sa = list(_endpoint_sets(a).values())
+    for sb in _endpoint_sets(b).values():
+        union = set()
+        for e in sa:
+            if e <= sb:
+                union |= e
+        if union != sb:
+            return False
+    return _free_endpoints(b) <= _free_endpoints(a)
+
+
+def nesting(a, b):
+    """``'B in A'`` when B is a restriction of A (see ``_coarsens``), ``'A in B'``
+    symmetrically, else None. Identical parameterisations (both directions) are not
+    nested."""
+    if len(a.datasets) != len(b.datasets):
+        return None
+    ab, ba = _coarsens(a, b), _coarsens(b, a)
+    if ab and ba:
+        return None
+    if ab:
+        return 'B in A'
+    if ba:
+        return 'A in B'
+    return None
+
+
+def _model_differences(a, b):
+    groups = {}
+    for da, db in zip(a.datasets, b.datasets):
+        if da.model_class != db.model_class:
+            groups.setdefault('different model: %s vs %s' % (da.model_class, db.model_class),
+                              []).append(da.name)
+        elif da.model_files != db.model_files:
+            groups.setdefault('different model files (%s)' % da.model_class, []).append(da.name)
+    out = []
+    for msg, names in groups.items():
+        where = ', '.join(names) if len(names) <= 3 else '%d datasets' % len(names)
+        out.append('%s (%s)' % (msg, where))
+    return out
+
+
+def compare_fits(a, b):
+    """Compare two fits of the same data from the exact per-dataset terms (spec §5).
+    Raises ``NotComparable`` when the comparability key differs."""
+    from scipy.stats import chi2
+    check_comparable(a, b)
+    ta, ea = per_dataset_objective(a)
+    tb, eb = per_dataset_objective(b)
+    weighted = _weighted(a.fit_scale)
+    if weighted:
+        d = [0.5 * (x.nll2_seq - y.nll2_seq) for x, y in zip(ta, tb)]
+        dchi = float(sum(x.sequential - y.sequential for x, y in zip(ta, tb)))
+        dld = float(sum(x.logdet_seq - y.logdet_seq for x, y in zip(ta, tb)))
+    else:
+        d = [x.sequential - y.sequential for x, y in zip(ta, tb)]
+        dchi, dld = float(sum(d)), 0.0
+    d = [float(v) for v in d]
+    N = len(d)
+    sum_d = float(sum(d))
+    sd = float(np.std(d, ddof=1)) if N >= 2 else None
+    notes = []
+    z = None
+    if N < 4:
+        notes.append(NO_Z_NOTE)
+    elif sd is not None and sd > 0:
+        z = float(abs(sum_d) / (sd * np.sqrt(N)))
+    preferred = 'B' if sum_d > 0 else ('A' if sum_d < 0 else None)
+    if preferred is None:
+        cnt = 0
+    else:
+        sgn = 1.0 if preferred == 'B' else -1.0
+        cnt = int(sum(1 for v in d if sgn * v > 0))
+    names = [t.name for t in ta]
+    worst = names[int(np.argmax(np.abs(d)))] if d else ''
+    nest = nesting(a, b)
+    rescaled = a.rescale is not None
+    likelihood = bool(ea['likelihood'])
+    delta_k = lr_p = None
+    stat = 0.0
+    if nest == 'B in A':
+        delta_k = int(a.nvarys - b.nvarys)
+        stat = -2.0 * sum_d
+    elif nest == 'A in B':
+        delta_k = int(b.nvarys - a.nvarys)
+        stat = 2.0 * sum_d
+    if nest and delta_k is not None and delta_k > 0 and likelihood and not rescaled:
+        lr_p = float(chi2.sf(max(0.0, stat), delta_k))
+
+    def _coupled(e, t):
+        return abs(e['coupling']) > 1e-9 * max(1.0, sum(abs(x.sequential) for x in t))
+
+    return Comparison(
+        names=names, d=d, sum_d=sum_d, sd_d=sd, N=N, z=z, preferred=preferred,
+        sign_count=(cnt, N), delta_k=delta_k, nested=nest, lr_p=lr_p, worst_dataset=worst,
+        objective_label=ea['objective_label'], likelihood=likelihood, delta_chi2=dchi,
+        delta_logdet=dld, prior_difference=float(ea['prior'] - eb['prior']),
+        model_differences=_model_differences(a, b), notes=notes,
+        coupled=bool(_coupled(ea, ta) or _coupled(eb, tb)), rescaled=rescaled)
+
+
+def information_criteria(snap):
+    """Known-error AIC / BIC on the §3 objective (spec §8). Weighted: ``Φ + 2k`` and
+    ``Φ + k ln n`` with ``Φ = nll2 + prior``; unweighted: the ``n ln(RSS/n)`` form."""
+    terms, ex = per_dataset_objective(snap)
+    n = int(sum(t.n_points for t in terms))
+    k = int(snap.nvarys)
+    out = {'n': n}
+    if ex['nll2'] is not None:
+        if snap.rescale is not None:
+            k += len(snap.datasets)
+            out['note'] = 'conditional on the fitted s'
+        phi = ex['nll2'] + ex['prior']
+        out.update(aic=float(phi + 2 * k), bic=float(phi + k * np.log(n)), k=k,
+                   form='known errors')
+    else:
+        rss = sum(t.sequential for t in terms) + ex['prior']
+        base = n * np.log(rss / n) if n and rss > 0 else float('-inf')
+        out.update(aic=float(base + 2 * k), bic=float(base + k * np.log(max(n, 1))), k=k,
+                   form='unknown error scale')
+    return out
+
+
+def format_comparison(c, ic_a=None, ic_b=None):
+    """Plain-text rendering of a ``Comparison`` (spec §5, §8)."""
+    lines = []
+    if c.z is not None:
+        head = 'Δ = %+.4g ± %.3g (z = %.2f)' % (c.sum_d, c.sd_d * np.sqrt(c.N), c.z)
+    else:
+        head = 'Δ = %+.4g' % c.sum_d
+    lines.append(head + '   [Σd, d_i = ½(nll2_A − nll2_B); positive prefers B; %s]'
+                 % c.objective_label)
+    if c.preferred is None:
+        lines.append('no fit preferred (%d datasets)' % c.N)
+    else:
+        lines.append('%s preferred on %d/%d datasets' % ((c.preferred,) + tuple(c.sign_count)))
+    if c.coupled:
+        lines.append(COUPLING_SENTENCE)
+    for n in c.notes:
+        lines.append(n)
+    if not c.likelihood:
+        lines.append('difference in sum of squares; not a likelihood')
+    lines.append('per-dataset d (positive favours B):')
+    for nm, v in zip(c.names, c.d):
+        lines.append('  %-16s %+.4g' % (nm, v))
+    lines.append('largest |d|: %s' % c.worst_dataset)
+    det = 'Δ(−logL) = %+.6g (not a confidence measure)' % c.sum_d
+    if c.delta_logdet != 0:
+        det += ' (Δχ²/2 = %+.6g, Δ log det/2 = %+.6g)' % (0.5 * c.delta_chi2,
+                                                          0.5 * c.delta_logdet)
+    lines.append(det)
+    for m in c.model_differences:
+        lines.append(m)
+    if c.nested:
+        s = 'nested: %s, Δk = %d' % (c.nested, c.delta_k)
+        if c.lr_p is not None:
+            s += ', likelihood-ratio p = %.3g; %s' % (c.lr_p, LR_CAVEAT)
+        lines.append(s)
+    else:
+        lines.append('not nested; no likelihood-ratio p-value')
+    lines.append('prior terms difference (A − B) = %+.6g (not in Σd)' % c.prior_difference)
+    if ic_a is not None or ic_b is not None:
+        lines.append('information criteria (assume a correct model; read with caution)')
+        for lab, ic in (('A', ic_a), ('B', ic_b)):
+            if ic is not None:
+                lines.append('  %s: AIC %.6g  BIC %.6g  (k = %d, n = %d, %s%s)' % (
+                    lab, ic['aic'], ic['bic'], ic['k'], ic['n'], ic['form'],
+                    '; ' + ic['note'] if ic.get('note') else ''))
+        if ic_a is not None and ic_b is not None:
+            lines.append('  ΔAIC (A − B) = %+.6g  ΔBIC (A − B) = %+.6g' % (
+                ic_a['aic'] - ic_b['aic'], ic_a['bic'] - ic_b['bic']))
+    return '\n'.join(lines)

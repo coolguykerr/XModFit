@@ -1,6 +1,8 @@
 """
 validate_joint_stats.py -- WS2 reporting harness (sections Q, P, K, M, R).
 
+Section M (Task 4): compare_fits, nesting, likelihood-ratio p, AIC/BIC, format_comparison.
+
 Section Q (Task 1): JointFit plumbing -- quiet evaluation, row ranges, prior rows,
 last / model covariance blocks.
 Section P (Task 2): joint_fit_stats -- the JointSnapshot, the sequential / marginal
@@ -743,6 +745,224 @@ def test_k3_model_mode():
               msg is not None and 'covariance' in msg, repr(msg))
 
 
+# ----------------------------------------------------------------------- M --
+def _snap(jf):
+    import joint_fit_stats as jfs
+    return jfs.snapshot(jf)
+
+
+def _synth(base, zs, lds):
+    """base with z and logdiag replaced per dataset (no-covariance weighted fit)."""
+    import dataclasses as dc
+    return dc.replace(base, z=np.concatenate(zs), logdiag=np.concatenate(lds))
+
+
+def _m1_pair(seed=7):
+    jf = make_jf(5)
+    jf.perform_fit(X[0], X[-1])
+    base = _snap(jf)
+    rng = np.random.default_rng(seed)
+    n = len(X)
+    za = [rng.standard_normal(n) for _ in range(5)]
+    zb = [0.9 * rng.standard_normal(n) for _ in range(5)]
+    la = [0.01 * rng.standard_normal(n) for _ in range(5)]
+    lb = [0.01 * rng.standard_normal(n) for _ in range(5)]
+    return _synth(base, za, la), _synth(base, zb, lb), (za, zb, la, lb)
+
+
+def test_m1_hand_values():
+    import joint_fit_stats as jfs
+    A, B, (za, zb, la, lb) = _m1_pair()
+    c = jfs.compare_fits(A, B)
+    d = np.array([0.5 * ((np.sum(za[i] ** 2) + 2 * np.sum(la[i])) -
+                         (np.sum(zb[i] ** 2) + 2 * np.sum(lb[i]))) for i in range(5)])
+    _close('M1 d', c.d, d)
+    _close('M1 sum_d', c.sum_d, d.sum())
+    _close('M1 sd_d', c.sd_d, np.std(d, ddof=1))
+    _close('M1 z', c.z, abs(d.sum()) / (np.std(d, ddof=1) * np.sqrt(5)))
+    pref = 'B' if d.sum() > 0 else 'A'
+    want = int(np.sum(d > 0)) if pref == 'B' else int(np.sum(d < 0))
+    check('M1 preferred and sign_count', c.preferred == pref and c.sign_count == (want, 5),
+          '%s %s' % (c.preferred, c.sign_count))
+    check('M1 worst dataset', c.worst_dataset == 'D%d' % int(np.argmax(np.abs(d))))
+
+
+def test_m2_text():
+    import joint_fit_stats as jfs
+    A, B, _ = _m1_pair()
+    c = jfs.compare_fits(A, B)
+    t = jfs.format_comparison(c)
+    check('M2 not a confidence measure', 'not a confidence measure' in t)
+    check('M2 sign-count sentence', ('%s preferred on %d/%d datasets' % (
+        c.preferred, c.sign_count[0], c.sign_count[1])) in t)
+    check('M2 objective label', c.objective_label in t)
+    check('M2 headline has z', 'Δ = ' in t and '(z = ' in t)
+    check('M2 no coupling sentence on independent data', 'treated as independent' not in t)
+
+
+def test_m3_coupling():
+    import joint_fit_stats as jfs
+    ja = make_jf(3, cov=shared_cov, share=None)
+    ja.perform_fit(X[0], X[-1])
+    jb = make_jf(3, cov=shared_cov)
+    jb.perform_fit(X[0], X[-1])
+    t = jfs.format_comparison(jfs.compare_fits(_snap(ja), _snap(jb)))
+    check('M3 shared covariance: coupling sentence',
+          'datasets treated as independent after conditioning on shared error terms in the '
+          'listed order' in t)
+    ja = make_jf(3, cov=private_cov, share=None)
+    ja.perform_fit(X[0], X[-1])
+    jb = make_jf(3, cov=private_cov)
+    jb.perform_fit(X[0], X[-1])
+    t = jfs.format_comparison(jfs.compare_fits(_snap(ja), _snap(jb)))
+    check('M3 private covariance: no coupling sentence', 'treated as independent' not in t)
+
+
+def test_m4_small_n():
+    import joint_fit_stats as jfs
+    for nds in (3, 1):
+        c = jfs.compare_fits(_snap(_fit(nds, cov=None)), _snap(_fit(nds, cov=None, func=Quad)))
+        t = jfs.format_comparison(c)
+        check('M4 N=%d z is None' % nds, c.z is None and c.N == nds)
+        check('M4 N=%d note in text' % nds,
+              'no calibrated z: too few datasets to estimate the spread' in t)
+        check('M4 N=%d no "z =" in text' % nds, 'z =' not in t)
+
+
+def test_m5_line_vs_quad():
+    import joint_fit_stats as jfs
+    c = jfs.compare_fits(_snap(_fit(3, cov=None)), _snap(_fit(3, cov=None, func=Quad)))
+    check('M5 not nested', c.nested is None and c.lr_p is None and c.delta_k is None)
+    md = ' '.join(c.model_differences)
+    check('M5 model_differences names both classes', 'Line' in md and 'Quad' in md, md)
+    t = jfs.format_comparison(c)
+    check('M5 text names both', 'Line' in t and 'Quad' in t)
+
+
+def test_m6_nested():
+    import joint_fit_stats as jfs
+    from scipy.stats import chi2
+    ja = make_jf(4, share=None)
+    ja.perform_fit(X[0], X[-1])
+    jb = make_jf(4)
+    jb.perform_fit(X[0], X[-1])
+    a, b = _snap(ja), _snap(jb)
+    check('M6 fits differ in k', a.nvarys == 8 and b.nvarys == 5, '%d %d' % (a.nvarys, b.nvarys))
+    check('M6 param names', 'd0_a' in a.param_map and 'd1_a' in a.param_map)
+    check('M6 nesting B in A', jfs.nesting(a, b) == 'B in A' and jfs.nesting(b, a) == 'A in B')
+    c = jfs.compare_fits(a, b)
+    check('M6 delta_k', c.delta_k == 3 and c.nested == 'B in A', str(c.delta_k))
+    check('M6 -2 sum_d >= 0', -2 * c.sum_d >= 0, '%.4g' % (-2 * c.sum_d))
+    _close('M6 lr_p', c.lr_p, chi2.sf(-2 * c.sum_d, 3))
+    t = jfs.format_comparison(c)
+    check('M6 caveat in text', 'the model is likely misspecified; leave-one-out is the honest '
+          'check' in t and 'B in A' in t)
+    c2 = jfs.compare_fits(b, a)
+    check('M6 mirror', c2.nested == 'A in B' and c2.delta_k == 3, str(c2.delta_k))
+    _close('M6 mirror lr_p', c2.lr_p, chi2.sf(2 * c2.sum_d, 3))
+    jc = make_jf(4)
+    jc.master_params['d0_b'].vary = False
+    jc.perform_fit(X[0], X[-1])
+    check('M6 B fixes what A frees: still nested', jfs.nesting(a, _snap(jc)) == 'B in A')
+    jd = make_jf(4, share=None)
+    jd.master_params['d0_b'].vary = False
+    jd.perform_fit(X[0], X[-1])
+    check('M6 B frees what A fixes (and shares): not nested',
+          jfs.nesting(_snap(jd), b) is None)
+
+
+def test_m7_ic():
+    import dataclasses as dc
+    import joint_fit_stats as jfs
+    ja = make_jf(2, cov=private_cov, share=None)
+    ja.covariance_mode = 'data'
+    ja.perform_fit(X[0], X[-1])
+    jb = make_jf(2, cov=private_cov)
+    jb.covariance_mode = 'data'
+    jb.perform_fit(X[0], X[-1])
+    a, b = _snap(ja), _snap(jb)
+    ia, ib = jfs.information_criteria(a), jfs.information_criteria(b)
+    _, ea = jfs.per_dataset_objective(a)
+    _close('M7 aic == nll2 + prior + 2k', ia['aic'], ea['nll2'] + ea['prior'] + 2 * a.nvarys)
+    _close('M7 bic', ia['bic'], ea['nll2'] + ea['prior'] + a.nvarys * np.log(ia['n']))
+    check('M7 fields', ia['form'] == 'known errors' and ia['k'] == a.nvarys
+          and ia['n'] == 80 and 'note' not in ia)
+    _close('M7 aic_A - aic_B == chisqr diff + 2 dk', ia['aic'] - ib['aic'],
+           a.chisqr - b.chisqr + 2 * (a.nvarys - b.nvarys), rtol=1e-10, atol=1e-10)
+    jw = make_jf(2)
+    jw.perform_fit(X[0], X[-1], fit_scale='Linear w/o error')
+    w = _snap(jw)
+    iw = jfs.information_criteria(w)
+    terms, _ = jfs.per_dataset_objective(w)
+    rss = sum(t.sequential for t in terms)
+    n = iw['n']
+    _close('M7 unweighted aic', iw['aic'], n * np.log(rss / n) + 2 * w.nvarys)
+    _close('M7 unweighted bic', iw['bic'], n * np.log(rss / n) + w.nvarys * np.log(n))
+    check('M7 unweighted form', iw['form'] == 'unknown error scale')
+    r = dc.replace(a, rescale={'mode': 'per_dataset', 'inflate_only': False, 's': (1., 1.)})
+    ir = jfs.information_criteria(r)
+    check('M7 rescaled k and note', ir['k'] == a.nvarys + 2
+          and ir['note'] == 'conditional on the fitted s', str(ir))
+    c = jfs.compare_fits(a, b)
+    t = jfs.format_comparison(c, ia, ib)
+    h = 'information criteria (assume a correct model; read with caution)'
+    check('M7 IC heading after the headline, last section',
+          h in t and t.index(h) > t.index('not a confidence measure')
+          and t.index(h) > t.index('prior terms') and 'AIC' in t.split(h)[1])
+    check('M7 no heading without IC', h not in jfs.format_comparison(c))
+
+
+def _model_pair(scale='Linear'):
+    ja = make_jf(2, cov=private_cov, share=None)
+    ja.covariance_mode = 'model'
+    ja.perform_fit(X[0], X[-1], fit_scale=scale)
+    jb = make_jf(2, cov=private_cov, share=None)
+    jb.covariance_mode = 'model'
+    jb.master_params['d1_a'].value = 1.2 * A_TRUE
+    jb.master_params['d1_a'].vary = False
+    jb.master_params['d1_b'].value = 1.2 * B_TRUE
+    jb.master_params['d1_b'].vary = False
+    jb.perform_fit(X[0], X[-1], fit_scale=scale)
+    return ja, jb
+
+
+def test_m8_model_mode_exact():
+    import joint_fit_stats as jfs
+    from scipy.stats import multivariate_normal
+    ja, jb = _model_pair()
+    a, b = _snap(ja), _snap(jb)
+    fa, fb = _cat_yf(ja)[1], _cat_yf(jb)[1]
+    ratio = float(np.mean(fb[1] / fa[1]))
+    check('M8 scan-2 intensity differs ~20 percent', abs(ratio - 1.2) < 0.1, '%.3f' % ratio)
+    c = jfs.compare_fits(a, b)
+    check('M8 delta_logdet != 0', c.delta_logdet != 0, '%.4g' % c.delta_logdet)
+    _close('M8 sum_d == (dchi2 + dlogdet)/2', c.sum_d, 0.5 * (c.delta_chi2 + c.delta_logdet))
+
+    def total(jf):
+        ys, fs = _cat_yf(jf)
+        out = 0.0
+        for y, f in zip(ys, fs):
+            w = (X > 1.0).astype(float)
+            C = E ** 2 * np.eye(len(X)) + 4e-4 * np.outer(f * w, f * w)
+            out += multivariate_normal(mean=f, cov=C).logpdf(y)
+        return out
+
+    _close('M8 sum_d == half difference of independent logpdfs', c.sum_d,
+           0.5 * (-2 * total(ja) + 2 * total(jb)), rtol=1e-10)
+    t = jfs.format_comparison(c)
+    check('M8 parts in text', '(Δχ²/2 = ' in t and 'Δ log det/2 = ' in t)
+
+
+def test_m9_log_logdet_zero():
+    import joint_fit_stats as jfs
+    ja, jb = _model_pair('Log')
+    a, b = _snap(ja), _snap(jb)
+    check('M9 the two Log fits really differ', abs(a.params['d1_a'] - b.params['d1_a']) > 0.1)
+    c = jfs.compare_fits(a, b)
+    check('M9 delta_logdet == 0', abs(c.delta_logdet) < 1e-10, '%.3e' % c.delta_logdet)
+    check('M9 no parts in text', 'Δ log det/2' not in jfs.format_comparison(c))
+
+
 def main():
     app = QApplication.instance() or QApplication([])
     for t in (test_q1_quiet_restores, test_q2_no_emission, test_q3_row_ranges,
@@ -751,7 +971,10 @@ def main():
               test_p4_model_mode, test_p12_exact_likelihood, test_p13_logdet_nocov_unweighted,
               test_p5_labels, test_p6_emcee_label, test_p7_aborted_label, test_p8_masked_x,
               test_p9_empty_dataset, test_p10_no_side_effects, test_p11_last_snapshot,
-              test_k1_fields, test_k2_allowed, test_k3_model_mode):
+              test_k1_fields, test_k2_allowed, test_k3_model_mode,
+              test_m1_hand_values, test_m2_text, test_m3_coupling, test_m4_small_n,
+              test_m5_line_vs_quad, test_m6_nested, test_m7_ic,
+              test_m8_model_mode_exact, test_m9_log_logdet_zero):
         t()
     return finish()
 
