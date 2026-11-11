@@ -79,6 +79,7 @@ class JointSnapshot:
     warnings: tuple
     label: Optional[str]
     rescale: Optional[dict] = None   # Task 5 defines its keys
+    notes: tuple = ()                # model_blocks substitution notes (model mode)
 
 
 @dataclass
@@ -216,11 +217,13 @@ def snapshot(jf):
     used = _used_masks(jf, cov_path)
 
     fit_blocks = exact_blocks = None
+    block_notes = ()
     if cov_path:
         fit_blocks = list(jf._last_blocks)
         exact_blocks = fit_blocks
         if cov_mode == 'model':
             exact_blocks, _notes = jf.model_blocks(params, scale)
+            block_notes = tuple(str(n) for n in (_notes or ()))
     needs = cov_path and cov_mode == 'model' and cc.needs_intensity(fit_blocks, cscale)
     # opt-in error rescaling (§6.3): the residual the fit minimised was r_i / s_i whitened by
     # the unscaled L, i.e. whitened by chol(S C S) = S L; z and logdiag follow suit
@@ -322,7 +325,8 @@ def snapshot(jf):
         covar=None if covar is None else np.array(covar, float),
         var_names=tuple(getattr(res, 'var_names', None) or ()),
         param_map={k: tuple((int(i), str(lk)) for (i, lk) in v) for k, v in jf.param_map.items()},
-        warnings=tuple(str(w) for w in jf.warnings), label=label, rescale=rescale)
+        warnings=tuple(str(w) for w in jf.warnings), label=label, rescale=rescale,
+        notes=block_notes)
 
 
 # --------------------------------------------------------------- rebuild L --
@@ -805,3 +809,198 @@ def format_comparison(c, ic_a=None, ic_b=None):
             lines.append('  ΔAIC (A − B) = %+.6g  ΔBIC (A − B) = %+.6g' % (
                 ic_a['aic'] - ic_b['aic'], ic_a['bic'] - ic_b['bic']))
     return '\n'.join(lines)
+
+
+# ------------------------------------------------------------- diagnostics --
+_DEG_UNAVAILABLE = 'no parameter covariance (the Hessian failed)'
+
+
+def _fmt_coef(c):
+    return '%.2g' % abs(c)
+
+
+def _degeneracy(snap, rho_tol=0.9):
+    """Correlation pairs above ``rho_tol`` and the softest direction (spec §6.4 item 3).
+    Reads only ``snap.covar``; coefficients are in stderr units because the correlation
+    matrix is the stderr-normalised covariance."""
+    cov = snap.covar
+    names = list(snap.var_names)
+    if cov is None or len(names) == 0 or np.shape(cov) != (len(names), len(names)):
+        return {'unavailable': _DEG_UNAVAILABLE}
+    cov = np.asarray(cov, float)
+    if not np.all(np.isfinite(cov)):
+        return {'unavailable': _DEG_UNAVAILABLE}
+    if np.any(np.diag(cov) <= 0):
+        # an exactly singular Hessian leaves numerical junk (negative variances); a
+        # correlation read from it would be spurious, so say what it means instead
+        return {'unavailable': 'parameter covariance is not positive definite (singular '
+                               'Hessian: some parameters are exactly degenerate or unconstrained)'}
+    sd = np.sqrt(np.diag(cov))
+    corr = cov / np.outer(sd, sd)
+    corr = 0.5 * (corr + corr.T)
+    pairs = []
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            if abs(corr[i, j]) > rho_tol:
+                pairs.append((names[i], names[j], float(corr[i, j])))
+    pairs.sort(key=lambda t: -abs(t[2]))
+    softest = []
+    if len(names) >= 2:
+        w, v = np.linalg.eigh(corr)
+        vec = v[:, int(np.argmax(w))]
+        vec = vec / vec[int(np.argmax(np.abs(vec)))]      # largest |coef| is +1
+        order = np.argsort(-np.abs(vec), kind='stable')
+        softest = [(names[i], float(vec[i])) for i in order if abs(vec[i]) >= 0.1]
+    return {'pairs': pairs, 'softest': softest}
+
+
+def _section(diag, name, fn):
+    try:
+        diag[name] = fn()
+    except Exception as e:                       # noqa: BLE001 -- degrade, report
+        diag[name] = None
+        diag['unavailable'].append((name, '%s: %s' % (type(e).__name__, e)))
+
+
+def diagnostics(jf, snap, individual_fits=None, *, qrange_tol=0.10, hetero_ratio=3.0,
+                rho_tol=0.9, fisher=True, tension=True, optimum=True):
+    """End-of-fit diagnostics of a joint fit (spec §6, §6.3 "Always", §6.4 items 1-4).
+    Every section is computed on its own; one that raises is listed in ``unavailable``
+    as ``(section, '<ExcType>: <msg>')`` and never propagates. ``fisher``, ``tension``
+    and ``optimum_distance`` are filled by Task 8 (``None`` here)."""
+    d = {'unavailable': []}
+    cache = {}
+
+    def terms():
+        if 'terms' not in cache:
+            cache['terms'] = per_dataset_objective(snap)
+        return cache['terms']
+
+    def objective():
+        ts, ex = terms()
+        coup = abs(ex['coupling']) > 1e-9 * (1.0 + abs(sum(t.sequential for t in ts)))
+        o = {'label': ex['objective_label'], 'likelihood': ex['likelihood'],
+             'mode': snap.cov_mode if snap.cov_in_use else None, 'nll2': ex['nll2'],
+             'notes': list(snap.notes)}
+        if coup:
+            o['order'] = list(ex['order'])
+        if snap.cov_in_use and snap.cov_mode == 'model':
+            o['fit_gap'] = ex['fit_gap']
+        return o
+
+    def quality():
+        ts, _ = terms()
+        return [{'name': t.name, 'n': t.n_points, 'chi2_per_point': t.chi2_per_point}
+                for t in ts]
+
+    def heterogeneity():
+        ts, _ = terms()
+        v = [t.chi2_per_point for t in ts if t.chi2_per_point is not None]
+        if len(v) < 2:
+            return {'min': (v[0] if v else None), 'max': (v[0] if v else None),
+                    'ratio': None, 'flagged': False}
+        lo, hi = float(min(v)), float(max(v))
+        ratio = hi / lo if lo > 0 else float('inf')
+        return {'min': lo, 'max': hi, 'ratio': ratio, 'flagged': bool(ratio > hetero_ratio)}
+
+    def qrange():
+        qm = [float(x.window[1]) for x in snap.datasets]
+        spread = (max(qm) / min(qm) - 1.0) if qm and min(qm) > 0 else None
+        return {'qmax': qm, 'spread': spread,
+                'flagged': bool(spread is not None and spread > qrange_tol),
+                'mode': 'native windows'}
+
+    def shared_warnings():
+        return [w for w in snap.warnings if w.startswith('shared ')]
+
+    _section(d, 'objective', objective)
+    _section(d, 'quality', quality)
+    _section(d, 'heterogeneity', heterogeneity)
+    _section(d, 'qrange', qrange)
+    _section(d, 'shared_warnings', shared_warnings)
+    _section(d, 'degeneracy', lambda: _degeneracy(snap, rho_tol))
+    _section(d, 'information_criteria', lambda: information_criteria(snap))
+    d['rescale'] = dict(snap.rescale) if snap.rescale is not None else None
+    d['fisher'] = None
+    d['tension'] = None
+    d['optimum_distance'] = None
+    d['thresholds'] = {'qrange_tol': qrange_tol, 'hetero_ratio': hetero_ratio, 'rho_tol': rho_tol}
+    return d
+
+
+def _softest_text(softest):
+    parts = []
+    for k, (nm, c) in enumerate(softest):
+        if k == 0:
+            parts.append(nm if c > 0 else '-%s' % nm)
+        else:
+            parts.append('%s %s·%s' % ('-' if c < 0 else '+', _fmt_coef(c), nm))
+    return ' '.join(parts)
+
+
+def format_diagnostics(diag):
+    """Plain-text rendering of ``diagnostics`` (starts ``Joint-fit diagnostics:``)."""
+    th = diag.get('thresholds', {})
+    L = ['Joint-fit diagnostics:']
+    o = diag.get('objective')
+    if o:
+        L.append('  objective: %s' % o['label'])
+        if o.get('order'):
+            L.append('  dataset order (sequential split): %s' % ', '.join(o['order']))
+        if o.get('nll2') is not None:
+            L.append('  -2 ln L = %.6g' % o['nll2'])
+        if o.get('fit_gap') is not None:
+            L.append('  fit_gap (exact chi2 at the fitted point - result.chisqr) = %+.4g'
+                     % o['fit_gap'])
+        for n in o.get('notes') or ():
+            L.append('  note: %s' % n)
+    q = diag.get('quality')
+    if q:
+        L.append('  per-dataset quality (chi2 per point, each dataset scored under its own block):')
+        for r in q:
+            L.append('    %-16s n = %-5d %s' % (r['name'], r['n'], 'no points'
+                     if r['chi2_per_point'] is None or not r['n']
+                     else 'chi2/n = %.4g' % r['chi2_per_point']))
+    h = diag.get('heterogeneity')
+    if h and h.get('ratio') is not None:
+        L.append('  chi2/n spread: min %.4g, max %.4g, max/min = %.3g'
+                 % (h['min'], h['max'], h['ratio']))
+        if h['flagged']:
+            L.append('  error bars or model adequacy differ between datasets '
+                     '(max/min chi2/n > %g)' % th.get('hetero_ratio', 3.0))
+    g = diag.get('qrange')
+    if g and g.get('spread') is not None:
+        L.append('  q-range (%s): qmax = %s, spread %.3g' % (
+            g['mode'], ', '.join('%.4g' % v for v in g['qmax']), g['spread']))
+        if g['flagged']:
+            L.append('  q-ranges differ between datasets (%s; spread > %g%%)' % (
+                g['mode'], 100 * th.get('qrange_tol', 0.1)))
+    for w in diag.get('shared_warnings') or ():
+        L.append('  %s' % w)
+    dg = diag.get('degeneracy')
+    if dg:
+        if 'unavailable' in dg:
+            L.append('  degeneracy: %s' % dg['unavailable'])
+        else:
+            if dg['pairs']:
+                for a, b, r in dg['pairs']:
+                    L.append('  degenerate pair: %s, %s (rho = %+.3f)' % (a, b, r))
+            else:
+                L.append('  no parameter pair with |rho| above the threshold')
+            if dg['softest']:
+                L.append('  softest direction: %s (coefficients in stderr units)'
+                         % _softest_text(dg['softest']))
+    ic = diag.get('information_criteria')
+    if ic:
+        L.append('  information criteria (assume a correct model; read with caution): '
+                 'AIC %.6g, BIC %.6g (k = %d, n = %d, %s%s)' % (
+                     ic['aic'], ic['bic'], ic['k'], ic['n'], ic['form'],
+                     '; ' + ic['note'] if ic.get('note') else ''))
+    r = diag.get('rescale')
+    if r:
+        L.append('  errors rescaled per dataset by √χ²_red: s = %s (%d rounds, %s)' % (
+            ', '.join('%.4g' % v for v in r['s']), r['rounds'],
+            'converged' if r['converged'] else 'not converged'))
+    for sec, why in diag.get('unavailable') or ():
+        L.append('  diagnostics unavailable (%s): %s' % (sec, why))
+    return '\n'.join(L)

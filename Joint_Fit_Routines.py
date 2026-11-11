@@ -1704,7 +1704,15 @@ class JointFit(QObject):
                 '  - %s\n' % w for w in warns)
         if downgrades:
             rep = 'DEGRADED FIT: %s\n\n' % '; '.join(downgrades) + rep
-        return rep
+        try:                                    # WS2 diagnostics: appended last, failure-safe
+            import joint_fit_stats as jfs
+            snap = self.last_snapshot
+            if snap is None:
+                raise RuntimeError('no snapshot of this fit (it failed or no fit has run)')
+            txt = jfs.format_diagnostics(jfs.diagnostics(self, snap))
+        except Exception as e:                  # noqa: BLE001 -- degrade, report
+            txt = 'Joint-fit diagnostics:\n  diagnostics unavailable: %s' % e
+        return rep + '\n\n' + txt
 
     def _rescale_block(self):
         """The report lines of an error-rescaled fit (spec 6.3): the factors, the dof, how
