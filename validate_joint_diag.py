@@ -1,8 +1,11 @@
 """
-validate_joint_diag.py -- WS2 reporting harness, sections D (Task 6), I (Task 7), later F, L.
+validate_joint_diag.py -- WS2 reporting harness, sections D (Task 6), I (Task 7), F (Task 8),
+later L.
 
 Section D: the "Joint-fit diagnostics:" block of JointFit._report() -- quality,
 heterogeneity, q-range, shared-parameter warnings, degeneracy, failure safety.
+Section F: Fisher shares of the shared parameters, model-reduction tension, the exact
+objective and the distance from the fitted point to the exact-likelihood optimum.
 
 Fixtures come from validate_joint_stats.  Report text contains non-ascii (chi, sigma,
 sqrt): never print it raw, use ascii().
@@ -304,7 +307,7 @@ def test_d9_empty_dataset():            # ruling R1: P9's missing format_diagnos
         ok = False; txt = ''
         print('D9 raised', repr(e))
     check('D9 diagnostics + format do not raise', ok)
-    row = [l for l in txt.splitlines() if l.strip().startswith('D1 ')]
+    row = [l for l in txt.splitlines() if l.strip().startswith('D1 ') and ' n = ' in l]
     check('D9 quality row says no points', len(row) == 1 and 'no points' in row[0], ascii(txt))
     check('D9 no NaN in text', 'nan' not in txt.lower(), ascii(txt))
     check('D9 nothing unavailable', d['unavailable'] == [], str(d['unavailable']))
@@ -327,8 +330,9 @@ def test_d10_objective_extras():
     jf = make_jf(2)
     _fit(jf)
     d = _diag(jf)
-    check('D10 Task 8 keys exist as None',
-          all(k in d and d[k] is None for k in ('fisher', 'tension', 'optimum_distance')))
+    check('D10 Task 8 keys: fisher filled; tension, optimum_distance None without a covariance',
+          isinstance(d.get('fisher'), dict) and d['tension'] is None
+          and 'optimum_distance' in d and d['optimum_distance'] is None)
     check('D10 uncoupled: no order', 'order' not in d['objective'])
 
 
@@ -692,6 +696,273 @@ def test_i11_column_mask():
           '%.12g vs %.12g' % (rows[0]['indiv_m'], hand))
 
 
+# ----------------------------------------------------------------------- F --
+def _params_from(jf, snap, v):
+    p = jf.result.params.copy()
+    for k, val in zip(snap.var_names, v):
+        p[k].value = float(val)
+    return p
+
+
+def _fisher_text(jf, **kw):
+    return jfs.format_diagnostics(jfs.diagnostics(jf, jf.last_snapshot, **kw))
+
+
+def test_f1_fisher_analytic():
+    jf = make_jf(3, cov=private_cov)
+    jf.covariance_mode = 'data'
+    _fit(jf)
+    snap = jf.last_snapshot
+    fs = jfs.fisher_shares(jf, snap)
+    check('F1 shared params are [a]', fs['params'] == ['a'], str(fs['params']))
+    L = jfs.rebuild_L(snap)
+    ok, det = True, []
+    for k, d in enumerate(snap.datasets):
+        Cii = jfs._block_of(L, *d.rows)
+        x = d.x[d.used]
+        Xd = np.stack([x, np.ones_like(x)], axis=1)
+        Ia = Xd.T @ np.linalg.solve(Cii, Xd)
+        got = fs['information'][d.name]['a']
+        rel = abs(got - Ia[0, 0]) / Ia[0, 0]
+        # the full per-dataset matrix over (a, this dataset's b) as well
+        M = fs['matrix'][d.name]
+        names = list(fs['var_names'])
+        ii = [names.index('a'), names.index('d%d_b' % k)]
+        relM = np.max(np.abs(M[np.ix_(ii, ii)] - Ia)) / np.max(np.abs(Ia))
+        ok &= rel <= 1e-5 and relM <= 1e-5
+        det.append('%s %.2e %.2e' % (d.name, rel, relM))
+    check('F1 I_i[a,a] == x^T C_ii^-1 x (1e-5 rel), full block too', ok, '; '.join(det))
+
+
+def test_f2_shares_sum_and_coupling():
+    for cov in (None, private_cov):
+        jf = make_jf(3, cov=cov, scale_err=[1.0, 2.0, 0.5])
+        jf.covariance_mode = 'data'
+        _fit(jf)
+        fs = jfs.fisher_shares(jf, jf.last_snapshot)
+        tot = sum(fs['shares'][n]['a'] for n in fs['shares'])
+        tag = 'F2 %s' % ('private' if cov else 'nocov')
+        check(tag + ' shares of a sum to 1 (1e-12)', abs(tot - 1.0) <= 1e-12, '%.3e' % (tot - 1))
+        check(tag + ' not coupled', fs['coupled'] is False)
+        txt = _fisher_text(jf)
+        check(tag + ' no coupling sentence', 'shared errors are counted once' not in txt)
+    jf = make_jf(3, cov=shared_cov)
+    jf.covariance_mode = 'data'
+    _fit(jf)
+    fs = jfs.fisher_shares(jf, jf.last_snapshot)
+    check('F2 shared cov: coupled', fs['coupled'] is True)
+    txt = _fisher_text(jf)
+    check('F2 shared cov: sentence present',
+          'the joint information is smaller than the sum: shared errors are counted once' in txt,
+          ascii(txt))
+    check('F2 shares table rendered', 'D0' in txt and 'share' in txt, ascii(txt))
+
+
+def test_f3_one_dataset():
+    jf = make_jf(1)
+    _fit(jf)
+    fs = jfs.fisher_shares(jf, jf.last_snapshot)
+    check('F3 no shared master: params empty', fs['params'] == [], str(fs['params']))
+    d = jfs.diagnostics(jf, jf.last_snapshot)
+    check('F3 diagnostics fisher filled, nothing unavailable',
+          d['fisher'] is not None and d['unavailable'] == [], str(d['unavailable']))
+    jfs.format_diagnostics(d)
+
+
+def _tension_jf(scale=np.exp(0.03), cov=private_cov, mode='data'):
+    jf = make_jf(3, cov=cov, seed=1)
+    seg = X > 1.0
+    o = jf.objectives[1]
+    o['y'] = np.where(seg, o['y'] * scale, o['y'])
+    if o['cov'] is not None and o['cov'].y is not None:
+        o['cov'].y = np.asarray(o['y'], float).copy()
+    jf.covariance_mode = mode
+    _fit(jf)
+    return jf
+
+
+def test_f4_tension():
+    jf = _tension_jf()
+    rows = jfs.tension(jf.last_snapshot)
+    r1 = [r for r in rows if r['dataset'] == 'D1']
+    check('F4 one row per non-anchor component per dataset',
+          len(rows) == 3 and len(r1) == 1, str([(r['dataset'], r['label']) for r in rows]))
+    p = r1[0]['pull'] if r1 else float('nan')
+    check('F4 scan-2 pull within 0.5 of 1.5', abs(p - 1.5) <= 0.5, '%.4g' % p)
+    others = [abs(r['pull']) for r in rows if r['dataset'] != 'D1']
+    check('F4 the other datasets show no tension (|pull| < 0.6)', max(others) < 0.6, str(others))
+    txt = _fisher_text(jf)
+    check('F4 heading model-reduction tension', 'model–reduction tension' in txt, ascii(txt))
+    check('F4 never stitching quality', 'stitching quality' not in txt)
+    check('F4 not presented as a fitted scale factor', 'fitted scale factor' not in txt)
+    jf0 = make_jf(2)
+    _fit(jf0)
+    check('F4 no covariance: tension None', jfs.tension(jf0.last_snapshot) is None)
+    d = jfs.diagnostics(jf, jf.last_snapshot, tension=False)
+    check('F4 tension=False skips it', d['tension'] is None)
+
+
+def test_f5_no_side_effects():
+    for mode in ('data', 'model'):
+        jf = make_jf(2, cov=private_cov)
+        jf.covariance_mode = mode
+        hits = []
+        jf.functionCalled.connect(lambda *a: hits.append(1))
+        _fit(jf)
+        snap = jf.last_snapshot
+        # a sentinel model state (the fit's own _report already ran the diagnostics once)
+        sent = jf.result.params.copy()
+        sent['a'].value = 123.0
+        jf.push_params(sent)
+        for o in jf.objectives:
+            o['func'].x = np.array([7.0, 8.0])
+        n0, nit = len(hits), jf.Niter
+        res0 = {k: (p.value, p.stderr, p.vary, p.expr) for k, p in jf.result.params.items()}
+        chi0, covar0 = jf.result.chisqr, np.array(jf.result.covar, float)
+        mb = [(o['func'].x.copy(), o['func'].a, o['func'].b, o['func'].params['a'].value,
+               o['func'].params['b'].value, o['func'].__fit__, o.get('yfit_masked'))
+              for o in jf.objectives]
+        L0 = np.array(jf._L, float)
+        jfs.fisher_shares(jf, snap)
+        jfs.tension(snap)
+        p = jf.result.params.copy()
+        p['a'].value += 0.1
+        jfs.exact_objective(jf, snap, p)
+        jfs.optimum_distance(jf, snap)
+        jfs.diagnostics(jf, snap)
+        tag = 'F5 %s' % mode
+        check(tag + ' emissions and Niter unchanged', len(hits) == n0 and jf.Niter == nit)
+        check(tag + ' result unchanged',
+              res0 == {k: (q.value, q.stderr, q.vary, q.expr) for k, q in jf.result.params.items()}
+              and chi0 == jf.result.chisqr and np.array_equal(covar0, jf.result.covar))
+        check(tag + ' models restored', all(
+            np.array_equal(b[0], o['func'].x) and b[1] == o['func'].a and b[2] == o['func'].b
+            and b[3] == o['func'].params['a'].value and b[4] == o['func'].params['b'].value
+            and b[5] == o['func'].__fit__ and b[6] == o.get('yfit_masked')
+            for b, o in zip(mb, jf.objectives)))
+        check(tag + ' fit L untouched', np.array_equal(L0, jf._L))
+
+
+def _f6_jf():
+    """Model mode, Linear, a private multiplicative term with Sigma = 0.05^2 per point
+    (weights = identity, K = N) and data whose relative scatter is twice that: C(theta)
+    moves with the model at every point and the score through C is O(N), so the reweighting
+    fixed point sits visibly (~0.45 stderr in a) off the exact optimum. A rank-1 stitching
+    term (one component per segment) moves it by only ~0.01 stderr: its score through C is
+    O(1) against an O(N) curvature, too small for a non-vacuous test."""
+    import covariance_core as cc
+    from Joint_Fit_Routines import JointFit
+    rng = np.random.default_rng(0)
+    s = 0.05
+    jf = JointFit()
+    for i in range(2):
+        f = A_TRUE * X + B_TRUE
+        y = f * (1 + 2.0 * s * rng.standard_normal(len(X))) + E * rng.standard_normal(len(X))
+        c = cc.DatasetCovariance(X, E * np.ones_like(X),
+                                 [cc.CovTerm('pp', 'multiplicative', s ** 2 * np.eye(len(X)),
+                                             weights=np.eye(len(X)), scope='dataset')], y)
+        jf.add_dataset('D%d' % i, funcClass=Line, x=X, y=y, yerr=E * np.ones_like(X), cov=c)
+    jf.build_master_params(groups=[jf.share_all('a')])
+    for k in jf.master_params:
+        jf.master_params[k].vary = True
+    jf.covariance_mode = 'model'
+    _fit(jf)
+    return jf
+
+
+def test_f6_exact_objective_and_optimum():
+    from scipy.optimize import minimize
+    for cov, mode, scale, resc in ((private_cov, 'data', 'Linear', None),
+                                   (private_cov, 'model', 'Linear', None),
+                                   (private_cov, 'model', 'Linear', 'per_dataset'),
+                                   (private_cov, 'data', 'Log', None),
+                                   (shared_cov, 'model', 'Linear', None),
+                                   (None, None, 'Linear', None), (None, None, 'Log', None),
+                                   (None, None, 'Linear', 'per_dataset')):
+        jf = make_jf(3, cov=cov, scale_err=[1.0, 1.5, 0.7])
+        if mode:
+            jf.covariance_mode = mode
+        jf.rescale_errors = resc
+        _fit(jf, scale=scale)
+        snap = jf.last_snapshot
+        _, ex = jfs.per_dataset_objective(snap)
+        want = ex['nll2'] + ex['prior']
+        got = jfs.exact_objective(jf, snap, jf.result.params)
+        check('F6 exact_objective == nll2 + prior (1e-10) [%s %s %s %s]'
+              % ('cov' if cov else 'nocov', mode, scale, resc),
+              abs(got - want) <= 1e-10 * max(1.0, abs(want)), '%.15g vs %.15g' % (got, want))
+    # the distance to the exact optimum, against Nelder-Mead on the exact objective
+    jf = _f6_jf()
+    snap = jf.last_snapshot
+    od = jfs.optimum_distance(jf, snap)
+    th = np.array([snap.params[k] for k in snap.var_names])
+    sol = minimize(lambda v: jfs.exact_objective(jf, snap, _params_from(jf, snap, v)), th,
+                   method='Nelder-Mead',
+                   options={'xatol': 1e-10, 'fatol': 1e-12, 'maxiter': 40000, 'maxfev': 40000})
+    true_d = sol.x - th
+    ok, det, n_big = True, [], 0
+    for k, name in enumerate(snap.var_names):
+        se = snap.stderr[name]
+        dd, est = true_d[k], od['delta'][name]
+        det.append('%s true %.3e est %.3e (%.3g se)' % (name, dd, est, dd / se))
+        if abs(dd) > 0.05 * se:
+            n_big += 1
+            ok &= np.sign(dd) == np.sign(est) and abs(est - dd) <= 0.2 * abs(dd)
+    check('F6 some parameter moves > 0.05 stderr (the test is not vacuous)', n_big >= 1, '; '.join(det))
+    check('F6 delta agrees with Nelder-Mead in sign and within 20 %', ok, '; '.join(det))
+    check('F6 in_stderr = delta / stderr', all(
+        abs(od['in_stderr'][n] - od['delta'][n] / snap.stderr[n]) <= 1e-12 * abs(od['in_stderr'][n]) + 1e-15
+        for n in snap.var_names))
+    wn, wv = od['worst']
+    check('F6 worst is the largest |delta/stderr|',
+          abs(wv) == max(abs(v) for v in od['in_stderr'].values()) and od['in_stderr'][wn] == wv)
+    _, ex = jfs.per_dataset_objective(snap)
+    check('F6 fit_gap carried', od['fit_gap'] == ex['fit_gap'])
+    txt = _fisher_text(jf)
+    check('F6 line printed', 'the fitted point is the reweighting fixed point; the exact-likelihood '
+          'optimum is estimated' in txt and 'fit gap' in txt, ascii(txt))
+    check('F6 WS6 clause iff |worst| > 0.3',
+          ('the WS6 exact optimiser should settle it' in txt) == (abs(wv) > 0.3), '%.3g' % wv)
+
+
+def test_f7_modes():
+    import dataclasses
+    for cov, mode in ((private_cov, 'data'), (None, 'model')):
+        jf = make_jf(2, cov=cov)
+        jf.covariance_mode = mode
+        _fit(jf)
+        tag = 'F7 %s' % ('data mode' if cov else 'no covariance')
+        check(tag + ': optimum_distance None', jfs.optimum_distance(jf, jf.last_snapshot) is None)
+        d = jfs.diagnostics(jf, jf.last_snapshot)
+        txt = jfs.format_diagnostics(d)
+        check(tag + ': no optimum line', 'exact-likelihood optimum' not in txt and d['optimum_distance'] is None)
+        check(tag + ': no mean-information footnote', 'mean information only' not in txt, ascii(txt))
+    jf = make_jf(2, cov=private_cov)
+    jf.covariance_mode = 'model'
+    _fit(jf)
+    snap = jf.last_snapshot
+    od = jfs.optimum_distance(jf, dataclasses.replace(snap, covar=None))
+    check('F7 model mode, covar None: unavailable',
+          od == {'unavailable': 'no parameter covariance (the Hessian failed)'}, str(od))
+    fs = jfs.fisher_shares(jf, snap)
+    check('F7 model mode: mean_information_only flag', fs.get('mean_information_only') is True)
+    d = jfs.diagnostics(jf, snap)
+    txt = jfs.format_diagnostics(d)
+    check('F7 model mode: footnote present',
+          'mean information only; the information the covariance carries about the parameters '
+          'is omitted' in txt, ascii(txt))
+    check('F7 model mode: optimum line present', 'exact-likelihood optimum' in txt, ascii(txt))
+    d = jfs.diagnostics(jf, snap, optimum=False, fisher=False)
+    check('F7 optimum=False / fisher=False skip', d['optimum_distance'] is None and d['fisher'] is None)
+
+
+def _guarded(t):
+    try:
+        t()
+    except Exception as e:                       # noqa: BLE001 -- count, keep going
+        check('%s raised' % t.__name__, False, '%s: %s' % (type(e).__name__, e))
+
+
 def main():
     app = QApplication.instance() or QApplication([])
     for t in (test_d1_block_and_identity, test_d2_heterogeneity, test_d3_qrange,
@@ -704,6 +975,10 @@ def main():
               test_i8_model_raises, test_i9_log_cov_dropped_row, test_i10_rescaled,
               test_i11_column_mask):
         t()
+    for t in (test_f1_fisher_analytic, test_f2_shares_sum_and_coupling, test_f3_one_dataset,
+              test_f4_tension, test_f5_no_side_effects, test_f6_exact_objective_and_optimum,
+              test_f7_modes):
+        _guarded(t)
     return finish()
 
 
