@@ -76,7 +76,7 @@ def shared_cov(y):
                     weights=np.ones((len(X), 1)), labels=['beam'], scope='shared')], y)
 
 
-def make_jf(nds, cov=None, share='a', scale_err=None, seed=0):
+def make_jf(nds, cov=None, share='a', scale_err=None, seed=0, func=None):
     """nds datasets D0.. of a*x + b + noise; `a` shared when `share`, `b` per dataset.
     cov: None, or a callable (y) / (y, k) -> DatasetCovariance (private_cov, shared_cov).
     scale_err[i] multiplies dataset i's true noise (the yerr column stays E)."""
@@ -92,7 +92,7 @@ def make_jf(nds, cov=None, share='a', scale_err=None, seed=0):
                 c = cov(y, i)
             except TypeError:
                 c = cov(y)
-        jf.add_dataset('D%d' % i, funcClass=Line, x=X, y=y, yerr=E * np.ones_like(X), cov=c)
+        jf.add_dataset('D%d' % i, funcClass=func or Line, x=X, y=y, yerr=E * np.ones_like(X), cov=c)
     groups = [jf.share_all(share)] if share else None
     jf.build_master_params(groups=groups)
     for k in jf.master_params:
@@ -604,6 +604,145 @@ def test_p11_last_snapshot():
           str(jb.warnings))
 
 
+# ----------------------------------------------------------------------- K --
+class Quad(Line):
+    def y(self):
+        return self.a * np.asarray(self.x, float) ** 2 + self.b
+
+
+def _raises(a, b):
+    import joint_fit_stats as jfs
+    try:
+        jfs.check_comparable(a, b)
+    except jfs.NotComparable as e:
+        return str(e)
+    return None
+
+
+def _fit(nds=2, cov=private_cov, mode=None, scale='Linear', xmax=None, func=None,
+         method='leastsq'):
+    jf = make_jf(nds, cov=cov, func=func)
+    if mode:
+        jf.covariance_mode = mode
+    jf.perform_fit(X[0], X[-1] if xmax is None else xmax, fit_scale=scale, fit_method=method)
+    return jf
+
+
+def test_k1_fields():
+    import dataclasses as dc
+    import joint_fit_stats as jfs
+    a = jfs.snapshot(_fit(mode='data'))
+    check('K1 identical fits are comparable',
+          _raises(a, jfs.snapshot(_fit(mode='data'))) is None)
+    key = jfs.comparability_key(a)
+    check('K1 key is a plain dict with the spec fields',
+          isinstance(key, dict) and key['fit_scale'] == 'Linear' and len(key['datasets']) == 2
+          and set(key['datasets'][0]) == {'name', 'data_hash', 'window', 'index_hash', 'cov'}
+          and key['datasets'][0]['cov'][2] == 'data' and key['rescale'] is None)
+    d0, d1 = a.datasets
+
+    def rep(i, **kw):
+        ds = list(a.datasets)
+        ds[i] = dc.replace(ds[i], **kw)
+        return dc.replace(a, datasets=tuple(ds))
+
+    y2 = d1.y.copy()
+    y2[3] += 1e-3
+    cases = [
+        ('window', jfs.snapshot(_fit(mode='data', xmax=X[-2]))),
+        ('data', rep(1, y=y2)),
+        ('index', rep(1, index_hash=jfs._hash(d1.active_index[1:]))),
+        ('scale', jfs.snapshot(_fit(mode='data', scale='Log'))),
+        ('covariance', jfs.snapshot(_fit(cov=None))),
+        ('mode', jfs.snapshot(_fit(mode='model'))),
+        ('order', dc.replace(a, datasets=(d1, d0))),
+        ('rescale', dc.replace(a, rescale={'mode': 'per_dataset', 'inflate_only': False,
+                                           's': (1.1, 0.9), 'nu': (40, 40), 'rounds': 1,
+                                           'converged': True})),
+    ]
+    for word, b in cases:
+        for lhs, rhs in ((a, b), (b, a)):
+            msg = _raises(lhs, rhs)
+            check('K1 %s change refused naming %r' % (word, word),
+                  msg is not None and word in msg, repr(msg))
+    msg = _raises(a, jfs.snapshot(_fit(mode='data', xmax=X[-2])))
+    check('K1 window message shape', msg is not None and msg.startswith('dataset 1')
+          and '0.100:2.000' in msg and '0.100:1.951' in msg, repr(msg))
+    r1 = dc.replace(a, rescale={'mode': 'per_dataset', 'inflate_only': False, 's': (1., 1.)})
+    r2 = dc.replace(a, rescale={'mode': 'per_dataset', 'inflate_only': True, 's': (1., 1.)})
+    r3 = dc.replace(a, rescale={'mode': 'per_dataset', 'inflate_only': False,
+                                's': (2., 3.), 'rounds': 4})
+    check('K1 inflate_only differs -> refused', _raises(r1, r2) is not None)
+    check('K1 fitted s / rounds do not matter', _raises(r1, r3) is None)
+    c2 = dc.replace(d0.cov, source='other.cov')
+    check('K1 covariance source differs -> refused',
+          'covariance' in (_raises(a, rep(0, cov=c2, cov_source='other.cov')) or ''))
+
+
+def test_k2_allowed():
+    import joint_fit_stats as jfs
+    a = jfs.snapshot(_fit(mode='data'))
+    bq = jfs.snapshot(_fit(mode='data', func=Quad))
+    check('K2 the model classes really differ', bq.datasets[0].model_class == 'Quad'
+          and a.datasets[0].model_class == 'Line')
+    check('K2 model class allowed', _raises(a, bq) is None, repr(_raises(a, bq)))
+    bm = jfs.snapshot(_fit(mode='data', method='least_squares'))
+    check('K2 fit method allowed', bm.method != a.method and _raises(a, bm) is None,
+          repr(_raises(a, bm)))
+    jf = make_jf(2, cov=private_cov)
+    jf.covariance_mode = 'data'
+    jf.set_priors({'d0_b': (0.45, 0.1)})
+    jf.perform_fit(X[0], X[-1])
+    check('K2 priors allowed', _raises(a, jfs.snapshot(jf)) is None)
+    jf = make_jf(2, cov=private_cov)
+    jf.covariance_mode = 'data'
+    jf.master_params['d1_b'].vary = False
+    jf.perform_fit(X[0], X[-1])
+    b = jfs.snapshot(jf)
+    check('K2 a fixed parameter really differs', a.vary != b.vary)
+    check('K2 a parameter fixed in b allowed', _raises(a, b) is None, repr(_raises(a, b)))
+
+
+def _cov_variant(sig=4e-4, dsig=1.0):
+    def f(y, k):
+        return cc.DatasetCovariance(
+            X, E * dsig * np.ones_like(X),
+            [cc.CovTerm('stitch', 'multiplicative', np.diag([0, sig]),
+                        weights=_onehot(X > 1.0), scope='dataset')], y)
+    return f
+
+
+def test_k3_model_mode():
+    import dataclasses as dc
+    import joint_fit_stats as jfs
+    ja = make_jf(2, cov=private_cov)
+    ja.covariance_mode = 'model'
+    ja.perform_fit(X[0], X[-1])
+    jb = make_jf(2, cov=private_cov)
+    jb.covariance_mode = 'model'
+    for k in jb.master_params:
+        jb.master_params[k].value = jb.master_params[k].value + 0.7
+    jb.perform_fit(X[0], X[-1])
+    a, b = jfs.snapshot(ja), jfs.snapshot(jb)
+    check('K3 same data and covariance file, different start: comparable',
+          _raises(a, b) is None, repr(_raises(a, b)))
+    b2 = dc.replace(b, datasets=tuple(dc.replace(d, intensity=d.intensity * 1.05)
+                                      for d in b.datasets))
+    check('K3 intensities genuinely different',
+          not np.allclose(a.datasets[0].intensity, b2.datasets[0].intensity))
+    check('K3 different intensities do not matter', _raises(a, b2) is None)
+    check('K3 cov_hash identical', jfs.comparability_key(a)['datasets'][0]['cov']
+          == jfs.comparability_key(b2)['datasets'][0]['cov'])
+    for tag, cf in (('one term sigma', _cov_variant(sig=9e-4)),
+                    ('one sigma_meas', _cov_variant(dsig=1.5))):
+        jc = make_jf(2, cov=cf)
+        jc.covariance_mode = 'model'
+        jc.perform_fit(X[0], X[-1])
+        msg = _raises(a, jfs.snapshot(jc))
+        check('K3 %s changed -> refused naming covariance' % tag,
+              msg is not None and 'covariance' in msg, repr(msg))
+
+
 def main():
     app = QApplication.instance() or QApplication([])
     for t in (test_q1_quiet_restores, test_q2_no_emission, test_q3_row_ranges,
@@ -611,7 +750,8 @@ def main():
               test_p1_nocov_identity, test_p2_private_mixed, test_p3_shared_split,
               test_p4_model_mode, test_p12_exact_likelihood, test_p13_logdet_nocov_unweighted,
               test_p5_labels, test_p6_emcee_label, test_p7_aborted_label, test_p8_masked_x,
-              test_p9_empty_dataset, test_p10_no_side_effects, test_p11_last_snapshot):
+              test_p9_empty_dataset, test_p10_no_side_effects, test_p11_last_snapshot,
+              test_k1_fields, test_k2_allowed, test_k3_model_mode):
         t()
     return finish()
 

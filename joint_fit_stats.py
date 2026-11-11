@@ -423,3 +423,79 @@ def per_dataset_objective(snap):
         'fit_gap': fit_gap,
     }
     return terms, extras
+
+
+# -------------------------------------------------------------- comparability --
+class NotComparable(ValueError):
+    """Two fits do not share a likelihood surface; the message names the first
+    differing field (spec §4)."""
+
+
+def comparability_key(snap):
+    """The plain-dict key two fits must agree on before they are compared (spec §4):
+    fit scale; per dataset, in order, name, hash of (x, y, yerr) over the active points,
+    window, active-index hash and the covariance as used (None, or ``(cov_source,
+    cov_hash, cov_mode)``; ``cov_hash`` never covers the intensities, so model-mode fits
+    from different starting points share a key); the error-rescaling option (None, or
+    ``(mode, inflate_only)``). Model class, priors, method and parameter state are
+    deliberately absent."""
+    ds = []
+    for d in snap.datasets:
+        ds.append({
+            'name': d.name,
+            'data_hash': _hash(d.x, d.y, d.yerr),
+            'window': (float(d.window[0]), float(d.window[1])),
+            'index_hash': d.index_hash,
+            'cov': None if d.cov is None else (d.cov_source, d.cov_hash, snap.cov_mode),
+        })
+    rs = snap.rescale
+    rescale = None if not rs else (rs.get('mode'), bool(rs.get('inflate_only', False)))
+    return {'fit_scale': snap.fit_scale, 'datasets': ds, 'rescale': rescale}
+
+
+def _fmt_window(w):
+    return '%.3f:%.3f' % (w[0], w[1])
+
+
+def _first_difference(ka, kb):
+    """A message naming the first differing field of two keys, or None."""
+    if ka['fit_scale'] != kb['fit_scale']:
+        return 'fit scale %s vs %s' % (ka['fit_scale'], kb['fit_scale'])
+    na, nb = [d['name'] for d in ka['datasets']], [d['name'] for d in kb['datasets']]
+    if len(na) != len(nb):
+        return 'dataset count %d vs %d' % (len(na), len(nb))
+    if na != nb:
+        if sorted(na) == sorted(nb):
+            return 'dataset order %s vs %s' % (','.join(na), ','.join(nb))
+        i = next(j for j in range(len(na)) if na[j] != nb[j])
+        return 'dataset %d name %s vs %s' % (i + 1, na[i], nb[i])
+    for i, (da, db) in enumerate(zip(ka['datasets'], kb['datasets'])):
+        tag = 'dataset %d (%s)' % (i + 1, da['name'])
+        if da['window'] != db['window']:
+            return '%s window %s vs %s' % (tag, _fmt_window(da['window']),
+                                            _fmt_window(db['window']))
+        if da['index_hash'] != db['index_hash']:
+            return '%s active index (mask) differs' % tag
+        if da['data_hash'] != db['data_hash']:
+            return '%s data (x, y, yerr) differs' % tag
+        ca, cb = da['cov'], db['cov']
+        if ca != cb:
+            if ca is None or cb is None:
+                return '%s covariance %s vs %s' % (
+                    tag, 'none' if ca is None else 'attached', 'none' if cb is None else 'attached')
+            if ca[0] != cb[0]:
+                return '%s covariance source %s vs %s' % (tag, ca[0], cb[0])
+            if ca[1] != cb[1]:
+                return '%s covariance content differs (terms, weights or sigma_meas)' % tag
+            return '%s covariance mode %s vs %s' % (tag, ca[2], cb[2])
+    if ka['rescale'] != kb['rescale']:
+        return 'error rescale %s vs %s' % (ka['rescale'], kb['rescale'])
+    return None
+
+
+def check_comparable(a, b):
+    """Raise ``NotComparable`` naming the first differing field; None when the two
+    snapshots are comparable (spec §4, §4.1)."""
+    msg = _first_difference(comparability_key(a), comparability_key(b))
+    if msg is not None:
+        raise NotComparable(msg)
