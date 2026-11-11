@@ -573,6 +573,125 @@ def test_i7_model_mode():
           np.array_equal(jfs._usable_intensity(ii, yy, 'Linear'), blocks[0].intensity))
 
 
+class Boom(Line):
+    armed = False
+
+    def y(self):
+        if Boom.armed:
+            raise RuntimeError('boom')
+        return super().y()
+
+
+def test_i8_model_raises():
+    from Fit_Routines import Fit
+    jf = make_jf(3)
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear')
+    fits = _indiv_fits(jf)
+    obj = jf.objectives[1]
+    f = Fit(Boom, np.array(obj['x'], float), y=np.array(obj['y'], float),
+            yerr=np.array(obj['yerr'], float))
+    for key in ('a', 'b'):
+        f.fit_params[key].vary = True
+    f.perform_fit(X[0], X[-1], fit_scale='Linear', maxiter=200)
+    fits['D1'] = f
+    f.func.a = 77.0
+    f.func.params['a'].value = 77.0
+    x0 = f.func.x
+    xc = np.array(x0, float).copy()
+    d0 = dict(f.func.__dict__)
+    pv = {k: (p.value, p.expr) for k, p in f.func.params.items()}
+    Boom.armed = True
+    try:
+        rows = jfs.individual_terms(jf, jf.last_snapshot, fits)
+        txt = jfs.format_joint_vs_individuals(jf, fits)
+    finally:
+        Boom.armed = False
+    check('I8 raising model: row unavailable with a reason',
+          rows[1]['unavailable'] and 'boom' in rows[1]['unavailable'], str(rows[1]['unavailable']))
+    check('I8 the other rows are unaffected',
+          rows[0]['unavailable'] is None and rows[2]['unavailable'] is None)
+    check('I8 formatter still renders', 'boom' in txt and 'D0' in txt, ascii(txt))
+    check('I8 func.x restored', f.func.x is x0 and np.array_equal(f.func.x, xc))
+    check('I8 func scalar __dict__ entries restored',
+          all(f.func.__dict__[k] == v for k, v in d0.items()
+              if k in ('a', 'b', '__fit__') and not isinstance(v, np.ndarray)))
+    check('I8 func.params restored', all(f.func.params[k].value == v[0] and f.func.params[k].expr == v[1]
+                                         for k, v in pv.items()))
+
+
+def test_i9_log_cov_dropped_row():
+    import covariance_core as cc
+    jf = make_jf(2, cov=private_cov)
+    jf.covariance_mode = 'data'
+    jf.objectives[1]['y'][5] = -1.0              # dropped by _cov_mask in Log
+    jf.perform_fit(X[0], X[-1], fit_scale='Log')
+    snap = jf.last_snapshot
+    d1 = snap.datasets[1]
+    check('I9 one row dropped', int(np.sum(d1.used)) == len(d1.x) - 1)
+    from Fit_Routines import Fit
+    ypos = np.array(jf.objectives[1]['y'], float)
+    ypos[5] = abs(ypos[5])
+    fit = Fit(Line, np.array(X), y=ypos, yerr=E * np.ones_like(X))
+    for key in ('a', 'b'):
+        fit.fit_params[key].vary = True
+    fit.perform_fit(X[0], X[-1], fit_scale='Log', maxiter=200)
+    rows = jfs.individual_terms(jf, snap, {'D1': fit})
+    row = rows[1]
+    check('I9 row available and finite', row['unavailable'] is None and np.isfinite(row['delta'])
+          and np.isfinite(row['indiv_nll2']), str(row))
+    p = fit.result.params
+    u = d1.used
+    r = np.log(d1.y[u]) - np.log(p['a'].value * d1.x[u] + p['b'].value)
+    check('I9 residual length == used rows', len(r) == int(np.sum(u)) == row['n'])
+    C = cc.assemble([jf._last_blocks[1]], 'Log')[0]
+    hand = float(r @ np.linalg.solve(C, r))
+    check('I9 indiv_m equals the hand value on the used rows (1e-10)',
+          abs(row['indiv_m'] - hand) <= 1e-10 * hand, '%.12g vs %.12g' % (row['indiv_m'], hand))
+    hn = hand + np.linalg.slogdet(C)[1] + len(r) * np.log(2 * np.pi)
+    check('I9 indiv_nll2 equals the hand value', abs(row['indiv_nll2'] - hn) <= 1e-10 * abs(hn))
+
+
+def test_i10_rescaled():
+    from validate_joint_stats import _rfit
+    jf = _rfit(2, scale_err=(1.0, 2.0))
+    snap = jf.last_snapshot
+    check('I10 fit is rescaled', snap.rescale is not None)
+    fits = _indiv_fits(jf)
+    txt = jfs.format_joint_vs_individuals(jf, fits)
+    check('I10 header says (unrescaled)',
+          txt.split('\n')[0] == 'joint vs individual fits (marginal terms) (unrescaled)',
+          ascii(txt.split('\n')[0]))
+    rows = jfs.individual_terms(jf, snap, fits)
+    m = jfs.marginal_terms(snap, scaled=False)
+    check('I10 joint_m == marginal_terms(scaled=False)',
+          all(abs(r['joint_m'] - mi) <= 1e-10 * mi for r, mi in zip(rows, m)),
+          str([(r['joint_m'], mi) for r, mi in zip(rows, m)]))
+    check('I10 differs from the rescaled marginal term',
+          abs(rows[1]['joint_m'] - jfs.marginal_terms(snap)[1]) > 1e-6)
+    d = jfs.diagnostics(jf, snap, individual_fits=fits)
+    check('I10 diagnostics text says (unrescaled)', '(unrescaled)' in jfs.format_diagnostics(d))
+
+
+def test_i11_column_mask():
+    jf = make_jf(2)
+    m = np.ones(len(X), bool)
+    m[[3, 4, 20]] = False
+    jf.objectives[0]['mask'] = m
+    jf.perform_fit(X[2], X[35], fit_scale='Linear')
+    snap = jf.last_snapshot
+    d0 = snap.datasets[0]
+    n_act = (35 - 2 + 1) - 3
+    check('I11 imask removed rows', len(d0.x) == n_act and np.all(d0.used), '%d' % len(d0.x))
+    fits = _indiv_fits(jf)
+    rows = jfs.individual_terms(jf, snap, fits)
+    p = fits['D0'].result.params
+    r = d0.y - (p['a'].value * d0.x + p['b'].value)
+    hand = float(np.sum((r / d0.yerr) ** 2))
+    check('I11 indiv_m == hand chi2 on the active rows (1e-10)',
+          rows[0]['n'] == n_act and abs(rows[0]['indiv_m'] - hand) <= 1e-10 * hand,
+          '%.12g vs %.12g' % (rows[0]['indiv_m'], hand))
+
+
 def main():
     app = QApplication.instance() or QApplication([])
     for t in (test_d1_block_and_identity, test_d2_heterogeneity, test_d3_qrange,
@@ -581,7 +700,9 @@ def main():
               test_d8_snapshot_fails, test_d9_empty_dataset, test_d10_objective_extras, test_d11_rescaled_heterogeneity,
               test_d12_render_failure,
               test_i1_i2_joint_vs_individual, test_i3_unavailable, test_i4_side_effects,
-              test_i5_private_cov, test_i6_format, test_i7_model_mode):
+              test_i5_private_cov, test_i6_format, test_i7_model_mode,
+              test_i8_model_raises, test_i9_log_cov_dropped_row, test_i10_rescaled,
+              test_i11_column_mask):
         t()
     return finish()
 
