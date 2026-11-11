@@ -175,6 +175,7 @@ class JointFit(QObject):
         self._last_blocks = None
         self._fit_scale = None
         self._fit_method = None
+        self.last_snapshot = None     # joint_fit_stats.JointSnapshot of the last fit
 
     # ----------------------------------------------------------------- #
     #  dataset registration
@@ -1461,6 +1462,7 @@ class JointFit(QObject):
                 workers=_workers, reuse_sampler=reuse_sampler)
             if cov_on:
                 self._finish_cov(mode, fit_scale, 0, True, mcmc_frozen=frozen)
+            self._take_snapshot()
             return self._report(), 'None'
 
         # with a covariance the errors are absolute (spec 6.2): no chi2_red rescale
@@ -1512,6 +1514,7 @@ class JointFit(QObject):
                     "parameter still moved >= 0.1 stderr); the last result is kept"
                     % rounds))
             self._finish_cov(mode, fit_scale, rounds, converged, aborted=aborted)
+            self._take_snapshot()
             return self._report(), self.result.message
 
         self.result = self.fitter.minimize(method=fit_method,
@@ -1519,7 +1522,19 @@ class JointFit(QObject):
                                            **fit_kws)
         if cov_on:
             self._finish_cov(mode, fit_scale, 0, True)
+        self._take_snapshot()
         return self._report(), self.result.message
+
+    def _take_snapshot(self):
+        """Record ``last_snapshot`` (WS2 reporting) at the end of ``perform_fit``. A
+        failure never touches the fit: the snapshot stays ``None`` and a run warning
+        says why (error policy: degrade and report)."""
+        self.last_snapshot = None
+        try:
+            import joint_fit_stats
+            self.last_snapshot = joint_fit_stats.snapshot(self)
+        except Exception as e:                       # noqa: BLE001 -- degrade, report
+            self._add_run_warning('diagnostics unavailable: snapshot failed: %s' % e)
 
     def _finish_cov(self, mode, fit_scale, rounds, converged, mcmc_frozen=None, aborted=False):
         """Record ``cov_info`` and turn this fit's assembly/factorisation warnings
