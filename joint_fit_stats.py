@@ -888,14 +888,23 @@ def diagnostics(jf, snap, individual_fits=None, *, qrange_tol=0.10, hetero_ratio
             o['fit_gap'] = ex['fit_gap']
         return o
 
+    def chi2n():
+        """chi2 per point per dataset. A rescaled fit shows the UNRESCALED values: under
+        its own s_i the term is ~1 by construction and would hide misfit (spec 6.3)."""
+        ts, _ = terms()
+        if snap.rescale is None:
+            return [t.chi2_per_point for t in ts], False
+        m = marginal_terms(snap, scaled=False)
+        return [(mi / t.n_points) if t.n_points else None for mi, t in zip(m, ts)], True
+
     def quality():
         ts, _ = terms()
-        return [{'name': t.name, 'n': t.n_points, 'chi2_per_point': t.chi2_per_point}
-                for t in ts]
+        vals, unresc = chi2n()
+        return [{'name': t.name, 'n': t.n_points, 'chi2_per_point': v,
+                 'unrescaled': unresc} for t, v in zip(ts, vals)]
 
     def heterogeneity():
-        ts, _ = terms()
-        v = [t.chi2_per_point for t in ts if t.chi2_per_point is not None]
+        v = [c for c in chi2n()[0] if c is not None]
         if len(v) < 2:
             return {'min': (v[0] if v else None), 'max': (v[0] if v else None),
                     'ratio': None, 'flagged': False}
@@ -938,29 +947,35 @@ def _softest_text(softest):
     return ' '.join(parts)
 
 
-def format_diagnostics(diag):
-    """Plain-text rendering of ``diagnostics`` (starts ``Joint-fit diagnostics:``)."""
-    th = diag.get('thresholds', {})
-    L = ['Joint-fit diagnostics:']
+def _fmt_objective(diag, th, L):
     o = diag.get('objective')
-    if o:
-        L.append('  objective: %s' % o['label'])
-        if o.get('order'):
-            L.append('  dataset order (sequential split): %s' % ', '.join(o['order']))
-        if o.get('nll2') is not None:
-            L.append('  -2 ln L = %.6g' % o['nll2'])
-        if o.get('fit_gap') is not None:
-            L.append('  fit_gap (exact chi2 at the fitted point - result.chisqr) = %+.4g'
-                     % o['fit_gap'])
-        for n in o.get('notes') or ():
-            L.append('  note: %s' % n)
+    if not o:
+        return
+    L.append('  objective: %s' % o['label'])
+    if o.get('order'):
+        L.append('  dataset order (sequential split): %s' % ', '.join(o['order']))
+    if o.get('nll2') is not None:
+        L.append('  -2 ln L = %.6g' % o['nll2'])
+    if o.get('fit_gap') is not None:
+        L.append('  fit_gap (exact chi2 at the fitted point - result.chisqr) = %+.4g'
+                 % o['fit_gap'])
+    for n in o.get('notes') or ():
+        L.append('  note: %s' % n)
+
+
+def _fmt_quality(diag, th, L):
     q = diag.get('quality')
-    if q:
-        L.append('  per-dataset quality (chi2 per point, each dataset scored under its own block):')
-        for r in q:
-            L.append('    %-16s n = %-5d %s' % (r['name'], r['n'], 'no points'
-                     if r['chi2_per_point'] is None or not r['n']
-                     else 'chi2/n = %.4g' % r['chi2_per_point']))
+    if not q:
+        return
+    L.append('  per-dataset quality (chi2 per point%s, each dataset scored under its own block):'
+             % (' (unrescaled)' if any(r.get('unrescaled') for r in q) else ''))
+    for r in q:
+        L.append('    %-16s n = %-5d %s' % (r['name'], r['n'], 'no points'
+                 if r['chi2_per_point'] is None or not r['n']
+                 else 'chi2/n = %.4g' % r['chi2_per_point']))
+
+
+def _fmt_heterogeneity(diag, th, L):
     h = diag.get('heterogeneity')
     if h and h.get('ratio') is not None:
         L.append('  chi2/n spread: min %.4g, max %.4g, max/min = %.3g'
@@ -968,6 +983,9 @@ def format_diagnostics(diag):
         if h['flagged']:
             L.append('  error bars or model adequacy differ between datasets '
                      '(max/min chi2/n > %g)' % th.get('hetero_ratio', 3.0))
+
+
+def _fmt_qrange(diag, th, L):
     g = diag.get('qrange')
     if g and g.get('spread') is not None:
         L.append('  q-range (%s): qmax = %s, spread %.3g' % (
@@ -975,32 +993,63 @@ def format_diagnostics(diag):
         if g['flagged']:
             L.append('  q-ranges differ between datasets (%s; spread > %g%%)' % (
                 g['mode'], 100 * th.get('qrange_tol', 0.1)))
+
+
+def _fmt_shared(diag, th, L):
     for w in diag.get('shared_warnings') or ():
         L.append('  %s' % w)
+
+
+def _fmt_degeneracy(diag, th, L):
     dg = diag.get('degeneracy')
-    if dg:
-        if 'unavailable' in dg:
-            L.append('  degeneracy: %s' % dg['unavailable'])
-        else:
-            if dg['pairs']:
-                for a, b, r in dg['pairs']:
-                    L.append('  degenerate pair: %s, %s (rho = %+.3f)' % (a, b, r))
-            else:
-                L.append('  no parameter pair with |rho| above the threshold')
-            if dg['softest']:
-                L.append('  softest direction: %s (coefficients in stderr units)'
-                         % _softest_text(dg['softest']))
+    if not dg:
+        return
+    if 'unavailable' in dg:
+        L.append('  degeneracy: %s' % dg['unavailable'])
+        return
+    if dg['pairs']:
+        for a, b, r in dg['pairs']:
+            L.append('  degenerate pair: %s, %s (rho = %+.3f)' % (a, b, r))
+    else:
+        L.append('  no parameter pair with |rho| above the threshold')
+    if dg['softest']:
+        L.append('  softest direction: %s (coefficients in stderr units)'
+                 % _softest_text(dg['softest']))
+
+
+def _fmt_ic(diag, th, L):
     ic = diag.get('information_criteria')
     if ic:
         L.append('  information criteria (assume a correct model; read with caution): '
                  'AIC %.6g, BIC %.6g (k = %d, n = %d, %s%s)' % (
                      ic['aic'], ic['bic'], ic['k'], ic['n'], ic['form'],
                      '; ' + ic['note'] if ic.get('note') else ''))
+
+
+def _fmt_rescale(diag, th, L):
     r = diag.get('rescale')
     if r:
         L.append('  errors rescaled per dataset by √χ²_red: s = %s (%d rounds, %s)' % (
             ', '.join('%.4g' % v for v in r['s']), r['rounds'],
             'converged' if r['converged'] else 'not converged'))
+
+
+def format_diagnostics(diag):
+    """Plain-text rendering of ``diagnostics`` (starts ``Joint-fit diagnostics:``). Each
+    section renders in its own try: one that fails prints an 'unavailable' line."""
+    th = diag.get('thresholds', {})
+    L = ['Joint-fit diagnostics:']
+    for name, fn in (('objective', _fmt_objective), ('quality', _fmt_quality),
+                     ('heterogeneity', _fmt_heterogeneity), ('qrange', _fmt_qrange),
+                     ('shared_warnings', _fmt_shared), ('degeneracy', _fmt_degeneracy),
+                     ('information_criteria', _fmt_ic), ('rescale', _fmt_rescale)):
+        part = []
+        try:
+            fn(diag, th, part)
+            L.extend(part)
+        except Exception as e:                   # noqa: BLE001 -- degrade, report
+            L.append('  diagnostics unavailable (%s, rendering): %s: %s'
+                     % (name, type(e).__name__, e))
     for sec, why in diag.get('unavailable') or ():
         L.append('  diagnostics unavailable (%s): %s' % (sec, why))
     return '\n'.join(L)

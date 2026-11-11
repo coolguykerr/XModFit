@@ -332,12 +332,50 @@ def test_d10_objective_extras():
     check('D10 uncoupled: no order', 'order' not in d['objective'])
 
 
+def test_d11_rescaled_heterogeneity():
+    # rescaling must not hide misfit: quality and heterogeneity use UNRESCALED chi2/n
+    from validate_joint_stats import _rfit
+    jf = _rfit(2, scale_err=(1.0, 4.0))
+    snap = jf.last_snapshot
+    d = _diag(jf)
+    q = d['quality']
+    v = [r['chi2_per_point'] for r in q]
+    check('D11 snapshot is rescaled', snap.rescale is not None)
+    check('D11 unrescaled rows ~1 and ~16', 0.5 < v[0] < 2.0 and 8.0 < v[1] < 32.0, str(v))
+    terms, _ = jfs.per_dataset_objective(snap)
+    check('D11 the rescaled terms really are ~1 (the bug it guards)',
+          all(0.5 < t.chi2_per_point < 1.6 for t in terms), str([t.chi2_per_point for t in terms]))
+    check('D11 heterogeneity flagged on a rescaled fit', d['heterogeneity']['flagged']
+          and d['heterogeneity']['ratio'] > 3, str(d['heterogeneity']))
+    txt = jfs.format_diagnostics(d)
+    check('D11 flag text and (unrescaled) column label',
+          'error bars or model adequacy differ between datasets' in txt
+          and 'chi2 per point (unrescaled)' in txt, ascii(txt))
+    check('D11 rows flagged unrescaled', all(r['unrescaled'] for r in q))
+    jf = make_jf(2)
+    _fit(jf)
+    check('D11 no label without rescaling',
+          '(unrescaled)' not in jfs.format_diagnostics(_diag(jf)))
+
+
+def test_d12_render_failure():
+    jf = make_jf(2)
+    _fit(jf)
+    d = _diag(jf)
+    d['quality'] = [{'name': 'x'}]            # malformed: rendering raises KeyError
+    txt = jfs.format_diagnostics(d)
+    check('D12 a failing renderer degrades to a line, rest intact',
+          'diagnostics unavailable (quality, rendering)' in txt and 'AIC' in txt
+          and 'objective:' in txt, ascii(txt))
+
+
 def main():
     app = QApplication.instance() or QApplication([])
     for t in (test_d1_block_and_identity, test_d2_heterogeneity, test_d3_qrange,
               test_d4_shared_warnings, test_d5_degeneracy, test_d5c_exactly_singular, test_d5b_text_and_scaling,
               test_d6_no_covar, test_d7_section_failure, test_d7b_all_sections_fail,
-              test_d8_snapshot_fails, test_d9_empty_dataset, test_d10_objective_extras):
+              test_d8_snapshot_fails, test_d9_empty_dataset, test_d10_objective_extras, test_d11_rescaled_heterogeneity,
+              test_d12_render_failure):
         t()
     return finish()
 
