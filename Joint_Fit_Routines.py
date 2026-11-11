@@ -183,6 +183,15 @@ class JointFit(QObject):
         self.rescale_inflate_only = False
         self.rescale_s = None
         self.rescale_info = {}
+        # end-of-fit diagnostics in _report: 'full' (spec 6) or 'cheap' (no model
+        # evaluations: the Fisher shares and the distance to the exact optimum are
+        # skipped). Settable in code only.
+        self.report_diagnostics = 'full'
+        # the arguments of the last perform_fit and its windows as (imin, imax) per
+        # objective name (leave-one-out refits reuse them); _window_override, when set,
+        # makes _set_ranges take those indices instead of x values
+        self._fit_args = None
+        self._window_override = None
 
     # ----------------------------------------------------------------- #
     #  dataset registration
@@ -699,11 +708,17 @@ class JointFit(QObject):
     # ----------------------------------------------------------------- #
     #  quiet evaluation, row ranges, covariance blocks (WS2 reporting)
     # ----------------------------------------------------------------- #
-    def _raw_blocks(self, model):
+    def _raw_blocks(self, model, evaluated=None):
         """One ``Block`` per objective over its active points (no covariance mask
         yet) and the concatenated y, sigma and intensity. ``model=False`` takes the
-        data as the intensity, ``model=True`` the model at the pushed parameters."""
-        yfits = self.evaluate() if model else None
+        data as the intensity, ``model=True`` the model at the pushed parameters, or,
+        with ``evaluated = (yfits, yfit_masked flags)``, those model outputs (no
+        evaluation)."""
+        masked = None
+        if model and evaluated is not None:
+            yfits, masked = evaluated
+        else:
+            yfits = self.evaluate() if model else None
         blocks, ycat, scat, icat = [], [], [], []
         for k, obj in enumerate(self.objectives):
             idx = self.active_index(k)
@@ -714,7 +729,8 @@ class JointFit(QObject):
             if model:
                 f = np.asarray(yfits[k], dtype=float)
                 im = obj.get("imask")
-                if im is not None and not obj.get("yfit_masked"):
+                ym = obj.get("yfit_masked") if masked is None else masked[k]
+                if im is not None and not ym:
                     f = f[im]
                 inten = f
             else:
@@ -758,18 +774,23 @@ class JointFit(QObject):
                                    name=b.name))
         return masked
 
-    def model_blocks(self, params, fit_scale):
+    def model_blocks(self, params, fit_scale, evaluated=None):
         """The masked blocks ``_build_chol(fit_scale, model=True)`` would assemble at
         ``params`` (model intensity; data substituted where it is unusable) and the
         substitution notes. Touches no fit state: not ``_L``, ``_cov_mask``,
-        ``_cov_warnings``, ``_jitter`` nor any model (evaluated inside ``quiet()``)."""
+        ``_cov_warnings``, ``_jitter`` nor any model (evaluated inside ``quiet()``).
+        ``evaluated = (yfits, yfit_masked flags)`` -- the outputs of one ``evaluate()``
+        at ``params`` -- is used instead of evaluating again (no model call)."""
         if self._cov_mask is None:
             raise RuntimeError("model_blocks needs the frozen covariance mask "
                                "(run a covariance fit first)")
         scale = 'Log' if fit_scale == 'Log' else 'Linear'
-        with self.quiet():
-            self.push_params(params)
-            blocks, ycat, _scat, icat = self._raw_blocks(True)
+        if evaluated is not None:
+            blocks, ycat, _scat, icat = self._raw_blocks(True, evaluated)
+        else:
+            with self.quiet():
+                self.push_params(params)
+                blocks, ycat, _scat, icat = self._raw_blocks(True)
         m = self._cov_mask
         if len(m) != len(ycat):
             raise RuntimeError("covariance mask length %d != active rows %d"
@@ -854,7 +875,16 @@ class JointFit(QObject):
     def residual(self, params, fit_scale):
         self.push_params(params)
         yfits = self.evaluate()
+        y = self._assemble_residual(params, fit_scale, yfits)
+        if not self._quiet:
+            self.Niter += 1
+            self.functionCalled.emit(params, self.Niter, y, fit_scale)
+        return y
 
+    def _assemble_residual(self, params, fit_scale, yfits):
+        """The residual vector ``residual`` returns, from the model outputs ``yfits`` of
+        the ``evaluate()`` just run at ``params`` (reads its ``yfit_masked`` flags). No
+        model call, no counting, no emission."""
         if self._use_cov and fit_scale in ('Linear', 'Log'):
             # ---- Axis-2 / combined: whitened residual over concatenation ----
             # absolute units (no max-normalisation): whitened (d - f) is
@@ -925,10 +955,6 @@ class JointFit(QObject):
         # after any whitening (it must not enter the data covariance C).
         if self._priors:
             y = np.concatenate([y, self.prior_rows(params)])
-
-        if not self._quiet:
-            self.Niter += 1
-            self.functionCalled.emit(params, self.Niter, y, fit_scale)
         return y
 
     def _rescale_rows(self):
@@ -965,9 +991,17 @@ class JointFit(QObject):
         by index, mapping to a ``(lo, hi)`` pair) each objective uses its own
         bounds; a missing entry, a ``None`` pair, or a ``None`` within a pair
         falls back to the scalar. Empty slices are avoided by clamping to the
-        full data extent.
+        full data extent. ``_window_override`` ({name: (imin, imax)}, set only by
+        leave-one-out refits) takes those indices as they are.
         """
+        override = self._window_override or {}
         for idx, obj in enumerate(self.objectives):
+            if obj["name"] in override:
+                obj["imin"], obj["imax"] = (int(v) for v in override[obj["name"]])
+                m = obj.get("mask")
+                obj["imask"] = (None if m is None
+                                else np.asarray(m, bool)[obj["imin"]:obj["imax"] + 1])
+                continue
             x = obj["x"]
             lo, hi = xmin, xmax
             if ranges:
@@ -1412,6 +1446,7 @@ class JointFit(QObject):
             raise ValueError("covariance_mode must be 'model' or 'data', got %r" % (mode,))
         self.Niter = 0
         self.fit_abort = False
+        self.last_snapshot = None           # never describe a previous fit
         self._reset_run_warnings()          # build-time warnings stay
         for obj in self.objectives:         # add_dataset downgrades, every fit
             for w in obj.get("cov_notes") or []:
@@ -1434,9 +1469,15 @@ class JointFit(QObject):
         if rescale not in (None, 'per_dataset'):
             raise ValueError("rescale_errors must be None or 'per_dataset', got %r" % (rescale,))
         self.rescale_s, self.rescale_info = None, {}
-        if rescale and ('w/o' in fit_scale or fit_method == "emcee"):
+        if rescale and 'w/o' in fit_scale:
             self.warnings.append(_Downgrade(
                 "error rescaling needs a weighted least-squares fit; not applied"))
+            rescale = None
+        elif rescale and fit_method == "emcee":
+            # not a downgrade: MCMC samples the stated errors, as it always did
+            self._add_run_warning(
+                "error rescaling applies to least-squares fits only; MCMC samples the "
+                "errors as given (not rescaled)")
             rescale = None
         if (len(self.objectives) >= 2 and not cov_on
                 and fit_scale == 'Linear w/o error'):
@@ -1446,6 +1487,11 @@ class JointFit(QObject):
                 "maximum, so datasets are weighted by 1/max(y); use 'Linear' "
                 "(error-weighted) for a comparable joint objective")
         self._set_ranges(xmin, xmax, ranges=ranges)
+        self._fit_args = {'xmin': xmin, 'xmax': xmax, 'fit_scale': fit_scale,
+                          'fit_method': fit_method, 'maxiter': maxiter,
+                          'covariance_mode': mode, 'fit_kws': dict(fit_kws),
+                          'windows': {o["name"]: (int(o["imin"]), int(o["imax"]))
+                                      for o in self.objectives}}
         self._L = None                      # force Cholesky rebuild for new range
         self._last_blocks = None
         self._fit_scale, self._fit_method = fit_scale, fit_method
@@ -1570,7 +1616,11 @@ class JointFit(QObject):
         ``rescale_info``; a failure of the snapshot stops the loop and is reported."""
         import joint_fit_stats as jfs
         cur, rnd, conv, nu = None, 0, False, []
+        stop = None                     # None | 'failed' | 'user'
         while True:
+            if self.fit_abort:
+                stop = 'user'
+                break
             try:
                 if cov_on:      # the snapshot reads cov_info; no warnings are recorded here
                     self._finish_cov(mode, fit_scale, self._last_ls[0], self._last_ls[1],
@@ -1580,6 +1630,7 @@ class JointFit(QObject):
                 s_new, nu = jfs.rescale_factors(snap, self.rescale_inflate_only, notes)
             except Exception as e:                       # noqa: BLE001 -- degrade, report
                 self._add_run_warning('error rescaling stopped: %s' % e)
+                stop = 'failed'
                 break
             if rnd == 0:
                 for nt in notes:
@@ -1587,7 +1638,7 @@ class JointFit(QObject):
             if cur is not None and max(abs(a / b - 1.0) for a, b in zip(s_new, cur)) < 0.01:
                 conv = True
                 break
-            if rnd >= 5 or self.fit_abort:
+            if rnd >= 5:
                 break
             cur = list(s_new)
             self.rescale_s = list(s_new)
@@ -1595,7 +1646,10 @@ class JointFit(QObject):
             self.rescale_info = {'rounds': rnd, 'converged': False, 'nu': list(nu)}
             self._last_ls = ls_round(self.result.params)
         self.rescale_info = {'rounds': rnd, 'converged': conv, 'nu': list(nu)}
-        if not conv:
+        if stop == 'user':
+            self._add_run_warning("error rescaling stopped by the user after %d refit%s; the "
+                                  "last fit is kept" % (rnd, '' if rnd == 1 else 's'))
+        elif stop is None and not conv:
             self._add_run_warning("error rescaling did not converge in %d rounds (a factor "
                                   "still moved >= 1%%); the last fit is kept" % rnd)
 
@@ -1720,8 +1774,8 @@ class JointFit(QObject):
         info = self.rescale_info or {}
         s = ['%.4g' % v for v in self.rescale_s]
         nu = ['%.4g' % v for v in info.get('nu', [])]
-        lines = ['Errors rescaled per dataset by \u221a\u03c7\u00b2_red (opt-in): s = [%s], '
-                 '\u03bd = [%s], %d rounds, %s' % (', '.join(s), ', '.join(nu),
+        lines = ['Errors rescaled per dataset by sqrt(chi2_red) (opt-in): s = [%s], '
+                 'nu = [%s], %d rounds, %s' % (', '.join(s), ', '.join(nu),
                                                     int(info.get('rounds', 0)),
                                                     'converged' if info.get('converged')
                                                     else 'not converged')]
@@ -1735,9 +1789,9 @@ class JointFit(QObject):
             for d, mi in zip(snap.datasets, m):
                 n = int(d.rows[1] - d.rows[0])
                 parts.append('%s %s' % (d.name, ('%.4g' % (mi / n)) if n else 'no points'))
-            lines.append('  unrescaled \u03c7\u00b2/n per dataset: ' + ', '.join(parts))
+            lines.append('  unrescaled chi2/n per dataset: ' + ', '.join(parts))
         except Exception as e:                           # noqa: BLE001 -- degrade, report
-            lines.append('  unrescaled \u03c7\u00b2/n unavailable: %s' % e)
+            lines.append('  unrescaled chi2/n unavailable: %s' % e)
         return '\n'.join(lines)
 
     def _derived_keymaps(self, keys=('protins', 'theta', 'phi')):

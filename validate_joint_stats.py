@@ -430,10 +430,10 @@ def test_p13_logdet_nocov_unweighted():
 def test_p5_labels():
     import joint_fit_stats as jfs
     cases = [
-        (('Linear', False, None), 'χ² (Linear, weighted by the error column)', True),
-        (('Linear', True, 'model'), 'GLS χ² (Linear, covariance model)', True),
-        (('Log', False, None), 'χ² of ln y (Log, σ_ln = σ/y)', True),
-        (('Log', True, 'model'), 'GLS χ² of ln y (Log, covariance model)', True),
+        (('Linear', False, None), 'chi2 (Linear, weighted by the error column)', True),
+        (('Linear', True, 'model'), 'GLS chi2 (Linear, covariance model)', True),
+        (('Log', False, None), 'chi2 of ln y (Log, sigma_ln = sigma/y)', True),
+        (('Log', True, 'model'), 'GLS chi2 of ln y (Log, covariance model)', True),
         (('Log w/o error', False, None), 'unweighted sum of squares of log10 y', False),
         (('Linear w/o error', False, None),
          'unweighted sum of squares of y / max(y), per dataset', False),
@@ -796,7 +796,7 @@ def test_m2_text():
     check('M2 sign-count sentence', ('%s preferred on %d/%d datasets' % (
         c.preferred, c.sign_count[0], c.sign_count[1])) in t)
     check('M2 objective label', c.objective_label in t)
-    check('M2 headline has z', 'Δ = ' in t and '(z = ' in t)
+    check('M2 headline has z', 'Delta = ' in t and '(z = ' in t)
     check('M2 no coupling sentence on independent data', 'treated as independent' not in t)
 
 
@@ -950,7 +950,7 @@ def test_m8_model_mode_exact():
     _close('M8 sum_d == half difference of independent logpdfs', c.sum_d,
            0.5 * (-2 * total(ja) + 2 * total(jb)), rtol=1e-10)
     t = jfs.format_comparison(c)
-    check('M8 parts in text', '(Δχ²/2 = ' in t and 'Δ log det/2 = ' in t)
+    check('M8 parts in text', '(Delta chi2/2 = ' in t and 'Delta log det/2 = ' in t)
 
 
 def test_m9_log_logdet_zero():
@@ -960,7 +960,7 @@ def test_m9_log_logdet_zero():
     check('M9 the two Log fits really differ', abs(a.params['d1_a'] - b.params['d1_a']) > 0.1)
     c = jfs.compare_fits(a, b)
     check('M9 delta_logdet == 0', abs(c.delta_logdet) < 1e-10, '%.3e' % c.delta_logdet)
-    check('M9 no parts in text', 'Δ log det/2' not in jfs.format_comparison(c))
+    check('M9 no parts in text', 'Delta log det/2' not in jfs.format_comparison(c))
 
 
 def test_m10_fix_round():
@@ -969,7 +969,7 @@ def test_m10_fix_round():
     # N=3: the bare delta only on the detail line
     c = jfs.compare_fits(_snap(_fit(3, cov=None)), _snap(_fit(3, cov=None, func=Quad)))
     t = jfs.format_comparison(c)
-    dl = [ln for ln in t.splitlines() if 'Δ' in ln]
+    dl = [ln for ln in t.splitlines() if 'Delta' in ln]
     check('M10 N=3: delta only in the detail line',
           len(dl) == 1 and 'not a confidence measure' in dl[0], ascii(dl))
     check('M10 N=3: preferred and sign count still stated',
@@ -985,8 +985,8 @@ def test_m10_fix_round():
     check('M10 unweighted: not a likelihood, no logdet, no lr_p',
           c.likelihood is False and c.delta_logdet == 0.0 and c.lr_p is None)
     t = jfs.format_comparison(c)
-    check('M10 unweighted wording', 'd_i = s^A − s^B' in t and 'difference in sum of squares' in t
-          and 'not a likelihood' in t and 'nll2' not in t and 'Δ(−logL)' not in t, ascii(t))
+    check('M10 unweighted wording', 'd_i = s^A - s^B' in t and 'difference in sum of squares' in t
+          and 'not a likelihood' in t and 'nll2' not in t and 'Delta(-logL)' not in t, ascii(t))
     # nesting honours fixed values
     def fixed_pair(va, vb, vb_shared):
         ja = make_jf(2, share=None)
@@ -1095,8 +1095,8 @@ def test_r2_two_noise_levels():
     _close('R2 nu from rescale_factors', nu2, rs['nu'])
     rep = jf._report()
     check('R2 report line with s, nu, rounds, converged and the unrescaled chi2/n',
-          'Errors rescaled per dataset by √χ²_red (opt-in): s = [' in rep and 'ν = [' in rep
-          and 'rounds' in rep and 'converged' in rep and 'unrescaled χ²/n' in rep, ascii(rep[-700:]))
+          'Errors rescaled per dataset by sqrt(chi2_red) (opt-in): s = [' in rep and 'nu = [' in rep
+          and 'rounds' in rep and 'converged' in rep and 'unrescaled chi2/n' in rep, ascii(rep[-700:]))
 
 
 def test_r3_shared_psd():
@@ -1143,7 +1143,7 @@ def test_r5_label_key():
     check('R5 label starts with rescaled and is not a likelihood',
           ex['objective_label'].startswith('rescaled ') and ex['likelihood'] is False,
           ascii(ex['objective_label']))
-    check('R5 label names s', 'errors rescaled per dataset by √χ²_red, s = ' in ex['objective_label'])
+    check('R5 label names s', 'errors rescaled per dataset by sqrt(chi2_red), s = ' in ex['objective_label'])
     check('R5 key has the rescale field',
           jfs.comparability_key(a)['rescale'] == ('per_dataset', False)
           and jfs.comparability_key(b)['rescale'] is None)
@@ -1205,9 +1205,11 @@ def test_r7_degrade():
     je = make_jf(2, scale_err=[1.0, 2.0]); je.perform_fit(X[0], X[-1])    # emcee needs a prior fit
     je.rescale_errors = 'per_dataset'
     rep, _ = je.perform_fit(X[0], X[-1], fit_method='emcee', emcee_walkers=10, emcee_steps=20)
-    check('R7 emcee: not applied, degraded', je.rescale_s is None and je.last_snapshot.rescale is None
-          and rep.startswith('DEGRADED FIT:') and 'error rescaling' in rep.split('\n')[0],
-          ascii(rep[:200]))
+    # final review M6: not a downgrade -- MCMC samples the stated errors, as it always did
+    check('R7 emcee: not applied, a plain run warning (no DEGRADED FIT banner)',
+          je.rescale_s is None and je.last_snapshot.rescale is None
+          and not rep.startswith('DEGRADED FIT:')
+          and 'error rescaling applies to least-squares fits only' in rep, ascii(rep[:200]))
     jx = make_jf(2); jx.rescale_errors = 'bogus'
     try:
         jx.perform_fit(X[0], X[-1])

@@ -4,8 +4,17 @@ Gaussian likelihood and objective labels (spec handoff/20-spec-ws2-reporting.md 
 
 Qt-free and model-free after ``snapshot``: everything downstream of the snapshot reads
 only the ``JointSnapshot`` (spec §3.1). ``snapshot`` itself evaluates the live
-``JointFit`` once, inside ``JointFit.quiet()``, so it neither counts ``Niter`` nor emits
-``functionCalled`` and leaves every model as it was.
+``JointFit`` once (one ``evaluate()`` at θ̂ serves the fitted residual, the raw parts and,
+in model mode, the model blocks), inside ``JointFit.quiet()``, so it neither counts
+``Niter`` nor emits ``functionCalled`` and leaves every model as it was.
+
+Model evaluations (one evaluation = every dataset's model once): ``snapshot`` 1;
+``exact_objective`` 1 per call; ``fisher_shares`` nvarys; ``optimum_distance`` 2·nvarys
+(only when C depends on the model). ``diagnostics`` costs those two plus 1 (the final
+evaluation at ``result.params`` that leaves the model outputs at the best fit) with
+``JointFit.report_diagnostics = 'full'`` (the default), and none with ``'cheap'`` or
+after a fit stopped by the user. Report text is ASCII; Unicode appears only in docstrings
+and comments.
 
 The split (§3.2): with L = chol(C(θ̂)) over the concatenated used rows in fit order,
 ``z = L⁻¹ r``. The sequential term of dataset i is ``‖z_i‖²`` (χ² of i given the
@@ -155,19 +164,26 @@ def _used_masks(jf, cov_path):
 
 
 # ---------------------------------------------------------------- raw parts --
-def raw_parts(jf, params):
-    """Per dataset ``(r_i, f_i)`` on its used rows at ``params``, unwhitened, assembled
-    as ``JointFit.residual`` assembles them (slice, then imask -- honouring
-    ``yfit_masked`` -- then the dataset's ``_cov_mask`` segment on the covariance path),
-    evaluated inside ``quiet()``. ``r`` is d - f (Linear), ln d - ln f (Log), and for
-    the unweighted scales the residual rows themselves."""
-    scale = jf._fit_scale
-    cov_path = _cov_path(jf, scale)
-    used = _used_masks(jf, cov_path)
+def _evaluate_at(jf, params):
+    """One quiet ``evaluate()`` at ``params``: ``(yfits, yfit_masked flags)``."""
     with jf.quiet():
         jf.push_params(params)
         yfits = jf.evaluate()
         flags = [bool(o.get("yfit_masked")) for o in jf.objectives]
+    return yfits, flags
+
+
+def raw_parts(jf, params, evaluated=None):
+    """Per dataset ``(r_i, f_i)`` on its used rows at ``params``, unwhitened, assembled
+    as ``JointFit.residual`` assembles them (slice, then imask -- honouring
+    ``yfit_masked`` -- then the dataset's ``_cov_mask`` segment on the covariance path),
+    evaluated inside ``quiet()`` (one model evaluation), or from ``evaluated`` =
+    ``_evaluate_at(jf, params)`` (none). ``r`` is d - f (Linear), ln d - ln f (Log), and
+    for the unweighted scales the residual rows themselves."""
+    scale = jf._fit_scale
+    cov_path = _cov_path(jf, scale)
+    used = _used_masks(jf, cov_path)
+    yfits, flags = _evaluate_at(jf, params) if evaluated is None else evaluated
     out = []
     for k, (obj, fit) in enumerate(zip(jf.objectives, yfits)):
         i0, i1 = obj["imin"], obj["imax"] + 1
@@ -207,13 +223,18 @@ def snapshot(jf):
     info = jf.cov_info or {}
     cov_mode = info.get('mode', jf.covariance_mode) if cov_path else None
 
-    # (1) the residual the fit minimised, quietly, at the reported parameters
+    # (1) the residual the fit minimised, quietly, at the reported parameters; one
+    # evaluation serves it, the raw parts and the model blocks
     with jf.quiet():
-        full = np.asarray(jf.residual(params, scale), float)
+        jf.push_params(params)
+        yfits = jf.evaluate()
+        flags = [bool(o.get("yfit_masked")) for o in jf.objectives]
+        full = np.asarray(jf._assemble_residual(params, scale, yfits), float)
+    evaluated = (yfits, flags)
     prior = np.asarray(jf.prior_rows(params), float)
     z_fit = full[:len(full) - len(prior)].copy()
 
-    parts = raw_parts(jf, params)
+    parts = raw_parts(jf, params, evaluated)
     ranges = jf.row_ranges()
     used = _used_masks(jf, cov_path)
 
@@ -223,7 +244,7 @@ def snapshot(jf):
         fit_blocks = list(jf._last_blocks)
         exact_blocks = fit_blocks
         if cov_mode == 'model':
-            exact_blocks, _notes = jf.model_blocks(params, scale)
+            exact_blocks, _notes = jf.model_blocks(params, scale, evaluated)
             block_notes = tuple(str(n) for n in (_notes or ()))
     needs = cov_path and cov_mode == 'model' and cc.needs_intensity(fit_blocks, cscale)
     # opt-in error rescaling (§6.3): the residual the fit minimised was r_i / s_i whitened by
@@ -365,29 +386,73 @@ def _s_of(snap):
     return [float(v) for v in rs['s']]
 
 
-def marginal_terms(snap, L=None, scaled=True):
+def _exact_CL(snap, cache=None):
+    """``(C, L)``: the exact C over the used rows and its Cholesky factor (equal to
+    ``rebuild_L(snap)``), assembled and factorised once per ``cache`` dict."""
+    if cache is not None and 'L' in cache:
+        return cache['C'], cache['L']
+    C = cc.assemble(_snap_blocks(snap, 'exact'), _cscale(snap))[0]
+    L = cc.factorize(C)[0]
+    if cache is not None:
+        cache['C'], cache['L'] = C, L
+    return C, L
+
+
+def _L_of(snap, L=None, cache=None):
+    if L is not None:
+        return L
+    return _exact_CL(snap, cache)[1]
+
+
+def _block_chos(snap, L=None, cache=None):
+    """Per dataset the ``cho_factor`` of its exact marginal block ``(L Lᵀ)_ii`` (None for a
+    dataset with no rows), factorised once per ``cache`` dict (covariance path only)."""
+    if cache is not None and 'chos' in cache and L is None:
+        return cache['chos']
+    Lx = _L_of(snap, L, cache)
+    out = []
+    for d in snap.datasets:
+        a, b = d.rows
+        out.append(None if b <= a else cho_factor(_block_of(Lx, a, b), lower=True))
+    if cache is not None and L is None:
+        cache['chos'] = out
+    return out
+
+
+def _marginal_raw(snap, L=None, cache=None):
+    """Per dataset ``(m_i, ln det (C)_ii)`` of the UNSCALED exact marginal block, both from
+    one Cholesky factor (log det = 2 Σ ln diag; spec §3.5) -- covariance path only."""
+    if cache is not None and 'mraw' in cache and L is None:
+        return cache['mraw']
+    out = []
+    for d, cf in zip(snap.datasets, _block_chos(snap, L, cache)):
+        if cf is None:
+            out.append((0.0, 0.0))
+            continue
+        r = d.r
+        out.append((float(r @ cho_solve(cf, r)),
+                    float(2.0 * np.sum(np.log(np.diag(cf[0]))))))
+    if cache is not None and L is None:
+        cache['mraw'] = out
+    return out
+
+
+def marginal_terms(snap, L=None, scaled=True, cache=None):
     """``m_i = r_iᵀ (L Lᵀ)_ii⁻¹ r_i`` with the exact L; equals the sequential term off
     the covariance path. For a rescaled snapshot the C in use is S C S, whose i-th
     diagonal block is s_i² (C)_ii, so ``scaled=True`` (the term of the objective that was
     minimised) is the unscaled term over s_i²; ``scaled=False`` undoes the rescaling
-    exactly (what ``rescale_factors`` needs)."""
+    exactly (what ``rescale_factors`` needs). ``cache`` (a dict) shares the factorisations
+    with the other functions of one diagnostics pass."""
     s = _s_of(snap)
     if not snap.cov_in_use:
         out = [float(np.sum(snap.z[a:b] ** 2)) for (a, b) in (d.rows for d in snap.datasets)]
         if s is not None and not scaled:
             out = [m * si ** 2 for m, si in zip(out, s)]
         return out
-    if L is None:
-        L = rebuild_L(snap)
     out = []
-    for d in snap.datasets:
-        a, b = d.rows
-        if b <= a:
-            out.append(0.0)
-            continue
-        r = d.r
-        m = float(r @ cho_solve(cho_factor(_block_of(L, a, b), lower=True), r))
-        out.append(m / s[len(out)] ** 2 if (s is not None and scaled) else m)
+    for k, (m, _ld) in enumerate(_marginal_raw(snap, L, cache)):
+        out.append(m / s[k] ** 2 if (s is not None and scaled) else m)
     return out
 
 
@@ -395,8 +460,10 @@ def rescale_factors(snap, inflate_only=False, notes=None):
     """``(s, nu)`` for the opt-in per-dataset error rescaling (spec §6.3):
     ``nu_i = n_i − p n_i / N`` (so ``Σ nu_i = N − p``) and ``s_i = √(m_i / nu_i)`` with
     ``m_i`` the marginal term of the UNSCALED objective (the current ``s`` undone), or
-    ``max(1, s_i)`` when ``inflate_only``. A dataset with ``nu_i <= 0`` keeps ``s_i = 1``
-    and a note is appended to ``notes`` (when given)."""
+    ``max(1, s_i)`` when ``inflate_only``. A dataset with ``nu_i <= 0``, or whose factor
+    is not finite or ``<= 1e-8`` (e.g. a model that fits it exactly, m_i = 0: dividing by
+    s_i would put NaN in the residual), keeps ``s_i = 1`` and a note is appended to
+    ``notes`` (when given)."""
     m = marginal_terms(snap, scaled=False)
     n = [int(d.rows[1] - d.rows[0]) for d in snap.datasets]
     N = float(sum(n))
@@ -410,7 +477,14 @@ def rescale_factors(snap, inflate_only=False, notes=None):
             if notes is not None:
                 notes.append('%s: no degrees of freedom left for an error scale; s = 1' % d.name)
             continue
-        si = float(np.sqrt(mi / v))
+        si = float(np.sqrt(mi / v)) if mi >= 0 else float('nan')
+        if not np.isfinite(si) or si <= 1e-8:
+            s.append(1.0)
+            if notes is not None:
+                notes.append('%s: error scale sqrt(chi2_red) = %.3g is not usable (the model '
+                             'fits this dataset exactly or chi2 is not finite); s = 1'
+                             % (d.name, si))
+            continue
         s.append(max(1.0, si) if inflate_only else si)
     return s, nu
 
@@ -422,13 +496,15 @@ def objective_label(fit_scale, cov_in_use, cov_mode, rescaled=None):
     if fit_scale == 'Linear w/o error':
         return 'unweighted sum of squares of y / max(y), per dataset', False
     log = fit_scale == 'Log'
+    # ASCII spellings throughout (report text must print to a cp1252 console)
     if cov_in_use:
-        lab = ('GLS χ² of ln y (Log, covariance %s)' if log
-               else 'GLS χ² (Linear, covariance %s)') % cov_mode
+        lab = ('GLS chi2 of ln y (Log, covariance %s)' if log
+               else 'GLS chi2 (Linear, covariance %s)') % cov_mode
         if cov_mode == 'data':
             lab += _DATA_CLAUSE
     else:
-        lab = 'χ² of ln y (Log, σ_ln = σ/y)' if log else 'χ² (Linear, weighted by the error column)'
+        lab = ('chi2 of ln y (Log, sigma_ln = sigma/y)' if log
+               else 'chi2 (Linear, weighted by the error column)')
     if rescaled:
         s = rescaled.get('s') if isinstance(rescaled, dict) else None
         if isinstance(s, dict):
@@ -436,19 +512,22 @@ def objective_label(fit_scale, cov_in_use, cov_mode, rescaled=None):
         elif s is not None:
             s_txt = ', '.join('%.4g' % v for v in np.atleast_1d(s))
         else:
-            s_txt = '…'
-        lab = ('rescaled ' + lab + ' (errors rescaled per dataset by √χ²_red, s = %s; '
+            s_txt = '...'
+        lab = ('rescaled ' + lab + ' (errors rescaled per dataset by sqrt(chi2_red), s = %s; '
                'error scales fitted per dataset; approximate)' % s_txt)
         return lab, False        # errors fitted per dataset: not a known-error likelihood
     return lab, True
 
 
-def per_dataset_objective(snap):
+def per_dataset_objective(snap, cache=None):
     """The per-dataset split of the objective (§3.2, §3.3, §3.5).
-    Returns ``(list[DatasetTerm], extras)``."""
+    Returns ``(list[DatasetTerm], extras)``. With a ``cache`` dict the result (and the
+    factorisations) are computed once per diagnostics pass."""
+    if cache is not None and 'terms' in cache:
+        return cache['terms']
     weighted = _weighted(snap.fit_scale)
-    L = rebuild_L(snap) if snap.cov_in_use else None
-    marg = marginal_terms(snap, L)
+    marg = marginal_terms(snap, cache=cache)
+    mraw = _marginal_raw(snap, cache=cache) if snap.cov_in_use else None
     s_all = _s_of(snap)
     terms = []
     for d, m in zip(snap.datasets, marg):
@@ -459,11 +538,10 @@ def per_dataset_objective(snap):
         lds = ldm = nls = nlm = None
         if weighted:
             lds = float(2.0 * np.sum(snap.logdiag[a:b])) if n else 0.0
-            if L is None or not n:
+            if mraw is None or not n:
                 ldm = lds
             else:
-                sign, ldm = np.linalg.slogdet(_block_of(L, a, b))
-                ldm = float(ldm) if sign > 0 else float('nan')
+                ldm = mraw[len(terms)][1]          # 2 Σ ln diag chol((C)_ii)
                 if s_all is not None:
                     ldm += 2.0 * n * np.log(s_all[len(terms)])     # (S C S)_ii = s_i² C_ii
             nls = s + lds + n * LN2PI
@@ -490,6 +568,8 @@ def per_dataset_objective(snap):
         'nll2': sum(t.nll2_seq for t in terms) if weighted else None,
         'fit_gap': fit_gap,
     }
+    if cache is not None:
+        cache['terms'] = (terms, extras)
     return terms, extras
 
 
@@ -690,7 +770,8 @@ def compare_fits(a, b):
     N = len(d)
     sum_d = float(sum(d))
     sd = float(np.std(d, ddof=1)) if N >= 2 else None
-    notes = []
+    # what each side's numbers are (posterior medians, an aborted fit, ...)
+    notes = ['%s: %s' % (side, s.label) for side, s in (('A', a), ('B', b)) if s.label]
     z = None
     if N < 4:
         notes.append(NO_Z_NOTE)
@@ -735,10 +816,10 @@ def compare_fits(a, b):
         coupled=bool(_coupled(ea, ta) or _coupled(eb, tb)), rescaled=rescaled)
 
 
-def information_criteria(snap):
+def information_criteria(snap, cache=None):
     """Known-error AIC / BIC on the §3 objective (spec §8). Weighted: ``Φ + 2k`` and
     ``Φ + k ln n`` with ``Φ = nll2 + prior``; unweighted: the ``n ln(RSS/n)`` form."""
-    terms, ex = per_dataset_objective(snap)
+    terms, ex = per_dataset_objective(snap, cache)
     n = int(sum(t.n_points for t in terms))
     k = int(snap.nvarys)
     out = {'n': n}
@@ -760,12 +841,12 @@ def information_criteria(snap):
 def format_comparison(c, ic_a=None, ic_b=None):
     """Plain-text rendering of a ``Comparison`` (spec §5, §8)."""
     lines = []
-    dform = 'd_i = ½(nll2_A − nll2_B)' if c.likelihood else 'd_i = s^A − s^B'
+    dform = 'd_i = 1/2 (nll2_A - nll2_B)' if c.likelihood else 'd_i = s^A - s^B'
     if c.z is not None:
-        head = 'Δ = %+.4g ± %.3g (z = %.2f)' % (c.sum_d, c.sd_d * np.sqrt(c.N), c.z)
+        head = 'Delta = %+.4g +/- %.3g (z = %.2f)' % (c.sum_d, c.sd_d * np.sqrt(c.N), c.z)
     else:
         head = 'Comparison'     # the bare Δ lives only in the detail line (spec §5)
-    lines.append(head + '   [Σd, %s; positive prefers B; %s]' % (dform, c.objective_label))
+    lines.append(head + '   [Sum d, %s; positive prefers B; %s]' % (dform, c.objective_label))
     if c.preferred is None:
         lines.append('no fit preferred (%d datasets)' % c.N)
     else:
@@ -781,24 +862,24 @@ def format_comparison(c, ic_a=None, ic_b=None):
         lines.append('  %-16s %+.4g' % (nm, v))
     lines.append('largest |d|: %s' % c.worst_dataset)
     if c.likelihood:
-        det = 'Δ(−logL) = %+.6g (not a confidence measure)' % c.sum_d
+        det = 'Delta(-logL) = %+.6g (not a confidence measure)' % c.sum_d
     else:
         det = ('difference in sum of squares = %+.6g; not a likelihood '
                '(not a confidence measure)' % c.sum_d)
     if c.delta_logdet != 0:
-        det += ' (Δχ²/2 = %+.6g, Δ log det/2 = %+.6g)' % (0.5 * c.delta_chi2,
-                                                          0.5 * c.delta_logdet)
+        det += ' (Delta chi2/2 = %+.6g, Delta log det/2 = %+.6g)' % (0.5 * c.delta_chi2,
+                                                                     0.5 * c.delta_logdet)
     lines.append(det)
     for m in c.model_differences:
         lines.append(m)
     if c.nested:
-        s = 'nested: %s, Δk = %d' % (c.nested, c.delta_k)
+        s = 'nested: %s, Delta k = %d' % (c.nested, c.delta_k)
         if c.lr_p is not None:
             s += ', likelihood-ratio p = %.3g; %s' % (c.lr_p, LR_CAVEAT)
         lines.append(s)
     else:
         lines.append('not nested; no likelihood-ratio p-value')
-    lines.append('prior terms difference (A − B) = %+.6g (not in Σd)' % c.prior_difference)
+    lines.append('prior terms difference (A - B) = %+.6g (not in Sum d)' % c.prior_difference)
     if ic_a is not None or ic_b is not None:
         lines.append('information criteria (assume a correct model; read with caution)')
         for lab, ic in (('A', ic_a), ('B', ic_b)):
@@ -807,7 +888,7 @@ def format_comparison(c, ic_a=None, ic_b=None):
                     lab, ic['aic'], ic['bic'], ic['k'], ic['n'], ic['form'],
                     '; ' + ic['note'] if ic.get('note') else ''))
         if ic_a is not None and ic_b is not None:
-            lines.append('  ΔAIC (A − B) = %+.6g  ΔBIC (A − B) = %+.6g' % (
+            lines.append('  Delta AIC (A - B) = %+.6g  Delta BIC (A - B) = %+.6g' % (
                 ic_a['aic'] - ic_b['aic'], ic_a['bic'] - ic_b['bic']))
     return '\n'.join(lines)
 
@@ -916,7 +997,7 @@ def _mad_flags(deltas, available):
     return flags
 
 
-def individual_terms(jf, snap, individual_fits):
+def individual_terms(jf, snap, individual_fits, cache=None):
     """Joint vs individual fits per dataset (spec §6.1). ``individual_fits`` maps dataset
     name -> ``Fit_Routines.Fit`` (``fit.func``, ``fit.result.params``, and its fit scale in
     ``fit.fitter.userargs[0]``). Each side is scored on the joint fit's used rows under its
@@ -930,7 +1011,7 @@ def individual_terms(jf, snap, individual_fits):
     scale = snap.fit_scale
     cscale = 'Log' if scale == 'Log' else 'Linear'
     weighted = _weighted(scale)
-    L = rebuild_L(snap) if snap.cov_in_use else None
+    L = _L_of(snap, None, cache) if snap.cov_in_use else None
     model_mode = snap.cov_in_use and snap.cov_mode == 'model'
     rows = []
     for d in snap.datasets:
@@ -1012,12 +1093,12 @@ def _fmt_indiv_calibrated(rows, likelihood):
     if N == 0:
         return ['nothing to compare: no individual fit is available']
     sum_d = float(sum(d))
-    form = 'd_i = ½ delta_i' if likelihood else 'd_i = ½(s^joint − s^individual)'
+    form = 'd_i = 1/2 delta_i' if likelihood else 'd_i = 1/2 (s^joint - s^individual)'
     cnt = int(sum(1 for v in d if v > 0))
     if N >= 2:
         sd = float(np.std(d, ddof=1))
         spread = sd * np.sqrt(N)
-        head = 'Σd = %+.4g ± %.3g' % (sum_d, spread)
+        head = 'Sum d = %+.4g +/- %.3g' % (sum_d, spread)
         z = None
         note = None
         if N < 4:
@@ -1029,7 +1110,7 @@ def _fmt_indiv_calibrated(rows, likelihood):
         if z is not None:
             head += ' (z = %.2f)' % z
     else:
-        head = 'Σd = %+.4g' % sum_d
+        head = 'Sum d = %+.4g' % sum_d
         note = NO_Z_NOTE
     out = ['%s   [%s; positive favours the individual fits]' % (head, form)]
     if note:
@@ -1052,7 +1133,7 @@ def format_joint_vs_individuals(jf, individual_fits, snap=None):
            % (' (unrescaled)' if snap.rescale is not None else ''),
           'objective: %s' % label,
           'each side scored on the joint fit\'s used rows under its own C_ii; '
-          'delta = joint − individual in %s' % ('−2 ln L units' if lik or _weighted(snap.fit_scale)
+          'delta = joint - individual in %s' % ('-2 ln L units' if lik or _weighted(snap.fit_scale)
                                                  else 'sum of squares')]
     out.append('  %-16s %-5s %12s %12s %12s' % ('dataset', 'n', 'joint chi2/n', 'indiv chi2/n', 'delta'))
     for r in rows:
@@ -1070,10 +1151,39 @@ def format_joint_vs_individuals(jf, individual_fits, snap=None):
 
 # --------------------------- Fisher shares, tension, exact optimum (§6.2, §6.4) --
 _DEG_UNAVAILABLE = 'no parameter covariance (the Hessian failed)'
+_DEG_MCMC = 'no parameter covariance (MCMC result)'
 COUPLED_NOTE = 'the joint information is smaller than the sum: shared errors are counted once'
 MEAN_INFO_NOTE = ('mean information only; the information the covariance carries about the '
                   'parameters is omitted')
-TENSION_HEAD = 'model–reduction tension'
+TENSION_HEAD = 'model-reduction tension'
+SKIP_USER = 'skipped: fit stopped by the user'
+SKIP_CHEAP = "skipped (report_diagnostics='cheap')"
+
+
+class DiagnosticSkipped(Exception):
+    """A diagnostics section that did not run (the user stopped the fit, or the cheap
+    report mode); ``diagnostics`` records it as ``{'skipped': <reason>}``."""
+
+
+def _check_abort(jf):
+    if getattr(jf, 'fit_abort', False):
+        raise DiagnosticSkipped(SKIP_USER)
+
+
+def _check_live(jf, snap):
+    """The functions that evaluate the live ``jf`` need ``snap`` to describe its current
+    state: it must be ``jf.last_snapshot`` and the row ranges must still agree."""
+    if snap is not getattr(jf, 'last_snapshot', None):
+        raise ValueError('the snapshot is not this JointFit\'s last fit (jf.last_snapshot); '
+                         'the live models and masks may belong to another fit')
+    try:
+        ranges = [tuple(int(v) for v in r) for r in jf.row_ranges()]
+    except Exception as e:                        # noqa: BLE001 -- say why, plainly
+        raise ValueError('the JointFit row ranges are unavailable (%s)' % e)
+    if ranges != [tuple(d.rows) for d in snap.datasets]:
+        raise ValueError('the snapshot row ranges %s differ from the JointFit\'s %s (datasets, '
+                         'windows or masks changed since the fit)'
+                         % ([tuple(d.rows) for d in snap.datasets], ranges))
 
 
 def _cscale(snap):
@@ -1142,11 +1252,11 @@ def _marginal_cov(snap, k, L=None):
     return np.diag((sig * si) ** 2)
 
 
-def _is_coupled(snap):
+def _is_coupled(snap, cache=None):
     """True when C has a non-zero entry outside the per-dataset diagonal blocks."""
     if not snap.cov_in_use or len(snap.datasets) < 2:
         return False
-    C = cc.assemble(_snap_blocks(snap, 'exact'), _cscale(snap))[0]
+    C = _exact_CL(snap, cache)[0]
     for d in snap.datasets:
         a, b = d.rows
         if b > a and (np.any(C[a:b, :a] != 0.0) or np.any(C[a:b, b:] != 0.0)):
@@ -1154,20 +1264,22 @@ def _is_coupled(snap):
     return False
 
 
-def fisher_shares(jf, snap, step=None):
+def fisher_shares(jf, snap, step=None, cache=None):
     """What each dataset tells you about the shared parameters (spec §6.2).
 
     Forward-difference Jacobian of every dataset's unwhitened residual (used rows) w.r.t.
-    every free master, one quiet evaluation per free master; per dataset the marginal
-    information ``I_i = J_iᵀ C_ii⁻¹ J_i`` (``_marginal_cov``) and, for each shared master
-    p, the share ``I_i[p,p] / Σ_j I_j[p,p]``. Returns ``{'params', 'shares',
-    'information' (I_i[p,p]), 'matrix' (I_i over var_names), 'var_names', 'coupled'}``
-    plus ``'mean_information_only': True`` when C depends on the model (the covariance's
-    own information term is omitted) and ``'note'`` for an unweighted scale. Every model
-    and ``jf.result`` are left as they were."""
+    every free master: nvarys quiet model evaluations (none without a shared free master);
+    per dataset the marginal information ``I_i = J_iᵀ C_ii⁻¹ J_i`` (``_marginal_cov``) and,
+    for each shared master p, the share ``I_i[p,p] / Σ_j I_j[p,p]``. Returns ``{'params',
+    'shares', 'information' (I_i[p,p]), 'matrix' (I_i over var_names), 'var_names',
+    'coupled'}`` plus ``'mean_information_only': True`` when C depends on the model (the
+    covariance's own information term is omitted) and ``'note'`` for an unweighted scale.
+    Every model and ``jf.result`` are left as they were. ``snap`` must be
+    ``jf.last_snapshot`` (ValueError otherwise); ``jf.fit_abort`` stops the loop
+    (``DiagnosticSkipped``)."""
     names = list(snap.var_names)
     shared = _shared_masters(snap)
-    out = {'params': shared, 'var_names': names, 'coupled': _is_coupled(snap),
+    out = {'params': shared, 'var_names': names, 'coupled': _is_coupled(snap, cache),
            'shares': {d.name: {} for d in snap.datasets},
            'information': {d.name: {} for d in snap.datasets}, 'matrix': {}}
     if _model_needs(snap):
@@ -1176,23 +1288,30 @@ def fisher_shares(jf, snap, step=None):
         out['note'] = 'unweighted fit scale: shares of the sum-of-squares curvature, not a likelihood'
     if not shared:
         return out
+    _check_live(jf, snap)
     r0 = [np.asarray(d.r, float) for d in snap.datasets]
     J = [np.zeros((len(r), len(names))) for r in r0]
     with jf.quiet():
         for j, name in enumerate(names):
+            _check_abort(jf)
             h = _step_for(snap, name, step)
             parts = raw_parts(jf, _params_at(jf, snap, {name: snap.params[name] + h}))
             for k, (r, _f) in enumerate(parts):
                 J[k][:, j] = (np.asarray(r, float) - r0[k]) / h
-    L = rebuild_L(snap) if snap.cov_in_use else None
+    chos = _block_chos(snap, cache=cache) if snap.cov_in_use else None
+    s_all = _s_of(snap)
     tot = {p: 0.0 for p in shared}
     for k, d in enumerate(snap.datasets):
         Jk = J[k]
         if Jk.shape[0] == 0:
             I = np.zeros((len(names), len(names)))
         else:
-            C = _marginal_cov(snap, k, L)
-            I = Jk.T @ cho_solve(cho_factor(C, lower=True), Jk)
+            if chos is not None:      # (S C S)_ii = s_i² (C)_ii: one factor per block
+                si = 1.0 if s_all is None else s_all[k]
+                I = (Jk.T @ cho_solve(chos[k], Jk)) / si ** 2
+            else:
+                C = _marginal_cov(snap, k)
+                I = Jk.T @ cho_solve(cho_factor(C, lower=True), Jk)
             I = 0.5 * (I + I.T)
         out['matrix'][d.name] = I
         for p in shared:
@@ -1247,8 +1366,8 @@ def _tension_groups(snap):
     return groups
 
 
-def tension(snap):
-    """Model–reduction tension (spec §6.4 item 5, spec 17 §4.6): for every multiplicative
+def tension(snap, cache=None):
+    """Model-reduction tension (spec §6.4 item 5, spec 17 §4.6): for every multiplicative
     component, ``eps = Σ_t Gᵀ C⁻¹ r`` over the whole fit (C the snapshot's exact C, G the
     term's loading at the stored intensity; a rescaled fit uses r_i / s_i, i.e. the
     covariance S C S with loading S G) and ``pull = eps_k / √Σ_kk``; components with
@@ -1260,7 +1379,7 @@ def tension(snap):
     groups = _tension_groups(snap)
     if not groups:
         return None
-    L = rebuild_L(snap)
+    L = _L_of(snap, None, cache)
     r = np.concatenate([d.r for d in snap.datasets]) if snap.datasets else np.zeros(0)
     rs = _row_s(snap)
     if rs is not None:
@@ -1287,17 +1406,19 @@ def exact_objective(jf, snap, params):
     model, else the snapshot's fixed blocks; ``2 Σ ln diag chol(C)`` for the log det; the
     snapshot's rescale factors applied as the fit applied them (r_i / s_i before whitening,
     ``ln s_i`` per row in the log det). An unweighted scale returns its sum of squares.
-    Quiet; nothing is left changed. At the snapshot's parameters it equals
-    ``nll2 + prior`` of ``per_dataset_objective``."""
+    Quiet; nothing is left changed; one model evaluation (shared by the residual and C(θ)).
+    At the snapshot's parameters it equals ``nll2 + prior`` of ``per_dataset_objective``.
+    ``snap`` must be ``jf.last_snapshot`` (ValueError otherwise)."""
+    _check_live(jf, snap)
     scale = snap.fit_scale
-    with jf.quiet():
-        parts = raw_parts(jf, params)
-        blocks = None
-        if snap.cov_in_use:
-            if _model_needs(snap):
-                blocks = jf.model_blocks(params, scale)[0]
-            else:
-                blocks = _snap_blocks(snap, 'exact')
+    ev = _evaluate_at(jf, params)
+    parts = raw_parts(jf, params, ev)
+    blocks = None
+    if snap.cov_in_use:
+        if _model_needs(snap):
+            blocks = jf.model_blocks(params, scale, ev)[0]
+        else:
+            blocks = _snap_blocks(snap, 'exact')
     prior = np.asarray(jf.prior_rows(params), float)
     pr = float(np.sum(prior ** 2))
     r = np.concatenate([p[0] for p in parts]) if parts else np.zeros(0)
@@ -1318,7 +1439,7 @@ def exact_objective(jf, snap, params):
     return float(z @ z) + logdet + len(r) * LN2PI + pr
 
 
-def optimum_distance(jf, snap, step=None):
+def optimum_distance(jf, snap, step=None, cache=None):
     """How far the fitted point is from the exact likelihood's optimum (spec §6.4 item 6).
     ``None`` unless C depends on the model (model mode, intensity-dependent term), and
     ``None`` for an emcee snapshot (posterior medians, not the fixed point). With
@@ -1326,8 +1447,10 @@ def optimum_distance(jf, snap, step=None):
     g of ``exact_objective`` over ``snap.var_names`` and the Newton step
     ``δ = −½·covar·g`` (Φ's Hessian is about 2·covar⁻¹: on the covariance path lmfit runs
     with ``scale_covar=False``, so covar = (Jᵀ C⁻¹ J)⁻¹). Returns ``{'delta', 'in_stderr',
-    'worst': (name, δ/stderr), 'fit_gap'}``. Costs 2·nvarys quiet model evaluations and as
-    many factorisations; leaves every model and ``jf.result`` as they were."""
+    'worst': (name, δ/stderr), 'fit_gap'}``. Costs 2·nvarys quiet model evaluations (one per
+    ``exact_objective``) and as many factorisations; leaves every model and ``jf.result`` as
+    they were. ``snap`` must be ``jf.last_snapshot`` (ValueError otherwise); ``jf.fit_abort``
+    stops the loop (``DiagnosticSkipped``)."""
     if snap.method == 'emcee' or not _model_needs(snap):
         # an MCMC snapshot reports posterior medians, not the reweighting fixed point
         return None
@@ -1336,9 +1459,11 @@ def optimum_distance(jf, snap, step=None):
     if (cov is None or np.shape(cov) != (len(names), len(names))
             or not np.all(np.isfinite(cov))):
         return {'unavailable': _DEG_UNAVAILABLE}
+    _check_live(jf, snap)
     g = np.zeros(len(names))
     with jf.quiet():
         for j, name in enumerate(names):
+            _check_abort(jf)
             h = _step_for(snap, name, step)
             v = snap.params[name]
             fp = exact_objective(jf, snap, _params_at(jf, snap, {name: v + h}))
@@ -1353,7 +1478,7 @@ def optimum_distance(jf, snap, step=None):
     avail = [(n, v) for n, v in ins.items() if v is not None]
     worst = max(avail, key=lambda t: abs(t[1])) if avail else None
     return {'delta': dd, 'in_stderr': ins, 'worst': worst,
-            'fit_gap': per_dataset_objective(snap)[1]['fit_gap']}
+            'fit_gap': per_dataset_objective(snap, cache)[1]['fit_gap']}
 
 
 # ------------------------------------------------------------- diagnostics --
@@ -1369,6 +1494,8 @@ def _degeneracy(snap, rho_tol=0.9):
     matrix is the stderr-normalised covariance."""
     cov = snap.covar
     names = list(snap.var_names)
+    if cov is None and snap.method == 'emcee':
+        return {'unavailable': _DEG_MCMC}      # lmfit's emcee result carries no covar
     if cov is None or len(names) == 0 or np.shape(cov) != (len(names), len(names)):
         return {'unavailable': _DEG_UNAVAILABLE}
     cov = np.asarray(cov, float)
@@ -1401,33 +1528,55 @@ def _degeneracy(snap, rho_tol=0.9):
 def _section(diag, name, fn):
     try:
         diag[name] = fn()
+    except DiagnosticSkipped as e:
+        diag[name] = {'skipped': str(e)}
     except Exception as e:                       # noqa: BLE001 -- degrade, report
         diag[name] = None
         diag['unavailable'].append((name, '%s: %s' % (type(e).__name__, e)))
 
 
+def _restore_outputs(jf):
+    """One quiet evaluation at ``jf.result.params``: ``quiet()`` restores the models' x and
+    parameters but not what ``y()`` computed (outputs, caches), so after the diagnostics'
+    finite differences this leaves those at the best fit, as the snapshot did."""
+    with jf.quiet():
+        jf.push_params(jf.result.params)
+        jf.evaluate()
+
+
 def diagnostics(jf, snap, individual_fits=None, *, qrange_tol=0.10, hetero_ratio=3.0,
-                rho_tol=0.9, fisher=True, tension=True, optimum=True):
+                rho_tol=0.9, fisher=True, tension=True, optimum=True, mode=None):
     """End-of-fit diagnostics of a joint fit (spec §6, §6.3 "Always", §6.4 items 1-4).
     Every section is computed on its own; one that raises is listed in ``unavailable``
-    as ``(section, '<ExcType>: <msg>')`` and never propagates. ``fisher`` (§6.2),
-    ``tension`` (§6.4 item 5; ``None`` without a multiplicative term) and
-    ``optimum_distance`` (§6.4 item 6; 2·nvarys model evaluations) are skipped, ``None``,
-    when their flag is False."""
+    as ``(section, '<ExcType>: <msg>')`` and never propagates. ``fisher`` (§6.2; nvarys
+    model evaluations), ``tension`` (§6.4 item 5; ``None`` without a multiplicative term;
+    no evaluation) and ``optimum_distance`` (§6.4 item 6; 2·nvarys model evaluations when C
+    depends on the model) are skipped, ``None``, when their flag is False.
+
+    ``mode`` (default ``jf.report_diagnostics``, itself ``'full'``): ``'cheap'`` runs no
+    model evaluation -- the two model-evaluating sections become ``{'skipped': ...}`` --
+    and neither does a fit stopped by the user (``jf.fit_abort``, also checked inside the
+    finite-difference loops). When a model-evaluating section ran, one final quiet
+    evaluation at ``jf.result.params`` leaves the model outputs at the best fit. One
+    ``cache`` serves every section: C is assembled and factorised once, each marginal
+    block once, and the per-dataset split is computed once."""
+    if mode is None:
+        mode = getattr(jf, 'report_diagnostics', 'full') or 'full'
+    if mode not in ('full', 'cheap'):
+        raise ValueError("report_diagnostics must be 'full' or 'cheap', got %r" % (mode,))
     d = {'unavailable': []}
     cache = {}
+    ran = []                     # model-evaluating sections that ran (or started)
 
     def terms():
-        if 'terms' not in cache:
-            cache['terms'] = per_dataset_objective(snap)
-        return cache['terms']
+        return per_dataset_objective(snap, cache)
 
     def objective():
         ts, ex = terms()
         coup = abs(ex['coupling']) > 1e-9 * (1.0 + abs(sum(t.sequential for t in ts)))
         o = {'label': ex['objective_label'], 'likelihood': ex['likelihood'],
              'mode': snap.cov_mode if snap.cov_in_use else None, 'nll2': ex['nll2'],
-             'notes': list(snap.notes)}
+             'notes': list(snap.notes), 'fit_label': snap.label}
         if coup:
             o['order'] = list(ex['order'])
         if snap.cov_in_use and snap.cov_mode == 'model':
@@ -1440,7 +1589,7 @@ def diagnostics(jf, snap, individual_fits=None, *, qrange_tol=0.10, hetero_ratio
         ts, _ = terms()
         if snap.rescale is None:
             return [t.chi2_per_point for t in ts], False
-        m = marginal_terms(snap, scaled=False)
+        m = marginal_terms(snap, scaled=False, cache=cache)
         return [(mi / t.n_points) if t.n_points else None for mi, t in zip(m, ts)], True
 
     def quality():
@@ -1450,7 +1599,7 @@ def diagnostics(jf, snap, individual_fits=None, *, qrange_tol=0.10, hetero_ratio
                  'unrescaled': unresc} for t, v in zip(ts, vals)]
         if individual_fits is not None:
             try:
-                for row, it in zip(rows, individual_terms(jf, snap, individual_fits)):
+                for row, it in zip(rows, individual_terms(jf, snap, individual_fits, cache)):
                     ok = it['unavailable'] is None
                     row['indiv_chi2_per_point'] = (it['indiv_m'] / it['n']) if ok and it['n'] else None
                     row['delta'] = it['delta']
@@ -1479,22 +1628,56 @@ def diagnostics(jf, snap, individual_fits=None, *, qrange_tol=0.10, hetero_ratio
     def shared_warnings():
         return [w for w in snap.warnings if w.startswith('shared ')]
 
+    def evaluating(fn, applies):
+        """A model-evaluating section: skipped in the cheap mode or after a stopped fit
+        (when it would evaluate at all), else run and remembered for the final restore."""
+        def run():
+            if applies():
+                if mode == 'cheap':
+                    raise DiagnosticSkipped(SKIP_CHEAP)
+                _check_abort(jf)
+                ran.append(1)
+            return fn()
+        return run
+
+    def fisher_applies():
+        return bool(_shared_masters(snap))
+
+    def optimum_applies():
+        if snap.method == 'emcee' or not _model_needs(snap):
+            return False
+        cov = snap.covar
+        n = len(snap.var_names)
+        return cov is not None and np.shape(cov) == (n, n) and bool(np.all(np.isfinite(cov)))
+
     _section(d, 'objective', objective)
     _section(d, 'quality', quality)
+    if individual_fits is not None:
+        ran.append(1)            # individual models were evaluated (possibly shared objects)
     _section(d, 'heterogeneity', heterogeneity)
     _section(d, 'qrange', qrange)
     _section(d, 'shared_warnings', shared_warnings)
     _section(d, 'degeneracy', lambda: _degeneracy(snap, rho_tol))
-    _section(d, 'information_criteria', lambda: information_criteria(snap))
+    _section(d, 'information_criteria', lambda: information_criteria(snap, cache))
     d['rescale'] = dict(snap.rescale) if snap.rescale is not None else None
-    for name, flag, fn in (('fisher', fisher, lambda: fisher_shares(jf, snap)),
-                           ('tension', tension, lambda: _tension(snap)),
-                           ('optimum_distance', optimum, lambda: optimum_distance(jf, snap))):
+    for name, flag, fn in (
+            ('fisher', fisher, evaluating(lambda: fisher_shares(jf, snap, cache=cache),
+                                          fisher_applies)),
+            ('tension', tension, lambda: _tension(snap, cache)),
+            ('optimum_distance', optimum,
+             evaluating(lambda: optimum_distance(jf, snap, cache=cache), optimum_applies))):
         if flag:
             _section(d, name, fn)
         else:
             d[name] = None
+    if ran and getattr(jf, 'result', None) is not None:
+        try:
+            _restore_outputs(jf)
+        except Exception as e:                   # noqa: BLE001 -- degrade, report
+            d['unavailable'].append(('restore', 'model outputs not re-evaluated at the best '
+                                                'fit: %s: %s' % (type(e).__name__, e)))
     d['thresholds'] = {'qrange_tol': qrange_tol, 'hetero_ratio': hetero_ratio, 'rho_tol': rho_tol}
+    d['mode'] = mode
     return d
 
 
@@ -1504,7 +1687,7 @@ def _softest_text(softest):
         if k == 0:
             parts.append(nm if c > 0 else '-%s' % nm)
         else:
-            parts.append('%s %s·%s' % ('-' if c < 0 else '+', _fmt_coef(c), nm))
+            parts.append('%s %s*%s' % ('-' if c < 0 else '+', _fmt_coef(c), nm))
     return ' '.join(parts)
 
 
@@ -1513,6 +1696,8 @@ def _fmt_objective(diag, th, L):
     if not o:
         return
     L.append('  objective: %s' % o['label'])
+    if o.get('fit_label'):
+        L.append('  fit state: %s' % o['fit_label'])
     if o.get('order'):
         L.append('  dataset order (sequential split): %s' % ', '.join(o['order']))
     if o.get('nll2') is not None:
@@ -1595,6 +1780,9 @@ def _fmt_fisher(diag, th, L):
     f = diag.get('fisher')
     if not f:
         return
+    if 'skipped' in f:
+        L.append('  information on the shared parameters: %s' % f['skipped'])
+        return
     if not f['params']:
         L.append('  information on the shared parameters: no shared free parameter')
         return
@@ -1616,8 +1804,8 @@ def _fmt_tension(diag, th, L):
     t = diag.get('tension')
     if not t:
         return
-    L.append('  %s (per multiplicative error component: eps = Σ Gᵀ C⁻¹ r, the shift the '
-             'fit leaned on, and its pull eps/√Σ_kk):' % TENSION_HEAD)
+    L.append('  %s (per multiplicative error component: eps = Sum G^T C^-1 r, the shift the '
+             'fit leaned on, and its pull eps/sqrt(Sigma_kk)):' % TENSION_HEAD)
     for r in t:
         L.append('    %-16s %-12s %-10s eps = %+.4g  pull = %+.3g' % (
             r['dataset'], r['term'], r['label'], r['eps'], r['pull']))
@@ -1630,10 +1818,13 @@ def _fmt_optimum(diag, th, L):
     if 'unavailable' in o:
         L.append('  distance to the exact-likelihood optimum: unavailable (%s)' % o['unavailable'])
         return
+    if 'skipped' in o:
+        L.append('  distance to the exact-likelihood optimum: %s' % o['skipped'])
+        return
     w = o.get('worst')
     gap = o.get('fit_gap')
     line = ('  the fitted point is the reweighting fixed point; the exact-likelihood optimum is '
-            'estimated %s stderr away (%s); fit gap Δχ² = %s' % (
+            'estimated %s stderr away (%s); fit gap Delta chi2 = %s' % (
                 'n/a' if w is None else '%.3g' % abs(w[1]), 'n/a' if w is None else w[0],
                 'n/a' if gap is None else '%+.4g' % gap))
     if w is not None and abs(w[1]) > 0.3:
@@ -1653,7 +1844,7 @@ def _fmt_ic(diag, th, L):
 def _fmt_rescale(diag, th, L):
     r = diag.get('rescale')
     if r:
-        L.append('  errors rescaled per dataset by √χ²_red: s = %s (%d rounds, %s)' % (
+        L.append('  errors rescaled per dataset by sqrt(chi2_red): s = %s (%d rounds, %s)' % (
             ', '.join('%.4g' % v for v in r['s']), r['rounds'],
             'converged' if r['converged'] else 'not converged'))
 
@@ -1703,10 +1894,13 @@ def _loo_shared_masters(jf):
             if len(t) >= 2 and k in jf.master_params and jf.master_params[k].vary]
 
 
-def _loo_copy(jf, k, start, scale, method, ranges, fit_kws):
+def _loo_copy(jf, k, start, scale, method, windows, mode, fit_kws):
     """A fresh JointFit without dataset k (its covariance block is never added, which is
     exact marginalisation: shared terms among the remaining datasets stay shared), fitted
-    from ``start``. Everything it touches is a deep copy; ``jf`` is not modified."""
+    from ``start`` on the full fit's windows (``imin``/``imax`` indices, not x values) and
+    column masks, with its priors, error rescaling, covariance mode and fit keywords.
+    Everything it touches is a deep copy; ``jf`` is not modified. The copy's report runs
+    the cheap diagnostics (no model evaluation; the text is not used)."""
     import copy
     new = type(jf)()
     keep = [i for i in range(len(jf.objectives)) if i != k]
@@ -1727,58 +1921,69 @@ def _loo_copy(jf, k, start, scale, method, ranges, fit_kws):
             params[m].value = start[m]
     new.master_params = params
     new.shared = list(jf.shared)
-    new.covariance_mode = jf.covariance_mode
+    new.covariance_mode = mode
     new.rescale_errors = jf.rescale_errors
     new.rescale_inflate_only = jf.rescale_inflate_only
     new._priors = {m: v for m, v in jf._priors.items() if m in mp}
+    new.report_diagnostics = 'cheap'
+    new._window_override = {o['name']: windows[o['name']] for o in new.objectives}
     first = new.objectives[0]
-    lo, hi = ranges[first['name']]
-    new.perform_fit(lo, hi, fit_scale=scale, fit_method=method, ranges=ranges, **fit_kws)
+    x0 = np.asarray(first['x'], float)
+    lo, hi = windows[first['name']]
+    new.perform_fit(float(x0[lo]), float(x0[hi]), fit_scale=scale, fit_method=method,
+                    covariance_mode=mode, **fit_kws)
     return new
 
 
 def leave_one_out(jf, workers=1, fit_kws=None):
     """Refit N times, each omitting one dataset, warm-started from the full fit, on deep
-    copies; ``jf`` is never mutated. See ``LOOResult``. ``workers`` is accepted for
-    forward compatibility; the refits run serially (a note says so when workers > 1)."""
+    copies; ``jf`` is never mutated. See ``LOOResult``. The refits reuse the full fit's
+    windows (as indices), column masks, priors, error rescaling, covariance mode and
+    fit keywords (``maxiter`` and the solver keywords recorded by ``perform_fit``);
+    ``fit_kws`` overrides those. ``workers`` is accepted for forward compatibility; the
+    refits run serially (a note says so when workers > 1)."""
     n = len(jf.objectives)
     if n < 2:
         raise ValueError('leave-one-out needs at least 2 datasets')
     if jf._fit_scale is None:
         raise ValueError('leave-one-out needs a fitted JointFit (call perform_fit first)')
-    fit_kws = dict(fit_kws or {})
     notes = []
     if workers and workers > 1:
         notes.append('workers=%d requested; the refits ran serially' % workers)
+    rec = getattr(jf, '_fit_args', None) or {}
     scale, method = jf._fit_scale, jf._fit_method
+    kws = dict(rec.get('fit_kws') or {})
+    if 'maxiter' in rec:
+        kws['maxiter'] = rec['maxiter']
+    kws.update(fit_kws or {})
+    mode = rec.get('covariance_mode', jf.covariance_mode)
     if method == 'emcee':
         method = 'leastsq'
         notes.append('the full fit is an emcee run; the refits are least squares from its '
                      'posterior medians')
     full = jf.result.params if jf.result is not None else jf.master_params
     start = {m: full[m].value for m in jf.master_params if m in full}
-    ranges = {}
+    windows = dict(rec.get('windows') or {})
     for o in jf.objectives:
-        x = np.asarray(o['x'], float)
-        ranges[o['name']] = (float(x[o['imin']]), float(x[o['imax']]))
+        windows.setdefault(o['name'], (int(o['imin']), int(o['imax'])))
     shared = _loo_shared_masters(jf)
     names = [o['name'] for o in jf.objectives]
     est = {m: [] for m in shared}
     failures = []
     for k in range(n):
         try:
-            new = _loo_copy(jf, k, start, scale, method, ranges, fit_kws)
+            new = _loo_copy(jf, k, start, scale, method, windows, mode, kws)
             if new.result is None or new.result.params is None:
                 raise RuntimeError('refit produced no result')
-            for m in shared:
-                est[m].append(float(new.result.params[m].value)
-                              if m in new.result.params else None)
+            row = {m: (float(new.result.params[m].value) if m in new.result.params else None)
+                   for m in shared}
             if not getattr(new.result, 'success', True):
                 notes.append('refit omitting %s did not report success' % names[k])
         except Exception as e:                     # noqa: BLE001 -- a failed refit is a row
             failures.append((names[k], '%s: %s' % (type(e).__name__, e)))
-            for m in shared:
-                est[m].append(None)
+            row = {m: None for m in shared}
+        for m in shared:                           # one entry per omission, always
+            est[m].append(row[m])
     spread, influence, units = {}, {}, {}
     any_raw = False
     for m in shared:

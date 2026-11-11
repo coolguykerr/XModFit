@@ -1,14 +1,15 @@
 """
 validate_joint_diag.py -- WS2 reporting harness, sections D (Task 6), I (Task 7), F (Task 8),
-L (Task 9, leave-one-out).
+L (Task 9, leave-one-out), W (the fixes of the final whole-branch review).
 
 Section D: the "Joint-fit diagnostics:" block of JointFit._report() -- quality,
 heterogeneity, q-range, shared-parameter warnings, degeneracy, failure safety.
 Section F: Fisher shares of the shared parameters, model-reduction tension, the exact
 objective and the distance from the fitted point to the exact-likelihood optimum.
 
-Fixtures come from validate_joint_stats.  Report text contains non-ascii (chi, sigma,
-sqrt): never print it raw, use ascii().
+Fixtures come from validate_joint_stats.  Report text is ASCII (final review R9; test
+W1 checks it); checks still pass report text through ascii() so a regression cannot crash
+the harness on a cp1252 console.
 
     QT_QPA_PLATFORM=offscreen python validate_joint_diag.py
 """
@@ -76,7 +77,7 @@ def test_d1_block_and_identity():
     rep = _fit(jf)
     pre, blk = _block(rep)
     check('D1 report ends with the diagnostics block', blk.startswith(HEAD) and rep.endswith(blk))
-    check('D1 block has the objective label', 'GLS χ² (Linear, covariance data)' in blk,
+    check('D1 block has the objective label', 'GLS chi2 (Linear, covariance data)' in blk,
           ascii(blk[:200]))
     check('D1 one quality row per dataset', all(('D%d ' % i) in blk for i in range(3)), ascii(blk))
     check('D1 first line unchanged (lmfit header)', not rep.startswith(HEAD))
@@ -167,8 +168,8 @@ def test_d5_degeneracy():
           'd0_a' in sf and 'd0_c' in sf and sf['d0_a'] * sf['d0_c'] < 0
           and abs(abs(sf['d0_a']) - 1) < 0.05 and abs(abs(sf['d0_c']) - 1) < 0.05, str(d['softest']))
     txt = jfs.format_diagnostics(_diag(jf))
-    check('D5 text of the softest direction', 'softest direction: d0_a - 1·d0_c' in txt
-          or 'softest direction: d0_c - 1·d0_a' in txt, ascii(txt))
+    check('D5 text of the softest direction', 'softest direction: d0_a - 1*d0_c' in txt
+          or 'softest direction: d0_c - 1*d0_a' in txt, ascii(txt))
     check('D5 block carries it', 'degenerate pair: d0_a, d0_c' in _block(rep)[1])
 
 
@@ -792,7 +793,7 @@ def test_f4_tension():
     others = [abs(r['pull']) for r in rows if r['dataset'] != 'D1']
     check('F4 the other datasets show no tension (|pull| < 0.6)', max(others) < 0.6, str(others))
     txt = _fisher_text(jf)
-    check('F4 heading model-reduction tension', 'model–reduction tension' in txt, ascii(txt))
+    check('F4 heading model-reduction tension', 'model-reduction tension' in txt, ascii(txt))
     check('F4 never stitching quality', 'stitching quality' not in txt)
     check('F4 not presented as a fitted scale factor', 'fitted scale factor' not in txt)
     jf0 = make_jf(2)
@@ -1141,6 +1142,506 @@ def test_l7_subset_share_and_no_shared():
     check('L7 nothing shared -> empty estimates', r2.estimates == {} and r2.failures == [])
 
 
+# ----------------------------------------------------------------------- W --
+# Final whole-branch review fixes (c884afa..5867320): I1-I4, M1-M7 and the cheap tests.
+
+class CountLine(Line):
+    """Line that counts its y() calls (class-wide) and can stop the fit after a given
+    number of calls (sets ``target.fit_abort``)."""
+    calls = 0
+    abort_after = None
+    target = None
+
+    def y(self):
+        CountLine.calls += 1
+        if (CountLine.abort_after is not None and CountLine.target is not None
+                and CountLine.calls >= CountLine.abort_after):
+            CountLine.target.fit_abort = True
+        return super().y()
+
+
+def _counting(nds=4, cov=shared_cov, mode='model', **kw):
+    CountLine.calls, CountLine.abort_after, CountLine.target = 0, None, None
+    jf = make_jf(nds, cov=cov, func=CountLine, **kw)
+    if mode:
+        jf.covariance_mode = mode
+    return jf
+
+
+def _calls_in(fn):
+    c0 = CountLine.calls
+    out = fn()
+    return out, CountLine.calls - c0
+
+
+def test_w1_ascii_report():
+    """I2 (ruling R9): the full report of a model-mode, rescaled covariance fit with its
+    diagnostics block is ASCII, and so is every other WS2 text."""
+    import io
+    jf = make_jf(3, cov=shared_cov, scale_err=[1.0, 2.0, 3.0])
+    jf.covariance_mode = 'model'
+    jf.rescale_errors = 'per_dataset'
+    rep = _fit(jf)
+    pre, blk = _block(rep)
+    check('W1 the report has the rescale and diagnostics blocks, nothing unavailable',
+          'Errors rescaled per dataset' in pre and blk.startswith(HEAD)
+          and 'unavailable' not in blk and 'model-reduction tension' in blk, ascii(blk))
+    try:
+        rep.encode('ascii')
+        ok, why = True, ''
+    except UnicodeEncodeError as e:
+        ok, why = False, ascii(str(e))
+    check('W1 rescaled model-mode report encodes as ASCII', ok, why)
+    buf = io.TextIOWrapper(io.BytesIO(), encoding='cp1252')
+    try:
+        buf.write(rep)
+        buf.flush()
+        ok = True
+    except UnicodeEncodeError:
+        ok = False
+    check('W1 the report prints to a cp1252 stream', ok)
+    texts = []
+    for scale, cov, mode in (('Log', private_cov, 'data'), ('Log', None, None),
+                             ('Linear', None, None), ('Linear w/o error', None, None)):
+        j = make_jf(4, cov=cov)
+        if mode:
+            j.covariance_mode = mode
+        texts.append(_fit(j, scale=scale))
+        if scale == 'Log' and cov is None:
+            ja, jb = j, make_jf(4)
+            _fit(jb, scale='Log')
+            texts.append(jfs.format_comparison(jfs.compare_fits(ja.last_snapshot, jb.last_snapshot),
+                                               jfs.information_criteria(ja.last_snapshot),
+                                               jfs.information_criteria(jb.last_snapshot)))
+            texts.append(jfs.format_joint_vs_individuals(ja, _indiv_fits(ja, scale='Log')))
+            texts.append(jfs.format_loo(jfs.leave_one_out(ja)))
+    texts.append(jfs.objective_label('Linear', True, 'data', {'s': None})[0])
+    bad = [ascii(t[:120]) for t in texts if any(ord(ch) > 127 for ch in t)]
+    check('W1 every other WS2 text is ASCII (labels, comparison, joint vs individual, LOO)',
+          not bad, '; '.join(bad))
+
+
+def test_w2_labels_rendered():
+    """I1: snap.label (posterior medians / frozen C / aborted) is rendered in the block and
+    carried into compare_fits notes; an MCMC result says why there is no covariance."""
+    jf = make_jf(2, cov=shared_cov)
+    jf.covariance_mode = 'model'
+    _fit(jf)
+    ls = jf.last_snapshot
+    rep = _fit(jf, fit_method='emcee', emcee_walkers=10, emcee_steps=20)
+    blk = _block(rep)[1]
+    em = jf.last_snapshot
+    check('W2 emcee block renders the label', 'fit state: at posterior medians; sampled with C '
+          'frozen at the prior fit, not the exact likelihood' in blk, ascii(blk))
+    check('W2 emcee degeneracy: no covariance because it is an MCMC result',
+          'degeneracy: no parameter covariance (MCMC result)' in blk
+          and 'Hessian failed' not in blk, ascii(blk))
+    check('W2 a least-squares block has no fit-state line',
+          'fit state:' not in jfs.format_diagnostics(jfs.diagnostics(jf, ls, fisher=False,
+                                                                     optimum=False)))
+    c = jfs.compare_fits(em, ls)
+    t = jfs.format_comparison(c)
+    check('W2 compare_fits notes carry the emcee label (side A)',
+          ('A: ' + em.label) in c.notes and not any(n.startswith('B: ') for n in c.notes)
+          and ('A: ' + em.label) in t, ascii(str(c.notes)))
+    # an aborted model-mode fit: the label 'aborted fit; ...'
+    ja = _counting()
+    orig = ja.callback
+
+    def cb(params, it, resid, fs):
+        if it >= 3:
+            ja.fit_abort = True
+        return orig(params, it, resid, fs)
+    ja.callback = cb
+    blk = _block(_fit(ja))[1]
+    check('W2 aborted fit: label rendered', 'fit state: aborted fit; not the minimised value'
+          in blk, ascii(blk))
+
+
+def test_w3_evaluation_counts():
+    """I3a/M7: one model evaluation per theta (snapshot 1, exact_objective 1, Fisher nvarys,
+    optimum 2*nvarys, plus the final restore)."""
+    nds = 4
+    jf = _counting(nds)
+    _fit(jf)
+    snap = jf.last_snapshot
+    nv = len(snap.var_names)
+    _, n = _calls_in(lambda: jfs.snapshot(jf))
+    check('W3 snapshot: one evaluation (model mode)', n == nds, '%d calls, %d datasets' % (n, nds))
+    _, n = _calls_in(lambda: jfs.exact_objective(jf, snap, jf.result.params))
+    check('W3 exact_objective: one evaluation (model mode)', n == nds, '%d calls' % n)
+    _, n = _calls_in(lambda: jfs.fisher_shares(jf, snap))
+    check('W3 fisher_shares: nvarys evaluations', n == nv * nds, '%d calls, nvarys %d' % (n, nv))
+    _, n = _calls_in(lambda: jfs.optimum_distance(jf, snap))
+    check('W3 optimum_distance: 2*nvarys evaluations', n == 2 * nv * nds, '%d calls' % n)
+    d, n = _calls_in(lambda: jfs.diagnostics(jf, snap))
+    check('W3 diagnostics: nvarys + 2*nvarys + 1 (restore) evaluations',
+          n == (3 * nv + 1) * nds and d['optimum_distance'] and 'delta' in d['optimum_distance'],
+          '%d calls, want %d' % (n, (3 * nv + 1) * nds))
+    j2 = _counting(nds, cov=None, mode=None)
+    _fit(j2)
+    _, n = _calls_in(lambda: jfs.diagnostics(j2, j2.last_snapshot))
+    nv2 = len(j2.last_snapshot.var_names)
+    check('W3 diagnostics without a covariance: nvarys + 1', n == (nv2 + 1) * nds, '%d calls' % n)
+
+
+def test_w4_abort_skips():
+    """I3b: after a fit stopped by the user the model-evaluating sections are skipped; an
+    abort during the diagnostics stops the finite-difference loop."""
+    nds = 4
+    jf = _counting(nds)
+    orig = jf.callback
+
+    def cb(params, it, resid, fs):
+        if it >= 3:
+            jf.fit_abort = True
+        return orig(params, it, resid, fs)
+    jf.callback = cb
+    seen = {}
+    orig_rep = jf._report
+
+    def rep_wrap():
+        c0 = CountLine.calls
+        r = orig_rep()
+        seen['n'] = CountLine.calls - c0
+        return r
+    jf._report = rep_wrap
+    blk = _block(_fit(jf))[1]
+    check('W4 aborted fit: Fisher skipped with the user line',
+          'information on the shared parameters: skipped: fit stopped by the user' in blk, ascii(blk))
+    check('W4 aborted fit: no model evaluation in the report', seen.get('n') == 0, str(seen))
+    # abort raised while the Fisher loop runs
+    jg = _counting(nds)
+    _fit(jg)
+    snap = jg.last_snapshot
+    nv = len(snap.var_names)
+    CountLine.target, CountLine.abort_after = jg, CountLine.calls + 2 * nds
+    try:
+        d, n = _calls_in(lambda: jfs.diagnostics(jg, snap))
+    finally:
+        CountLine.target, CountLine.abort_after = None, None
+    check('W4 abort mid-loop: Fisher and optimum skipped, nothing unavailable',
+          d['fisher'] == {'skipped': jfs.SKIP_USER}
+          and d['optimum_distance'] == {'skipped': jfs.SKIP_USER} and d['unavailable'] == [],
+          str((d['fisher'], d['optimum_distance'], d['unavailable'])))
+    check('W4 abort mid-loop: the loop stopped (fewer than nvarys evaluations, + restore)',
+          n < (nv + 1) * nds, '%d calls' % n)
+    txt = jfs.format_diagnostics(d)
+    check('W4 skipped lines rendered', 'information on the shared parameters: skipped: fit stopped '
+          'by the user' in txt and 'distance to the exact-likelihood optimum: skipped: fit stopped '
+          'by the user' in txt, ascii(txt))
+    jg.fit_abort = False
+
+
+def test_w5_cheap_mode():
+    """I3c (ruling R10): report_diagnostics = 'cheap' runs no model evaluation."""
+    from Joint_Fit_Routines import JointFit
+    check('W5 default is full', JointFit().report_diagnostics == 'full')
+    nds = 4
+    full = _counting(nds)
+    rep_full = _fit(full)
+    jf = _counting(nds)
+    jf.report_diagnostics = 'cheap'
+    seen = {}
+    orig_rep = jf._report
+
+    def rep_wrap():
+        c0 = CountLine.calls
+        r = orig_rep()
+        seen['n'] = CountLine.calls - c0
+        return r
+    jf._report = rep_wrap
+    pre, blk = _block(_fit(jf))
+    check('W5 cheap: no model evaluation in the report', seen.get('n') == 0, str(seen))
+    check('W5 cheap: both sections say so',
+          "information on the shared parameters: skipped (report_diagnostics='cheap')" in blk
+          and "distance to the exact-likelihood optimum: skipped (report_diagnostics='cheap')" in blk,
+          ascii(blk))
+    check('W5 cheap: the rest of the block is there',
+          'objective:' in blk and 'model-reduction tension' in blk and 'AIC' in blk, ascii(blk))
+    check('W5 cheap: the fit is the same fit',
+          jf.result.chisqr == full.result.chisqr and jf.result.nfev == full.result.nfev
+          and _block(rep_full)[0] == pre)
+    jf.report_diagnostics = 'bogus'
+    blk = _block(jf._report())[1]
+    check('W5 an unknown mode degrades to an unavailable line',
+          'diagnostics unavailable' in blk and 'report_diagnostics' in blk, ascii(blk))
+
+
+def test_w6_factorisations_cached():
+    """I3d: one diagnostics pass assembles and factorises C once and each marginal block once."""
+    import covariance_core as cc
+    for resc in (None, 'per_dataset'):
+        jf = make_jf(3, cov=shared_cov, scale_err=[1.0, 2.0, 1.5])
+        jf.covariance_mode = 'data'
+        jf.rescale_errors = resc
+        _fit(jf)
+        snap = jf.last_snapshot
+        cnt = {'assemble': 0, 'factorize': 0, 'cho_factor': 0}
+        oa, of, oc = cc.assemble, cc.factorize, jfs.cho_factor
+
+        def a(*x, **k):
+            cnt['assemble'] += 1
+            return oa(*x, **k)
+
+        def f(*x, **k):
+            cnt['factorize'] += 1
+            return of(*x, **k)
+
+        def c(*x, **k):
+            cnt['cho_factor'] += 1
+            return oc(*x, **k)
+        cc.assemble, cc.factorize, jfs.cho_factor = a, f, c
+        try:
+            d = jfs.diagnostics(jf, snap)
+        finally:
+            cc.assemble, cc.factorize, jfs.cho_factor = oa, of, oc
+        check('W6 [%s] one assemble, one factorize, one cho_factor per dataset' % resc,
+              cnt == {'assemble': 1, 'factorize': 1, 'cho_factor': 3} and d['unavailable'] == []
+              and d['fisher'] and d['tension'], str(cnt))
+        ts, ex = jfs.per_dataset_objective(snap)
+        _close('W6 [%s] cached split equals a fresh one (nll2)' % resc,
+               d['objective']['nll2'], ex['nll2'], rtol=0, atol=0)
+
+
+def test_w7_rescale_zero_marginal():
+    """I4: a dataset the model fits exactly (m_i = 0) keeps s_i = 1 with a note; the fit
+    no longer raises on 0/0 in the rescaled residual."""
+    import dataclasses
+    jf = make_jf(2, share=None, scale_err=[1.0, 0.0])
+    for k, v in (('d1_a', A_TRUE), ('d1_b', B_TRUE)):
+        jf.master_params[k].value = v
+        jf.master_params[k].vary = False
+    jf.rescale_errors = 'per_dataset'
+    try:
+        rep = _fit(jf)
+        err = None
+    except Exception as e:                       # noqa: BLE001 -- the RED case
+        rep, err = '', '%s: %s' % (type(e).__name__, e)
+    check('W7 the rescaled fit runs', err is None, ascii(str(err)))
+    if err is None:
+        check('W7 s_1 = 1 for the exactly fitted dataset, s_0 fitted',
+              jf.rescale_s[1] == 1.0 and jf.rescale_s[0] != 1.0, str(jf.rescale_s))
+        check('W7 the note says why', 'D1: error scale sqrt(chi2_red)' in rep and 's = 1' in rep,
+              ascii(rep[-600:]))
+    j2 = make_jf(2)
+    _fit(j2)
+    s = j2.last_snapshot
+    a, b = s.datasets[1].rows
+    z = s.z.copy()
+    z[a:b] = 0.0
+    notes = []
+    sf, _nu = jfs.rescale_factors(dataclasses.replace(s, z=z), notes=notes)
+    check('W7 rescale_factors: m_i = 0 -> s_i = 1 and a note',
+          sf[1] == 1.0 and sf[0] > 0 and any(n.startswith('D1:') for n in notes), str((sf, notes)))
+
+
+def test_w8_outputs_restored():
+    """M1: after the report, a quantity a model computes in y() is its value at
+    result.params, not at the last finite-difference point."""
+    class Rec(Line):
+        def y(self):
+            self.seen = (float(self.a), float(self.b))
+            return super().y()
+    for cov, mode in ((None, None), (shared_cov, 'model')):
+        jf = make_jf(3, cov=cov, func=Rec)
+        if mode:
+            jf.covariance_mode = mode
+        _fit(jf)
+        p = jf.result.params
+        want = []
+        for i in range(len(jf.objectives)):
+            mk = {lk: m for m, t in jf.param_map.items() for (j, lk) in t if j == i}
+            want.append((p[mk['a']].value, p[mk['b']].value))
+        got = [o['func'].seen for o in jf.objectives]
+        check('W8 [%s] model outputs at result.params after the report' % (mode or 'nocov'),
+              got == want, str((got, want)))
+
+
+def test_w9_stale_snapshot_guard():
+    """M3: the functions that evaluate the live JointFit refuse a snapshot that is not its
+    last fit; perform_fit clears last_snapshot first."""
+    jf = make_jf(2, cov=private_cov)
+    jf.covariance_mode = 'model'
+    _fit(jf)
+    old = jf.last_snapshot
+    _fit(jf, hi=X[-5])
+    for name, fn in (('fisher_shares', lambda: jfs.fisher_shares(jf, old)),
+                     ('exact_objective', lambda: jfs.exact_objective(jf, old, jf.result.params)),
+                     ('optimum_distance', lambda: jfs.optimum_distance(jf, old))):
+        try:
+            fn()
+            check('W9 %s refuses an old snapshot' % name, False, 'no exception')
+        except ValueError as e:
+            check('W9 %s refuses an old snapshot' % name, 'last_snapshot' in str(e), str(e))
+    snap = jf.last_snapshot
+    jf.objectives[0]['imin'] += 1
+    try:
+        jfs.fisher_shares(jf, snap)
+        check('W9 changed row ranges refused', False, 'no exception')
+    except ValueError as e:
+        check('W9 changed row ranges refused', 'row ranges' in str(e), str(e))
+    jf.objectives[0]['imin'] -= 1
+
+    class Boom(Line):
+        armed = False
+
+        def y(self):
+            if Boom.armed:
+                raise RuntimeError('model boom')
+            return super().y()
+    jb = make_jf(2, func=Boom)
+    _fit(jb)
+    Boom.armed = True
+    try:
+        _fit(jb)
+    except Exception:                            # noqa: BLE001 -- expected
+        pass
+    finally:
+        Boom.armed = False
+    check('W9 a fit that raised leaves no stale snapshot', jb.last_snapshot is None)
+
+
+def test_w10_loo_alignment_and_settings():
+    """M4: a failure while reading one refit's estimates cannot misalign the rows; the refits
+    carry the windows (indices), column masks, priors, rescaling, covariance mode and
+    fit keywords of the full fit."""
+    jf = make_jf(3, share=None)
+    jf.build_master_params(groups=[jf.share_all('a'), jf.share_all('b')])
+    for k in jf.master_params:
+        jf.master_params[k].vary = True
+    _fit(jf)
+    orig = jfs._loo_copy
+
+    class BadValue:
+        @property
+        def value(self):
+            raise RuntimeError('bad value')
+
+    def copy_hook(j, k, *a, **kw):
+        new = orig(j, k, *a, **kw)
+        if k == 1:
+            params = dict(new.result.params)
+            params['b'] = BadValue()
+            new.result.params = params
+        return new
+    jfs._loo_copy = copy_hook
+    try:
+        res = jfs.leave_one_out(jf)
+    finally:
+        jfs._loo_copy = orig
+    check('W10 one row per omission for every master',
+          all(len(v) == 3 for v in res.estimates.values())
+          and res.estimates['a'][1] is None and res.estimates['b'][1] is None
+          and res.estimates['a'][0] is not None and len(res.failures) == 1
+          and res.failures[0][0] == 'D1', str((res.estimates, res.failures)))
+    # carried settings
+    jc = make_jf(3, cov=private_cov, scale_err=[1.0, 2.0, 1.0])
+    jc.covariance_mode = 'model'                  # the call overrides it with 'data'
+    m = np.ones(len(X), bool)
+    m[[5, 6, 18]] = False
+    jc.objectives[0]['mask'] = m
+    jc.set_priors({'a': (3.0, 0.1)})
+    jc.rescale_errors = 'per_dataset'
+    jc.perform_fit(X[2], X[-3], fit_scale='Linear', maxiter=77, covariance_mode='data')
+    win = {o['name']: (o['imin'], o['imax'], None if o.get('imask') is None
+                       else o['imask'].copy()) for o in jc.objectives}
+    news = []
+
+    def capture(j, k, *a, **kw):
+        new = orig(j, k, *a, **kw)
+        news.append(new)
+        return new
+    jfs._loo_copy = capture
+    try:
+        res = jfs.leave_one_out(jc)
+    finally:
+        jfs._loo_copy = orig
+    ok, det = len(news) == 3 and not res.failures, []
+    for new in news:
+        for o in new.objectives:
+            w = win[o['name']]
+            same_mask = (w[2] is None and o.get('imask') is None) or (
+                w[2] is not None and np.array_equal(w[2], o['imask']))
+            ok &= (o['imin'], o['imax']) == w[:2] and same_mask
+        ok &= new._priors == jc._priors and new.rescale_errors == 'per_dataset'
+        ok &= new.rescale_s is not None and new._fit_args['maxiter'] == 77
+        ok &= new.cov_info.get('mode') == 'data' and new.report_diagnostics == 'cheap'
+        det.append((new._fit_args['maxiter'], new.cov_info.get('mode'), new.rescale_s))
+    check('W10 refits carry windows, imask, priors, rescaling, maxiter and covariance mode',
+          ok, str(det))
+
+
+def test_w11_rescale_wording():
+    """M5: no 'did not converge in 0 rounds' when the loop did not run; a user stop says so."""
+    import Joint_Fit_Routines as J
+    jf = make_jf(2, scale_err=[1.0, 2.0])
+    jf.rescale_errors = 'per_dataset'
+    orig = jfs.snapshot
+    jfs.snapshot = lambda j: (_ for _ in ()).throw(RuntimeError('snap boom'))
+    try:
+        rep = _fit(jf)
+    finally:
+        jfs.snapshot = orig
+    check('W11 snapshot failure: stopped, no "did not converge in 0 rounds"',
+          'error rescaling stopped: snap boom' in rep and 'did not converge in 0 rounds' not in rep,
+          ascii(rep[-800:]))
+    ja = make_jf(2, scale_err=[1.0, 2.0])
+    ja.rescale_errors = 'per_dataset'
+    orig_cb = ja.callback
+
+    def cb(params, it, resid, fs):
+        if it >= 2:
+            ja.fit_abort = True
+        return orig_cb(params, it, resid, fs)
+    ja.callback = cb
+    rep = _fit(ja)
+    check('W11 user stop: says stopped by the user, not "did not converge"',
+          'error rescaling stopped by the user' in rep and 'error rescaling did not converge'
+          not in rep, ascii(rep[-800:]))
+
+
+def test_w12_tension_rescaled():
+    """Cheap test: model-reduction tension of a rescaled, shared (coupled) covariance fit
+    against a dense S C S computation."""
+    jf = make_jf(3, cov=shared_cov, scale_err=[1.0, 2.0, 3.0])
+    jf.covariance_mode = 'data'
+    jf.rescale_errors = 'per_dataset'
+    _fit(jf)
+    snap = jf.last_snapshot
+    t = jfs.tension(snap)
+    check('W12 one shared beam row', t is not None and len(t) == 1 and t[0]['scope'] == 'shared',
+          str(t))
+    L = jfs.rebuild_L(snap)
+    rs = jfs._row_s(snap)
+    C = L @ L.T
+    SCS = C * np.outer(rs, rs)
+    r = np.concatenate([d.r for d in snap.datasets])
+    (_ds, _term, G, Sig, _lab, _scope), = jfs._tension_groups(snap)
+    eps = Sig @ ((rs[:, None] * G).T @ np.linalg.solve(SCS, r))
+    _close('W12 eps == Sigma (S G)^T (S C S)^-1 r', t[0]['eps'], float(eps[0]), rtol=1e-9)
+    _close('W12 pull == eps / sqrt(Sigma_kk)', t[0]['pull'], float(eps[0] / np.sqrt(Sig[0, 0])),
+           rtol=1e-9)
+    j0 = make_jf(3, cov=shared_cov, scale_err=[1.0, 2.0, 3.0])
+    j0.covariance_mode = 'data'
+    _fit(j0)
+    check('W12 rescaling changes the tension', abs(jfs.tension(j0.last_snapshot)[0]['eps']
+                                                   - t[0]['eps']) > 1e-6 * abs(t[0]['eps']))
+
+
+def test_w13_logdet_marg_cholesky():
+    """M2: the marginal log det comes from the Cholesky diagonal and equals slogdet."""
+    jf = make_jf(3, cov=shared_cov)
+    jf.covariance_mode = 'data'
+    _fit(jf)
+    snap = jf.last_snapshot
+    ts, _ = jfs.per_dataset_objective(snap)
+    L = jfs.rebuild_L(snap)
+    want = [np.linalg.slogdet(jfs._block_of(L, *d.rows))[1] for d in snap.datasets]
+    _close('W13 logdet_marg == slogdet of the block', [t.logdet_marg for t in ts], want,
+           rtol=1e-10)
+
+
 def _guarded(t):
     try:
         t()
@@ -1164,6 +1665,13 @@ def main():
               test_f4_tension, test_f5_no_side_effects, test_f6_exact_objective_and_optimum,
               test_f7_modes, test_l1_l2_closed_form, test_l3_unchanged, test_l4_no_covar,
               test_l5_one_dataset, test_l6_refit_raises, test_l7_subset_share_and_no_shared):
+        _guarded(t)
+    for t in (test_w1_ascii_report, test_w2_labels_rendered, test_w3_evaluation_counts,
+              test_w4_abort_skips, test_w5_cheap_mode, test_w6_factorisations_cached,
+              test_w7_rescale_zero_marginal, test_w8_outputs_restored,
+              test_w9_stale_snapshot_guard, test_w10_loo_alignment_and_settings,
+              test_w11_rescale_wording, test_w12_tension_rescaled,
+              test_w13_logdet_marg_cholesky):
         _guarded(t)
     return finish()
 
