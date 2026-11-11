@@ -1679,3 +1679,140 @@ def format_diagnostics(diag):
     for sec, why in diag.get('unavailable') or ():
         L.append('  diagnostics unavailable (%s): %s' % (sec, why))
     return '\n'.join(L)
+
+
+# ------------------------------------------------------------------------ LOO --
+@dataclass
+class LOOResult:
+    """Leave-one-out refits (spec 7). ``estimates[m][i]`` is the value of shared master m
+    in the refit that omitted dataset ``omitted[i]`` (None: m has no endpoint left, or that
+    refit failed); ``influence`` is the shift from the full fit over the full-fit stderr
+    (raw shift, ``units[m] == 'raw'``, when the stderr is unknown)."""
+    omitted: list
+    estimates: dict
+    spread: dict
+    influence: dict
+    units: dict
+    failures: list
+    notes: list
+
+
+def _loo_shared_masters(jf):
+    """Varying master parameters that tie two or more endpoints."""
+    return [k for k, t in jf.param_map.items()
+            if len(t) >= 2 and k in jf.master_params and jf.master_params[k].vary]
+
+
+def _loo_copy(jf, k, start, scale, method, ranges, fit_kws):
+    """A fresh JointFit without dataset k (its covariance block is never added, which is
+    exact marginalisation: shared terms among the remaining datasets stay shared), fitted
+    from ``start``. Everything it touches is a deep copy; ``jf`` is not modified."""
+    import copy
+    new = type(jf)()
+    keep = [i for i in range(len(jf.objectives)) if i != k]
+    remap = {old: j for j, old in enumerate(keep)}
+    new.objectives = [copy.deepcopy(jf.objectives[i]) for i in keep]
+    mp = {}
+    for m, targets in jf.param_map.items():
+        t = [(remap[i], lk) for (i, lk) in targets if i in remap]
+        if t:
+            mp[m] = t
+    new.param_map = mp
+    params = copy.deepcopy(jf.master_params)
+    for m in list(params):
+        if m not in mp:
+            del params[m]
+    for m in params:
+        if m in start and not params[m].expr:
+            params[m].value = start[m]
+    new.master_params = params
+    new.shared = list(jf.shared)
+    new.covariance_mode = jf.covariance_mode
+    new.rescale_errors = jf.rescale_errors
+    new.rescale_inflate_only = jf.rescale_inflate_only
+    new._priors = {m: v for m, v in jf._priors.items() if m in mp}
+    first = new.objectives[0]
+    lo, hi = ranges[first['name']]
+    new.perform_fit(lo, hi, fit_scale=scale, fit_method=method, ranges=ranges, **fit_kws)
+    return new
+
+
+def leave_one_out(jf, workers=1, fit_kws=None):
+    """Refit N times, each omitting one dataset, warm-started from the full fit, on deep
+    copies; ``jf`` is never mutated. See ``LOOResult``. ``workers`` is accepted for
+    forward compatibility; the refits run serially (a note says so when workers > 1)."""
+    n = len(jf.objectives)
+    if n < 2:
+        raise ValueError('leave-one-out needs at least 2 datasets')
+    if jf._fit_scale is None:
+        raise ValueError('leave-one-out needs a fitted JointFit (call perform_fit first)')
+    fit_kws = dict(fit_kws or {})
+    notes = []
+    if workers and workers > 1:
+        notes.append('workers=%d requested; the refits ran serially' % workers)
+    scale, method = jf._fit_scale, jf._fit_method
+    if method == 'emcee':
+        method = 'leastsq'
+        notes.append('the full fit is an emcee run; the refits are least squares from its '
+                     'posterior medians')
+    full = jf.result.params if jf.result is not None else jf.master_params
+    start = {m: full[m].value for m in jf.master_params if m in full}
+    ranges = {}
+    for o in jf.objectives:
+        x = np.asarray(o['x'], float)
+        ranges[o['name']] = (float(x[o['imin']]), float(x[o['imax']]))
+    shared = _loo_shared_masters(jf)
+    names = [o['name'] for o in jf.objectives]
+    est = {m: [] for m in shared}
+    failures = []
+    for k in range(n):
+        try:
+            new = _loo_copy(jf, k, start, scale, method, ranges, fit_kws)
+            if new.result is None or new.result.params is None:
+                raise RuntimeError('refit produced no result')
+            for m in shared:
+                est[m].append(float(new.result.params[m].value)
+                              if m in new.result.params else None)
+            if not getattr(new.result, 'success', True):
+                notes.append('refit omitting %s did not report success' % names[k])
+        except Exception as e:                     # noqa: BLE001 -- a failed refit is a row
+            failures.append((names[k], '%s: %s' % (type(e).__name__, e)))
+            for m in shared:
+                est[m].append(None)
+    spread, influence, units = {}, {}, {}
+    any_raw = False
+    for m in shared:
+        vals = [v for v in est[m] if v is not None]
+        spread[m] = float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0
+        v0, se = float(full[m].value), full[m].stderr
+        raw = se is None or not np.isfinite(se) or se <= 0
+        units[m] = 'raw' if raw else 'stderr'
+        any_raw |= raw
+        influence[m] = [None if v is None else (v - v0 if raw else (v - v0) / se)
+                        for v in est[m]]
+    if any_raw:
+        notes.append('no parameter stderr in the full fit for some masters; their influence '
+                     'is the raw shift (units raw)')
+    return LOOResult(omitted=names, estimates=est, spread=spread, influence=influence,
+                     units=units, failures=failures, notes=notes)
+
+
+def format_loo(res):
+    """Text for a ``LOOResult`` (ascii only)."""
+    L = ['Leave-one-out refits (%d datasets, each omitted in turn):' % len(res.omitted)]
+    if not res.estimates:
+        L.append('  no shared varying parameter to compare')
+    for m, ests in res.estimates.items():
+        unit = res.units[m]
+        L.append('  %s: spread (SD of the estimates) = %.6g' % (m, res.spread[m]))
+        for nm, e, inf in zip(res.omitted, ests, res.influence[m]):
+            if e is None:
+                L.append('    without %-12s no estimate' % nm)
+            else:
+                L.append('    without %-12s %.6g   influence %+.3g %s' % (
+                    nm, e, inf, 'stderr' if unit == 'stderr' else '(raw shift)'))
+    for nm, why in res.failures:
+        L.append('  refit without %s failed: %s' % (nm, why))
+    for nt in res.notes:
+        L.append('  note: %s' % nt)
+    return '\n'.join(L)

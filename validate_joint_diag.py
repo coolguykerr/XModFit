@@ -1,6 +1,6 @@
 """
 validate_joint_diag.py -- WS2 reporting harness, sections D (Task 6), I (Task 7), F (Task 8),
-later L.
+L (Task 9, leave-one-out).
 
 Section D: the "Joint-fit diagnostics:" block of JointFit._report() -- quality,
 heterogeneity, q-range, shared-parameter warnings, degeneracy, failure safety.
@@ -975,6 +975,172 @@ def test_f7_modes():
     check('F7 optimum=False / fisher=False skip', d['optimum_distance'] is None and d['fisher'] is None)
 
 
+# ----------------------------------------------------------------------- L --
+def _closed_form_a(jf, keep, gls):
+    """Closed-form (G)LS estimate of the shared 'a' on the datasets in ``keep`` (a shared,
+    b per dataset): the normal equations solved directly. ``gls``: the data-mode covariance
+    block of each dataset, else diag(1/E^2)."""
+    import covariance_core as cc
+    n = len(keep)
+    AtWA, AtWy = np.zeros((n + 1, n + 1)), np.zeros(n + 1)
+    for j, i in enumerate(keep):
+        o = jf.objectives[i]
+        x, y = np.asarray(o['x'], float), np.asarray(o['y'], float)
+        A = np.zeros((len(x), n + 1)); A[:, 0] = x; A[:, 1 + j] = 1.0
+        if gls:
+            C, _ = cc.assemble([cc.Block(o['cov'], y, o['yerr'], y)], 'Linear')
+            W = np.linalg.inv(C)
+        else:
+            W = np.diag(1.0 / np.asarray(o['yerr'], float) ** 2)
+        AtWA += A.T @ W @ A
+        AtWy += A.T @ W @ y
+    return np.linalg.solve(AtWA, AtWy)[0]
+
+
+def _l_closed(name, cov):
+    jf = make_jf(4, cov=cov)
+    jf.covariance_mode = 'data'
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear')
+    res = jfs.leave_one_out(jf)
+    want = [_closed_form_a(jf, [i for i in range(4) if i != k], cov is not None)
+            for k in range(4)]
+    check('%s omitted names' % name, res.omitted == ['D0', 'D1', 'D2', 'D3'], str(res.omitted))
+    _close('%s LOO estimates of a = closed form' % name, res.estimates['a'], want, rtol=1e-6)
+    check('%s no failures' % name, res.failures == [], str(res.failures))
+    sd = float(np.std(want, ddof=1))
+    _close('%s spread = SD of the estimates' % name, res.spread['a'], sd, rtol=1e-5)
+    full = jf.result.params['a']
+    _close('%s influence in stderr units' % name, res.influence['a'],
+           [(w - full.value) / full.stderr for w in want], rtol=1e-4, atol=1e-6)
+    check('%s units stderr' % name, res.units['a'] == 'stderr', str(res.units))
+    return jf, res
+
+
+def test_l1_l2_closed_form():
+    _l_closed('L1', None)
+    _l_closed('L2', private_cov)
+    # shared covariance terms between the remaining datasets stay shared (exact marginalisation)
+    import covariance_core as cc
+    jf = make_jf(3, cov=shared_cov)
+    jf.covariance_mode = 'data'
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear')
+    res = jfs.leave_one_out(jf)
+    keep = [0, 2]
+    n = 2
+    blocks = [cc.Block(jf.objectives[i]['cov'], np.asarray(jf.objectives[i]['y'], float),
+                       jf.objectives[i]['yerr'], np.asarray(jf.objectives[i]['y'], float))
+              for i in keep]
+    C, _ = cc.assemble(blocks, 'Linear')
+    Wm = np.linalg.inv(C)
+    A = np.zeros((2 * len(X), n + 1)); yy = np.zeros(2 * len(X))
+    for j, i in enumerate(keep):
+        sl = slice(j * len(X), (j + 1) * len(X))
+        A[sl, 0] = X; A[sl, 1 + j] = 1.0
+        yy[sl] = jf.objectives[i]['y']
+    a_want = np.linalg.solve(A.T @ Wm @ A, A.T @ Wm @ yy)[0]
+    _close('L2 shared term stays shared across the remaining datasets',
+           res.estimates['a'][1], a_want, rtol=1e-6)
+
+
+def _l_state(jf):
+    r = jf.result
+    return dict(p={k: (v.value, v.stderr) for k, v in r.params.items()}, chi=r.chisqr,
+                nit=jf.Niter,
+                mp={k: (v.value, v.vary) for k, v in jf.master_params.items()},
+                objs=[(o['func'].x.copy(), o['func'].a, o['func'].b,
+                       o['func'].params['a'].value, o['func'].params['b'].value,
+                       o['func'].__fit__, o['imin'], o['imax'], id(o['func']), id(o['cov']))
+                      for o in jf.objectives],
+                snap=jf.last_snapshot, nobj=len(jf.objectives), res=r, fitter=jf.fitter,
+                warn=list(jf.warnings))
+
+
+def test_l3_unchanged():
+    jf = make_jf(3, cov=private_cov)
+    jf.covariance_mode = 'data'
+    hits = []
+    jf.functionCalled.connect(lambda *a: hits.append(1))
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear')
+    n0, st = len(hits), _l_state(jf)
+    jfs.leave_one_out(jf)
+    now = _l_state(jf)
+    ok = (st['p'] == now['p'] and st['chi'] == now['chi'] and st['nit'] == now['nit']
+          and st['mp'] == now['mp'] and st['nobj'] == now['nobj'] and st['snap'] is now['snap']
+          and st['res'] is now['res'] and st['fitter'] is now['fitter'] and st['warn'] == now['warn'])
+    oo = all(np.array_equal(a[0], b[0]) and a[1:] == b[1:] for a, b in zip(st['objs'], now['objs']))
+    check('L3 result params, chisqr, Niter, master params, snapshot identity unchanged', ok)
+    check('L3 every model x/params/window/identity unchanged', oo)
+    check('L3 no functionCalled emissions', len(hits) == n0, '%d -> %d' % (n0, len(hits)))
+
+
+def test_l4_no_covar():
+    jf = make_jf(3)
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear')
+    for p in jf.result.params.values():
+        p.stderr = None
+    jf.result.covar = None
+    res = jfs.leave_one_out(jf)
+    full = jf.result.params['a'].value
+    check('L4 units raw', res.units['a'] == 'raw', str(res.units))
+    _close('L4 influence is the raw shift', res.influence['a'],
+           [e - full for e in res.estimates['a']], rtol=1e-9, atol=1e-12)
+    check('L4 note present', any('raw' in n for n in res.notes), ascii(str(res.notes)))
+    check('L4 format mentions raw', 'raw' in jfs.format_loo(res))
+
+
+def test_l5_one_dataset():
+    jf = make_jf(1)
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear')
+    try:
+        jfs.leave_one_out(jf)
+        check('L5 ValueError', False, 'no exception')
+    except ValueError as e:
+        check('L5 ValueError mentions at least 2', 'at least 2' in str(e), str(e))
+
+
+def test_l6_refit_raises():
+    from lmfit import Minimizer
+    jf = make_jf(4)
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear')
+    orig, calls = Minimizer.minimize, []
+
+    def boom(self, *a, **k):
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError('forced failure')
+        return orig(self, *a, **k)
+    Minimizer.minimize = boom
+    try:
+        res = jfs.leave_one_out(jf)
+    finally:
+        Minimizer.minimize = orig
+    ok_est = [e for e in res.estimates['a'] if e is not None]
+    check('L6 one failures row', len(res.failures) == 1 and res.failures[0][0] == 'D1'
+          and 'forced failure' in res.failures[0][1], ascii(str(res.failures)))
+    check('L6 the other estimates present', len(ok_est) == 3 and res.estimates['a'][1] is None,
+          str(res.estimates['a']))
+    txt = jfs.format_loo(res)
+    check('L6 format lists the failure', 'forced failure' in txt and 'D1' in txt, ascii(txt))
+
+
+def test_l7_subset_share_and_no_shared():
+    # a subset-shared master is estimated whenever it keeps an endpoint
+    jf = make_jf(3, share=None)
+    jf.build_master_params(groups=[jf.share_within('a', ['D0', 'D1'])])
+    for k in jf.master_params:
+        jf.master_params[k].vary = True
+    jf.perform_fit(X[0], X[-1], fit_scale='Linear')
+    res = jfs.leave_one_out(jf)
+    g = [k for k in res.estimates if len(jf.param_map[k]) == 2]
+    check('L7 one shared master', len(g) == 1 and list(res.estimates) == g, str(list(res.estimates)))
+    check('L7 estimates for every omission (one endpoint is enough)',
+          all(e is not None for e in res.estimates[g[0]]), str(res.estimates[g[0]]))
+    jf2 = make_jf(2, share=None)
+    jf2.perform_fit(X[0], X[-1], fit_scale='Linear')
+    r2 = jfs.leave_one_out(jf2)
+    check('L7 nothing shared -> empty estimates', r2.estimates == {} and r2.failures == [])
+
+
 def _guarded(t):
     try:
         t()
@@ -996,7 +1162,8 @@ def main():
         t()
     for t in (test_f1_fisher_analytic, test_f2_shares_sum_and_coupling, test_f3_one_dataset,
               test_f4_tension, test_f5_no_side_effects, test_f6_exact_objective_and_optimum,
-              test_f7_modes):
+              test_f7_modes, test_l1_l2_closed_form, test_l3_unchanged, test_l4_no_covar,
+              test_l5_one_dataset, test_l6_refit_raises, test_l7_subset_share_and_no_shared):
         _guarded(t)
     return finish()
 
