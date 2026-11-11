@@ -553,7 +553,7 @@ def section_j1(cc):
               jf.fitter.scale_covar is False)
         check('J1 (%s) report: Covariance block lists A source, both terms, and B as none'
               % sc, 'Covariance:' in rep and 'A.cov.json' in rep and 'stitch' in rep
-              and 'bkg' in rep and 'chi2_red =' in rep and 'not rescaled' in rep, rep[-600:])
+              and 'bkg' in rep and 'chi2_red =' in rep and 'not rescaled' in rep, ascii(rep[-600:]))
         check('J1 (%s) report: not degraded' % sc, not rep.startswith('DEGRADED'))
 
     # the pre-T4 crash path: a legacy dict on A, nothing on B (data mode)
@@ -595,7 +595,7 @@ def section_j2(cc):
               m is not None and len(m) == 2 * len(X) and not m[7] and m.sum() == 2 * len(X) - 1,
               'len=%s n_false=%s' % (None if m is None else len(m),
                                       None if m is None else int((~m).sum())))
-        check('J2 report lists the scale as Log', 'scale: Log' in rep, rep[-600:])
+        check('J2 report lists the scale as Log', 'scale: Log' in rep, ascii(rep[-600:]))
 
     # 'w/o error' scale: covariance ignored, same fit as no covariance, report says so first
     jf, rep = _j_fit([('A', ya, cov), ('B', yb, None)], 'Linear w/o error')
@@ -774,7 +774,7 @@ def section_s1(cc):
               '%s vs %s' % (f.cov_info, jf.cov_info))
         check('S1 (%s) report: Covariance block, chi2_red line, not degraded' % sc,
               'Covariance:' in rep and 'A.cov.json' in rep and 'chi2_red =' in rep
-              and not rep.startswith('DEGRADED'), rep[-500:])
+              and not rep.startswith('DEGRADED'), ascii(rep[-500:]))
         check('S1 (%s) chi2_stat_for_ci -> absolute chisqr' % sc,
               f.chi2_stat_for_ci() == ('chisqr', f.result.chisqr), str(f.chi2_stat_for_ci()))
 
@@ -1311,7 +1311,7 @@ def section_f4(cc):
           f.cov_info.get('aborted') is True and f.cov_info.get('converged') is False,
           str(f.cov_info))
     check('F4 Fit aborted: the report says aborted, never "(converged)"',
-          'aborted' in rep and '(converged)' not in rep, rep[-700:])
+          'aborted' in rep and '(converged)' not in rep, ascii(rep[-700:]))
     from Joint_Fit_Routines import JointFit
     jf = JointFit()
     jf.add_dataset('A', func=_j_line(a=0.5, b=5.0), x=X, y=ya, yerr=ee, cov=cov)
@@ -1389,7 +1389,7 @@ def section_f7(cc):
     rep, _ = _s_run(f, 'Linear')
     jf, jrep = _j_fit([('A', ya, cov), ('B', yb, None)], 'Linear')
     check('F7 report (Fit and JointFit): a line saying chi-square and residuals are whitened',
-          'whitened' in rep and 'whitened' in jrep, rep[-400:])
+          'whitened' in rep and 'whitened' in jrep, ascii(rep[-400:]))
 
 
 def section_f8(cc):

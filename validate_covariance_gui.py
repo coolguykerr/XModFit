@@ -231,7 +231,7 @@ def section_g3(w, kA, kB):
     res = w.fit.result
     rep = w.fit_report                    # (cov_info is reset by the GUI's later set_x)
     check('G3 model mode iterated', '  mode: model' in rep and 'model rounds: 0' not in rep
-          and 'model rounds:' in rep, rep[-500:])
+          and 'model rounds:' in rep, ascii(rep[-500:]))
     w.update_plot()
     chi = w.fit.params['output_params']['scaler_parameters']['Chi-Sqr']
     d = abs(chi - res.chisqr) / res.chisqr
@@ -282,7 +282,7 @@ def section_g4(w, kA, kB, tmp):
     _fit(w, kA)
     rep = w.fit_report
     check('G4 no mode line: the next fit runs in data mode and its report says why',
-          NOTE in rep and '  mode: data' in rep, rep[-600:])
+          NOTE in rep and '  mode: data' in rep, ascii(rep[-600:]))
     _fit(w, kA)
     check('G4 the note is consumed by that fit (not repeated)', NOTE not in w.fit_report)
     # a missing covariance file
@@ -566,7 +566,7 @@ def section_j2(w, kA, kB, tmp):
     check("J2 the joint fit uses A's attached covariance; the panel's mode reaches the fit",
           hasattr(w.fit, 'objectives') and w.fit.objectives[0]['cov'] is not None
           and w.fit.objectives[1]['cov'] is None and w.fit.cov_info.get('mode') == 'data'
-          and 'good.cov.json' in rep, rep[-400:])
+          and 'good.cov.json' in rep, ascii(rep[-400:]))
     w.remove_covariance_from(kA)
     check('J2 removing the GUI covariance clears the pre-filled (not overridden) entry',
           _panel_row(w, kA) == ('', '') and by[kA].cov_path is None, str(_panel_row(w, kA)))
@@ -599,7 +599,7 @@ def section_j2(w, kA, kB, tmp):
           _panel_row(w, kA) == ('override.cov.json', ''))
     rep = _joint_run(w)
     check('J2 the joint fit loads the override file', 'override.cov.json' in rep
-          and w.fit.objectives[0]['cov'] is not None, rep[-400:])
+          and w.fit.objectives[0]['cov'] is not None, ascii(rep[-400:]))
     w.attach_covariance_to(kA, GOOD)
 
 
@@ -683,7 +683,7 @@ def section_j3(w, kA, kB, tmp):
           and NOTE in spec.covariance_notes, str(spec.covariance_notes))
     rep = _joint_run(w)
     check('J3 the next joint fit runs in data mode and its report says why',
-          w.fit.cov_info.get('mode') == 'data' and NOTE in rep, rep[-500:])
+          w.fit.cov_info.get('mode') == 'data' and NOTE in rep, ascii(rep[-500:]))
     rep = _joint_run(w)
     check('J3 the note is consumed by that fit (not repeated)', NOTE not in rep
           and w.fit.cov_info.get('mode') == 'data')

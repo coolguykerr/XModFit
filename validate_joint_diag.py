@@ -899,6 +899,7 @@ def test_f6_exact_objective_and_optimum():
     sol = minimize(lambda v: jfs.exact_objective(jf, snap, _params_from(jf, snap, v)), th,
                    method='Nelder-Mead',
                    options={'xatol': 1e-10, 'fatol': 1e-12, 'maxiter': 40000, 'maxfev': 40000})
+    check('F6 the Nelder-Mead reference converged', bool(sol.success), str(sol.message))
     true_d = sol.x - th
     ok, det, n_big = True, [], 0
     for k, name in enumerate(snap.var_names):
@@ -952,6 +953,24 @@ def test_f7_modes():
           'mean information only; the information the covariance carries about the parameters '
           'is omitted' in txt, ascii(txt))
     check('F7 model mode: optimum line present', 'exact-likelihood optimum' in txt, ascii(txt))
+    # an emcee snapshot: posterior medians, not the fixed point -> no line, no evaluations
+    esnap = dataclasses.replace(snap, method='emcee', label=jfs.LABEL_MCMC + jfs._FROZEN_CLAUSE)
+    hits = []
+    jf.functionCalled.connect(lambda *a: hits.append(1))
+    calls = []
+    orig_rp = jfs.raw_parts
+    jfs.raw_parts = lambda *a, **k: (calls.append(1), orig_rp(*a, **k))[1]
+    try:
+        od_e = jfs.optimum_distance(jf, esnap)
+        d_e = jfs.diagnostics(jf, esnap, fisher=False)
+    finally:
+        jfs.raw_parts = orig_rp
+    txt_e = jfs.format_diagnostics(d_e)
+    check('F7 emcee snapshot: optimum_distance None, no evaluations',
+          od_e is None and d_e['optimum_distance'] is None and calls == [] and hits == [],
+          '%d raw_parts calls' % len(calls))
+    check('F7 emcee snapshot: no fixed-point line', 'reweighting fixed point' not in txt_e
+          and 'exact-likelihood optimum' not in txt_e, ascii(txt_e))
     d = jfs.diagnostics(jf, snap, optimum=False, fisher=False)
     check('F7 optimum=False / fisher=False skip', d['optimum_distance'] is None and d['fisher'] is None)
 

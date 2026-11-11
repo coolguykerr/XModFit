@@ -1278,6 +1278,9 @@ def tension(snap):
     return rows
 
 
+_tension = tension           # diagnostics() has a ``tension`` flag that shadows it
+
+
 def exact_objective(jf, snap, params):
     """Φ(θ) = −2 ln L(θ) + Σ prior_rows(θ)² at ``params`` (spec §3.5, §6.4 item 6): the raw
     residual from ``raw_parts``; C(θ) from ``jf.model_blocks`` when it depends on the
@@ -1317,14 +1320,16 @@ def exact_objective(jf, snap, params):
 
 def optimum_distance(jf, snap, step=None):
     """How far the fitted point is from the exact likelihood's optimum (spec §6.4 item 6).
-    ``None`` unless C depends on the model (model mode, intensity-dependent term). With
+    ``None`` unless C depends on the model (model mode, intensity-dependent term), and
+    ``None`` for an emcee snapshot (posterior medians, not the fixed point). With
     ``snap.covar`` missing: ``{'unavailable': ...}``. Else the central-difference gradient
     g of ``exact_objective`` over ``snap.var_names`` and the Newton step
     ``δ = −½·covar·g`` (Φ's Hessian is about 2·covar⁻¹: on the covariance path lmfit runs
     with ``scale_covar=False``, so covar = (Jᵀ C⁻¹ J)⁻¹). Returns ``{'delta', 'in_stderr',
     'worst': (name, δ/stderr), 'fit_gap'}``. Costs 2·nvarys quiet model evaluations and as
     many factorisations; leaves every model and ``jf.result`` as they were."""
-    if not _model_needs(snap):
+    if snap.method == 'emcee' or not _model_needs(snap):
+        # an MCMC snapshot reports posterior medians, not the reweighting fixed point
         return None
     names = list(snap.var_names)
     cov = snap.covar
@@ -1483,7 +1488,7 @@ def diagnostics(jf, snap, individual_fits=None, *, qrange_tol=0.10, hetero_ratio
     _section(d, 'information_criteria', lambda: information_criteria(snap))
     d['rescale'] = dict(snap.rescale) if snap.rescale is not None else None
     for name, flag, fn in (('fisher', fisher, lambda: fisher_shares(jf, snap)),
-                           ('tension', tension, lambda: globals()['tension'](snap)),
+                           ('tension', tension, lambda: _tension(snap)),
                            ('optimum_distance', optimum, lambda: optimum_distance(jf, snap))):
         if flag:
             _section(d, name, fn)
