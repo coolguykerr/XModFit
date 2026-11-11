@@ -963,6 +963,66 @@ def test_m9_log_logdet_zero():
     check('M9 no parts in text', 'Δ log det/2' not in jfs.format_comparison(c))
 
 
+def test_m10_fix_round():
+    import dataclasses as dc
+    import joint_fit_stats as jfs
+    # N=3: the bare delta only on the detail line
+    c = jfs.compare_fits(_snap(_fit(3, cov=None)), _snap(_fit(3, cov=None, func=Quad)))
+    t = jfs.format_comparison(c)
+    dl = [ln for ln in t.splitlines() if 'Δ' in ln]
+    check('M10 N=3: delta only in the detail line',
+          len(dl) == 1 and 'not a confidence measure' in dl[0], ascii(dl))
+    check('M10 N=3: preferred and sign count still stated',
+          'preferred on' in t and 'no calibrated z' in t)
+    # unweighted path
+    ja = make_jf(4); ja.perform_fit(X[0], X[-1], fit_scale='Linear w/o error')
+    jb = make_jf(4, func=Quad); jb.perform_fit(X[0], X[-1], fit_scale='Linear w/o error')
+    a, b = _snap(ja), _snap(jb)
+    c = jfs.compare_fits(a, b)
+    ta, _ = jfs.per_dataset_objective(a)
+    tb, _ = jfs.per_dataset_objective(b)
+    _close('M10 unweighted d == s_A - s_B', c.d, [x.sequential - y.sequential for x, y in zip(ta, tb)])
+    check('M10 unweighted: not a likelihood, no logdet, no lr_p',
+          c.likelihood is False and c.delta_logdet == 0.0 and c.lr_p is None)
+    t = jfs.format_comparison(c)
+    check('M10 unweighted wording', 'd_i = s^A − s^B' in t and 'difference in sum of squares' in t
+          and 'not a likelihood' in t and 'nll2' not in t and 'Δ(−logL)' not in t, ascii(t))
+    # nesting honours fixed values
+    def fixed_pair(va, vb, vb_shared):
+        ja = make_jf(2, share=None)
+        for k, v in (('d0_a', va), ('d1_a', vb)):
+            ja.master_params[k].value = v
+            ja.master_params[k].vary = False
+        ja.perform_fit(X[0], X[-1])
+        jb = make_jf(2)
+        jb.master_params['a'].value = vb_shared
+        jb.master_params['a'].vary = False
+        jb.perform_fit(X[0], X[-1])
+        return _snap(ja), _snap(jb)
+    check('M10 merged fixed endpoints at different values: not nested',
+          jfs.nesting(*fixed_pair(3.0, 3.5, 3.0)) is None)
+    check('M10 B fixed at a value different from A fixed: not nested',
+          jfs.nesting(*fixed_pair(3.0, 3.0, 3.2)) is None)
+    check('M10 merged fixed endpoints at the same value: nested',
+          jfs.nesting(*fixed_pair(3.0, 3.0, 3.0)) == 'B in A')
+    # zero-spread note and rescaled-nested note
+    jf = make_jf(5); jf.perform_fit(X[0], X[-1])
+    base = _snap(jf)
+    n = len(X)
+    A = _synth(base, [np.ones(n)] * 5, [np.zeros(n)] * 5)
+    B = _synth(base, [np.zeros(n)] * 5, [np.zeros(n)] * 5)
+    c = jfs.compare_fits(A, B)
+    check('M10 sd == 0: no z and a note saying why',
+          c.z is None and any('zero spread' in x for x in c.notes), str(c.notes))
+    ja = make_jf(4, share=None); ja.perform_fit(X[0], X[-1])
+    jb = make_jf(4); jb.perform_fit(X[0], X[-1])
+    rs = {'mode': 'per_dataset', 'inflate_only': False, 's': (1., 1., 1., 1.)}
+    c = jfs.compare_fits(dc.replace(_snap(ja), rescale=rs), dc.replace(_snap(jb), rescale=rs))
+    check('M10 rescaled nested: no lr_p and a note',
+          c.nested == 'B in A' and c.lr_p is None and any('likelihood-ratio' in x for x in c.notes),
+          str(c.notes))
+
+
 def main():
     app = QApplication.instance() or QApplication([])
     for t in (test_q1_quiet_restores, test_q2_no_emission, test_q3_row_ranges,
@@ -974,7 +1034,7 @@ def main():
               test_k1_fields, test_k2_allowed, test_k3_model_mode,
               test_m1_hand_values, test_m2_text, test_m3_coupling, test_m4_small_n,
               test_m5_line_vs_quad, test_m6_nested, test_m7_ic,
-              test_m8_model_mode_exact, test_m9_log_logdet_zero):
+              test_m8_model_mode_exact, test_m9_log_logdet_zero, test_m10_fix_round):
         t()
     return finish()
 

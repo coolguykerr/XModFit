@@ -555,12 +555,18 @@ def _coarsens(a, b):
     for da, db in zip(a.datasets, b.datasets):
         if da.model_class != db.model_class or da.model_files != db.model_files:
             return False
-    sa = list(_endpoint_sets(a).values())
-    for sb in _endpoint_sets(b).values():
+    ea = _endpoint_sets(a)
+    for mb, sb in _endpoint_sets(b).items():
         union = set()
-        for e in sa:
+        for ma, e in ea.items():
             if e <= sb:
                 union |= e
+                # B fixed here: every A master it absorbs that A holds fixed must sit at
+                # B's value, else B is not a restriction of A
+                if not b.vary.get(mb, False) and not a.vary.get(ma, False):
+                    va, vb = a.params.get(ma), b.params.get(mb)
+                    if va is None or vb is None or abs(va - vb) > 1e-12 * max(1.0, abs(vb)):
+                        return False
         if union != sb:
             return False
     return _free_endpoints(b) <= _free_endpoints(a)
@@ -622,6 +628,8 @@ def compare_fits(a, b):
         notes.append(NO_Z_NOTE)
     elif sd is not None and sd > 0:
         z = float(abs(sum_d) / (sd * np.sqrt(N)))
+    else:
+        notes.append('no calibrated z: the per-dataset differences have zero spread')
     preferred = 'B' if sum_d > 0 else ('A' if sum_d < 0 else None)
     if preferred is None:
         cnt = 0
@@ -643,6 +651,9 @@ def compare_fits(a, b):
         stat = 2.0 * sum_d
     if nest and delta_k is not None and delta_k > 0 and likelihood and not rescaled:
         lr_p = float(chi2.sf(max(0.0, stat), delta_k))
+    elif nest and rescaled:
+        notes.append('no likelihood-ratio p-value: error scales are fitted per dataset '
+                     '(rescaled), so the objective is not an exact likelihood')
 
     def _coupled(e, t):
         return abs(e['coupling']) > 1e-9 * max(1.0, sum(abs(x.sequential) for x in t))
@@ -681,12 +692,12 @@ def information_criteria(snap):
 def format_comparison(c, ic_a=None, ic_b=None):
     """Plain-text rendering of a ``Comparison`` (spec §5, §8)."""
     lines = []
+    dform = 'd_i = ½(nll2_A − nll2_B)' if c.likelihood else 'd_i = s^A − s^B'
     if c.z is not None:
         head = 'Δ = %+.4g ± %.3g (z = %.2f)' % (c.sum_d, c.sd_d * np.sqrt(c.N), c.z)
     else:
-        head = 'Δ = %+.4g' % c.sum_d
-    lines.append(head + '   [Σd, d_i = ½(nll2_A − nll2_B); positive prefers B; %s]'
-                 % c.objective_label)
+        head = 'Comparison'     # the bare Δ lives only in the detail line (spec §5)
+    lines.append(head + '   [Σd, %s; positive prefers B; %s]' % (dform, c.objective_label))
     if c.preferred is None:
         lines.append('no fit preferred (%d datasets)' % c.N)
     else:
@@ -701,7 +712,11 @@ def format_comparison(c, ic_a=None, ic_b=None):
     for nm, v in zip(c.names, c.d):
         lines.append('  %-16s %+.4g' % (nm, v))
     lines.append('largest |d|: %s' % c.worst_dataset)
-    det = 'Δ(−logL) = %+.6g (not a confidence measure)' % c.sum_d
+    if c.likelihood:
+        det = 'Δ(−logL) = %+.6g (not a confidence measure)' % c.sum_d
+    else:
+        det = ('difference in sum of squares = %+.6g; not a likelihood '
+               '(not a confidence measure)' % c.sum_d)
     if c.delta_logdet != 0:
         det += ' (Δχ²/2 = %+.6g, Δ log det/2 = %+.6g)' % (0.5 * c.delta_chi2,
                                                           0.5 * c.delta_logdet)
