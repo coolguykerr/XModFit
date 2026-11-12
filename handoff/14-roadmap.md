@@ -98,6 +98,19 @@ Each item is specified in the fix list. All are small.
 > minimises for any mix of datasets with and without a covariance, in Linear and Log, in
 > `model` or `data` mode (spec 17 §10). With shared terms that decomposition is not additive
 > and WS2 must state how it splits.
+>
+> **WS2 DONE 2026-11-11** (commits `c884afa..8078803`; record in spec 20 section 13; verified by
+> `validate_joint_stats.py` and `validate_joint_diag.py` and the full `tests/run_all.py`). Left to WS4:
+> the GUI rescale control and `.jpar` pass-through of `#RescaleErrors` in `xmodfit.py`, the comparison
+> panel swap to `format_joint_vs_individuals`, and a `report_diagnostics` full/cheap control. Left to
+> WS3: storing `s` (the rescale factors) and the snapshots. Open for WS6: whether the finite-difference
+> step is noisy for XLayersPDB/XPR models decides the exact-optimiser question.
+>
+> **Design spec: `20-spec-ws2-reporting.md` (2026-11-11, awaiting approval).** It settles
+> the split (sequential Cholesky-slice terms for sums and z, marginal terms for
+> per-dataset quality; replaces Decision 2), adds model-mode re-scoring for comparisons,
+> settles Decisions 3 and 5, and revises two rules below (Log fits may be called
+> likelihoods of ln y; the key admits different models). Where it differs, doc 20 wins.
 
 New module **`joint_fit_stats.py`** (Qt-free). It consumes a fitted `JointFit`. Every
 function returns plain data plus a `format_*` text renderer, so the GUI, the `.jpar` and
@@ -372,6 +385,17 @@ In order of value to joint fits:
 
 - **B2b** a whitened `JointLogProb`, so covariance/GLS joint MCMC runs in parallel and
   gets orientation seeding.
+- **Exact `model`-mode likelihood in sampling and optimisation** (added 2026-11-11;
+  spec 20 §3.5). Today emcee freezes C at the prior fit (`perform_fit` ~1307–1321), and
+  `outer_iterate` stops at a reweighting fixed point. Both should use
+  −2 ln L(θ) = r(θ)ᵀC(θ)⁻¹r(θ) + ln det C(θ), evaluated at every θ with Woodbury and
+  the determinant lemma: O(N K²) per evaluation without dense terms, and the full
+  factorisation only for dense terms in Log. The ln det term is mandatory in the
+  log-probability. For least squares, either minimise the profile form (explicit
+  scale-factor rows with prior rows, which makes the residual vector θ-independent in
+  its weights) or a scalar optimiser on Φ. WS2's distance-to-optimum line (spec 20 §6.4
+  item 6) measures whether this matters on real data before it is built. Do it together
+  with B2b, since both rewrite the covariance log-probability.
 - **B7** `_seed_shared_axis` calls basin detection; plumb or delete `seed_uniform_frac` /
   `walkers_per_basin`; unify the two spawn pools.
 - **Reporting:** a joint MCMC on shared parameters prints the WS2 §2.6 LOO spread next to
