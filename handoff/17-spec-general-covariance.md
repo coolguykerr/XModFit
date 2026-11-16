@@ -483,6 +483,13 @@ covariance, the dataset is attached automatically. Nothing downstream of
 
 ## 8. LSS_Reader: what must change
 
+> **Superseded for implementation by `19-lss-reader-covariance-contract.md`** (2026-11-11),
+> which was checked against LSS_Reader's code. It fixes one conflict here: §8.2 keeps the
+> total-error column unchanged while §8.3 changes the `facerr` that column is built from.
+> Doc 19 runs two chains (user, 2026-11-11): corrected `_ref/_rrf.txt` (the §8.3 fit,
+> error column = √ of the covariance diagonal, with the sidecar) and byte-identical
+> `_ref/_rrf_legacy.txt` (today's code), for regression tests and the old-vs-new study.
+
 Everything below refers to `mainwindow.py` in `chemmatcars/LSS_Reader`. The Pilatus
 reflectivity patch path is `pilRefPatchData` → `pilRefPatchNext` → `oneDjoin(...,
 mtype='merge')`, followed by the normalisation in `updateRefPlotData` and `saveRefData`.
