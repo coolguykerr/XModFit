@@ -513,6 +513,12 @@ than conflicting. Worth a comment in the code and a line in the merge checklist.
   non-positive point reaches `nan_policy='raise'`.
 - **Covariance composition order:** slice `[imin,imax]` -> apply `imask` -> concatenate ->
   apply `_cov_mask`, folded in symmetrically in *both* `_build_chol` and `residual`.
+- **`self.filepaths = {}` in `Functions/GIXOS/GIXOS.py:86`** (added 2026-11-18, doc 22).
+  The file is upstream's (`origin/main` `681f84c`) plus this one line. Re-checking it out
+  from upstream silently drops the line, and selecting GIXOS then raises
+  `KeyError: 'filepaths'` (a segfault headless). `validate_gixos.py` step [1] catches it.
+  The same one line was added to `Functions/XFNTR/XFNTR_Plus.py` (upstream `30507b7`,
+  B12); no validator covers that one, so re-check by selecting it in the GUI.
 - **Highest-conflict functions** for the fold-in: `dataFileSelectionChanged`, `doFit`,
   `update_plot`, `plot_extra_param`, `create_plotDock`, and `Minimizer.emcee`.
 
@@ -623,8 +629,10 @@ in `get_jl()` but only for the two known machines.
 `EMCEE_Widget.py` (upstream's independent non-lmfit MCMC, 780 lines) is imported by
 nothing, and `Fit.log_probability`/`log_likelihood`/`log_prior` exist only to serve it — so
 the repo carries two MCMC implementations, one dead. `Functions/XFNTR/XFNTR_Plus.py`
-crashes with `KeyError: 'filepaths'` on load (one-line fix, deferred, fails identically on
-clean upstream). `xraydb/` contains only `__pycache__` with seven orphan `.pyc` and no
+crashed with `KeyError: 'filepaths'` on load (fails identically on clean upstream).
+**Fixed here 2026-11-18** with the one line `self.filepaths = {}` (as in `XFNTR.py`), at
+the user's request alongside the identical GIXOS fix (doc 22); still worth offering
+upstream. `xraydb/` contains only `__pycache__` with seven orphan `.pyc` and no
 `__init__.py`; `xraydb_bak/` is 10.3 MB, tracked upstream, referenced by nothing.
 
 **B13. A PDB preparation step for the XLayersPDB family.**

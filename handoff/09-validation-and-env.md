@@ -46,6 +46,7 @@ MCMC backend files into upstream's history permanently.
 | `validate_xlayerspdb_joint.py` | 260 | new-untracked | regression: real XLayersPDB joint fit still works; MCMC fingerprint unchanged |
 | `validate_gid2d.py` | 343 | new-untracked | GID2D physics: sum rule, quadrature, tilt spread, pack/load — pure numpy, no Qt |
 | `validate_gid2d_gui.py` | 365 | new-untracked | 2D Map tab wiring, exact q ticks, wrong-file diagnosis, Tools packer |
+| `validate_gixos.py` | 249 | new (2026-11-18) | GIXOS model: GUI listing, horizon zeros, pickle, single/masked/joint/joint+cov parameter recovery (doc 22) |
 | `validate_xpr.py` | 382 | new-untracked | XPR Julia backend: 3 reference logL, coverage, unit cube, analytic Jacobian |
 | `requirements.txt` | 102 pkgs | upstream, **unmodified** | Oct-2024 pinned snapshot (has `h5py`) |
 | `requirements_latest.txt` | 102 pkgs | upstream, **unmodified** | same package set, unpinned |

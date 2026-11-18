@@ -124,7 +124,7 @@ These are the audit. Everything else is housekeeping by comparison.
 | P2.3 | Mask + `__masked_x__` pops a modal dimension-mismatch dialog (A1.5) | 08 | A masked GID2D fit through `update_plot` |
 | P2.4 | Non-PDB models at cores>1 still hit `cannot pickle 'Fit' object` (B1) | 02 | Any non-PDB model, `emcee_cores=4` |
 | P2.5 | `_box`/`_G`/`_H` leave `fiterr` scalar, so `minimizer.py:2077` `fiterr[ind]` raises when only one of theta/phi varies | 03 | Vary theta only |
-| P2.6 | `XFNTR_Plus.py` raises `KeyError: 'filepaths'` on load, identically on clean upstream | 02, B12 | Load it. Deferred by the user — confirm, do not fix |
+| P2.6 | `XFNTR_Plus.py` raises `KeyError: 'filepaths'` on load, identically on clean upstream | 02, B12 | **Confirmed and fixed 2026-11-18** (`self.filepaths = {}`): with the line removed, selecting it headless under cmcars gives the `KeyError`; with it, no dialog (doc 22) |
 
 ## 6. P3 — measured claims the design decisions rest on
 

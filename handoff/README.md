@@ -118,6 +118,7 @@ recommendation.
 | 19 | `19-lss-reader-covariance-contract.md` | handoff to the LSS_Reader rework agent: the `*.cov.json` output contract, the arithmetic, a trap map of `mainwindow.py` at `a861d79`, acceptance tests; supersedes 17 §8 | LSS_Reader `mainwindow.py` |
 | 20 | `20-spec-ws2-reporting.md` | design spec (approved 2026-11-11, amended the same day for the exact likelihood) for roadmap WS2: the per-dataset χ² and −2 ln L split under covariance (sequential vs marginal), the exact model-mode likelihood, calibrated comparison, end-of-fit diagnostics, LOO; implemented (c884afa..8078803) | `joint_fit_stats.py` (new), `Joint_Fit_Routines.py` |
 | 21 | `21-plan-ws2-reporting.md` | task-by-task implementation plan for doc 20 (10 tasks, tests Q/P/K/M/R/D/I/F/L); implemented (c884afa..8078803) | `joint_fit_stats.py` (new), `Joint_Fit_Routines.py`, `joint_fit_io.py`, `joint_fit_spec.py` |
+| 22 | `22-gixos.md` | the upstream GIXOS model (`origin/main` `681f84c`) brought in: why a file checkout, the one-line `filepaths` fix, joint/cov/mask validation, gotchas | `Functions/GIXOS/GIXOS.py`, `validate_gixos.py` |
 | 15 | `15-plan-ws0-test-safety-net.md` | task-by-task plan for roadmap WS0: shared `check()`, runner, synthetic GLS regression, baseline | `tests/` |
 
 Two research write-ups that `05-xpr-julia.md` summarises — `STAGE2_SEEDING_PLAN.md` and
