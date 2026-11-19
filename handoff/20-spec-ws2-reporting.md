@@ -658,6 +658,12 @@ snapshot, LOO rows and settings, loop wording, tension under rescaling, Cholesky
 - The `ascii()` print sites added to `validate_covariance.py` and `validate_covariance_gui.py`
   in T8 are kept (harmless); the report itself is now ASCII.
 - T5's commit trailer carries the implementing model's own attribution; history not rewritten.
+- Post-WS2 readability fix (2026-11-19, after the first real-data report, a 4-dataset TIM3
+  XLayersPDB fit): every renderer shows path-carrying dataset names by file name
+  (`short_names`: `'0<>C:/dir/d6.rrf'` -> `'0<>d6.rrf'`; colliding short forms keep the full
+  name), name columns size to the longest label instead of a fixed 16, and the softest
+  direction lists at most `SOFTEST_MAX_TERMS` (6) terms plus a count of the rest (that report
+  listed 21). Rendering only: diagnostics data and keys keep full names and every term. Test W14.
 
 ### 13.5 Final review
 

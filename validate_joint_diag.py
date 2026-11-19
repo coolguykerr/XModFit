@@ -1642,6 +1642,55 @@ def test_w13_logdet_marg_cholesky():
            rtol=1e-10)
 
 
+def test_w14_short_labels_and_softest_cap():
+    """Report readability: path-carrying dataset names render by file name (collisions keep
+    the full name), tables size to the longest label, and the softest direction lists at
+    most SOFTEST_MAX_TERMS terms with a count of the rest. Data keeps full names and terms."""
+    sn = jfs.short_names(['0<>C:/a/b/d6.rrf', '1<>C:\\x\\d7.rrf', 'D2', '3<>/p/q/dup.rrf',
+                          '4<>/r/s/dup.rrf'])
+    check('W14 path names shortened to <i><>file',
+          sn['0<>C:/a/b/d6.rrf'] == '0<>d6.rrf' and sn['1<>C:\\x\\d7.rrf'] == '1<>d7.rrf', str(sn))
+    check('W14 plain names unchanged', sn['D2'] == 'D2', str(sn))
+    check('W14 prefix keeps colliding file names distinct',
+          sn['3<>/p/q/dup.rrf'] == '3<>dup.rrf' and sn['4<>/r/s/dup.rrf'] == '4<>dup.rrf', str(sn))
+    sc = jfs.short_names(['/p/dup.rrf', '/q/dup.rrf'])
+    check('W14 true collisions keep the full name',
+          sc == {'/p/dup.rrf': '/p/dup.rrf', '/q/dup.rrf': '/q/dup.rrf'}, str(sc))
+
+    from Joint_Fit_Routines import JointFit
+    rng = np.random.default_rng(3)
+    jf = JointFit()
+    long_names = ['%d<>C:/Users/someone/Documents/a long folder name/run_%d.rrf' % (i, i)
+                  for i in range(2)]
+    for nm in long_names:
+        y = A_TRUE * X + B_TRUE + E * rng.standard_normal(len(X))
+        jf.add_dataset(nm, funcClass=Line, x=X, y=y, yerr=E * np.ones_like(X))
+    jf.build_master_params(groups=[jf.share_all('a')])
+    for k in jf.master_params:
+        jf.master_params[k].vary = True
+    blk = _block(_fit(jf))[1]
+    check('W14 report shows file names, not paths',
+          '0<>run_0.rrf' in blk and 'a long folder name' not in blk, ascii(blk))
+    rows = [ln for ln in blk.splitlines() if 'run_0.rrf' in ln or 'run_1.rrf' in ln]
+    fis = [ln for ln in rows if 'n =' not in ln]
+    check('W14 Fisher rows align (same length)', len(fis) == 2 and len(set(map(len, fis))) == 1,
+          ascii(fis))
+    d = jfs.diagnostics(jf, jf.last_snapshot, fisher=False, optimum=False)
+    check('W14 data keeps the full names',
+          [r['name'] for r in d['quality']] == long_names, str([r['name'] for r in d['quality']]))
+
+    soft = [('p%d' % i, (1.0 if i == 0 else (-1) ** i * (0.9 - 0.05 * i))) for i in range(10)]
+    t = jfs._softest_text(soft, jfs.SOFTEST_MAX_TERMS)
+    n_shown = jfs.SOFTEST_MAX_TERMS
+    check('W14 softest capped with a count of the rest',
+          ('p%d' % (n_shown - 1)) in t and ('*p%d' % n_shown) not in t
+          and ('+ %d smaller terms' % (10 - n_shown)) in t, ascii(t))
+    check('W14 uncapped call lists every term', all(('p%d' % i) in jfs._softest_text(soft)
+                                                     for i in range(10)))
+    check('W14 no tail note when nothing is cut',
+          'smaller' not in jfs._softest_text(soft[:3], jfs.SOFTEST_MAX_TERMS))
+
+
 def _guarded(t):
     try:
         t()
@@ -1671,7 +1720,7 @@ def main():
               test_w7_rescale_zero_marginal, test_w8_outputs_restored,
               test_w9_stale_snapshot_guard, test_w10_loo_alignment_and_settings,
               test_w11_rescale_wording, test_w12_tension_rescaled,
-              test_w13_logdet_marg_cholesky):
+              test_w13_logdet_marg_cholesky, test_w14_short_labels_and_softest_cap):
         _guarded(t)
     return finish()
 

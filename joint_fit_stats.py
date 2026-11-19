@@ -858,9 +858,11 @@ def format_comparison(c, ic_a=None, ic_b=None):
     if not c.likelihood:
         lines.append('difference in sum of squares; not a likelihood')
     lines.append('per-dataset d (positive favours B):')
+    sn = short_names(c.names)
+    w = _name_width(sn.values())
     for nm, v in zip(c.names, c.d):
-        lines.append('  %-16s %+.4g' % (nm, v))
-    lines.append('largest |d|: %s' % c.worst_dataset)
+        lines.append('  %-*s %+.4g' % (w, sn[nm], v))
+    lines.append('largest |d|: %s' % sn.get(c.worst_dataset, c.worst_dataset))
     if c.likelihood:
         det = 'Delta(-logL) = %+.6g (not a confidence measure)' % c.sum_d
     else:
@@ -1135,14 +1137,17 @@ def format_joint_vs_individuals(jf, individual_fits, snap=None):
           'each side scored on the joint fit\'s used rows under its own C_ii; '
           'delta = joint - individual in %s' % ('-2 ln L units' if lik or _weighted(snap.fit_scale)
                                                  else 'sum of squares')]
-    out.append('  %-16s %-5s %12s %12s %12s' % ('dataset', 'n', 'joint chi2/n', 'indiv chi2/n', 'delta'))
+    sn = short_names([r['name'] for r in rows])
+    w = _name_width(sn.values())
+    out.append('  %-*s %-5s %12s %12s %12s' % (w, 'dataset', 'n', 'joint chi2/n', 'indiv chi2/n',
+                                               'delta'))
     for r in rows:
         if r['unavailable'] is not None:
-            out.append('  %-16s %-5d unavailable: %s' % (r['name'], r['n'], r['unavailable']))
+            out.append('  %-*s %-5d unavailable: %s' % (w, sn[r['name']], r['n'], r['unavailable']))
             continue
         n = r['n']
-        out.append('  %-16s %-5d %12.4g %12.4g %+12.4g%s' % (
-            r['name'], n, r['joint_m'] / n, r['indiv_m'] / n, r['delta'],
+        out.append('  %-*s %-5d %12.4g %12.4g %+12.4g%s' % (
+            w, sn[r['name']], n, r['joint_m'] / n, r['indiv_m'] / n, r['delta'],
             '  FLAGGED: the shared value fits this dataset worse than the others'
             if r['flagged'] else ''))
     out.extend(_fmt_indiv_calibrated(rows, lik))
@@ -1681,14 +1686,46 @@ def diagnostics(jf, snap, individual_fits=None, *, qrange_tol=0.10, hetero_ratio
     return d
 
 
-def _softest_text(softest):
+SOFTEST_MAX_TERMS = 6      # the report lists this many softest-direction terms; data keeps all
+
+
+def _softest_text(softest, max_terms=None):
+    """``max_terms`` caps the rendered terms (largest |coef| first, as ``_degeneracy``
+    orders them) and appends how many smaller ones were left out."""
+    shown = softest if max_terms is None else softest[:max_terms]
     parts = []
-    for k, (nm, c) in enumerate(softest):
+    for k, (nm, c) in enumerate(shown):
         if k == 0:
             parts.append(nm if c > 0 else '-%s' % nm)
         else:
             parts.append('%s %s*%s' % ('-' if c < 0 else '+', _fmt_coef(c), nm))
+    rest = len(softest) - len(shown)
+    if rest > 0:
+        parts.append('+ %d smaller term%s (|coef| <= %s)'
+                     % (rest, '' if rest == 1 else 's', _fmt_coef(abs(softest[len(shown)][1]))))
     return ' '.join(parts)
+
+
+def short_names(names):
+    """Display labels for dataset names: a name carrying a file path (the GUI's
+    ``'<i><>C:/dir/file.rrf'``) is shown by its file name (``'<i><>file.rrf'``). Names
+    whose short form would collide with another keep their full form. Rendering only;
+    every key and record keeps the full name."""
+    names = list(names)
+    short = []
+    for nm in names:
+        s = str(nm)
+        head, sep, path = s.rpartition('<>')
+        base = path.replace('\\', '/').rsplit('/', 1)[-1] or path
+        short.append(head + sep + base)
+    counts = {}
+    for s in short:
+        counts[s] = counts.get(s, 0) + 1
+    return {nm: (s if counts[s] == 1 else str(nm)) for nm, s in zip(names, short)}
+
+
+def _name_width(labels, floor=16):
+    return max([floor] + [len(s) for s in labels])
 
 
 def _fmt_objective(diag, th, L):
@@ -1699,7 +1736,8 @@ def _fmt_objective(diag, th, L):
     if o.get('fit_label'):
         L.append('  fit state: %s' % o['fit_label'])
     if o.get('order'):
-        L.append('  dataset order (sequential split): %s' % ', '.join(o['order']))
+        sn = short_names(o['order'])
+        L.append('  dataset order (sequential split): %s' % ', '.join(sn[n] for n in o['order']))
     if o.get('nll2') is not None:
         L.append('  -2 ln L = %.6g' % o['nll2'])
     if o.get('fit_gap') is not None:
@@ -1715,8 +1753,10 @@ def _fmt_quality(diag, th, L):
         return
     L.append('  per-dataset quality (chi2 per point%s, each dataset scored under its own block):'
              % (' (unrescaled)' if any(r.get('unrescaled') for r in q) else ''))
+    sn = short_names([r['name'] for r in q])
+    w = _name_width(sn.values())
     for r in q:
-        line = '    %-16s n = %-5d %s' % (r['name'], r['n'], 'no points'
+        line = '    %-*s n = %-5d %s' % (w, sn[r['name']], r['n'], 'no points'
                if r['chi2_per_point'] is None or not r['n']
                else 'chi2/n = %.4g' % r['chi2_per_point'])
         if 'delta' in r:
@@ -1773,7 +1813,7 @@ def _fmt_degeneracy(diag, th, L):
         L.append('  no parameter pair with |rho| above the threshold')
     if dg['softest']:
         L.append('  softest direction: %s (coefficients in stderr units)'
-                 % _softest_text(dg['softest']))
+                 % _softest_text(dg['softest'], SOFTEST_MAX_TERMS))
 
 
 def _fmt_fisher(diag, th, L):
@@ -1788,9 +1828,11 @@ def _fmt_fisher(diag, th, L):
         return
     ps = f['params']
     L.append('  information on the shared parameters (Fisher, marginal; share per dataset):')
-    L.append('    %-16s %s' % ('dataset', ' '.join('%12s' % p[:12] for p in ps)))
+    sn = short_names(list(f['shares']))
+    w = _name_width(sn.values())
+    L.append('    %-*s %s' % (w, 'dataset', ' '.join('%12s' % p[:12] for p in ps)))
     for name, sh in f['shares'].items():
-        L.append('    %-16s %s' % (name, ' '.join(
+        L.append('    %-*s %s' % (w, sn[name], ' '.join(
             '%12s' % ('n/a' if sh.get(p) is None else '%.3g' % sh[p]) for p in ps)))
     if f.get('coupled'):
         L.append('    %s' % COUPLED_NOTE)
@@ -1806,9 +1848,11 @@ def _fmt_tension(diag, th, L):
         return
     L.append('  %s (per multiplicative error component: eps = Sum G^T C^-1 r, the shift the '
              'fit leaned on, and its pull eps/sqrt(Sigma_kk)):' % TENSION_HEAD)
+    sn = short_names(list(dict.fromkeys(r['dataset'] for r in t)))
+    w = _name_width(sn.values())
     for r in t:
-        L.append('    %-16s %-12s %-10s eps = %+.4g  pull = %+.3g' % (
-            r['dataset'], r['term'], r['label'], r['eps'], r['pull']))
+        L.append('    %-*s %-12s %-10s eps = %+.4g  pull = %+.3g' % (
+            w, sn[r['dataset']], r['term'], r['label'], r['eps'], r['pull']))
 
 
 def _fmt_optimum(diag, th, L):
@@ -2005,6 +2049,8 @@ def leave_one_out(jf, workers=1, fit_kws=None):
 def format_loo(res):
     """Text for a ``LOOResult`` (ascii only)."""
     L = ['Leave-one-out refits (%d datasets, each omitted in turn):' % len(res.omitted)]
+    sn = short_names(res.omitted)
+    w = _name_width(sn.values(), floor=12)
     if not res.estimates:
         L.append('  no shared varying parameter to compare')
     for m, ests in res.estimates.items():
@@ -2012,12 +2058,12 @@ def format_loo(res):
         L.append('  %s: spread (SD of the estimates) = %.6g' % (m, res.spread[m]))
         for nm, e, inf in zip(res.omitted, ests, res.influence[m]):
             if e is None:
-                L.append('    without %-12s no estimate' % nm)
+                L.append('    without %-*s no estimate' % (w, sn[nm]))
             else:
-                L.append('    without %-12s %.6g   influence %+.3g %s' % (
-                    nm, e, inf, 'stderr' if unit == 'stderr' else '(raw shift)'))
+                L.append('    without %-*s %.6g   influence %+.3g %s' % (
+                    w, sn[nm], e, inf, 'stderr' if unit == 'stderr' else '(raw shift)'))
     for nm, why in res.failures:
-        L.append('  refit without %s failed: %s' % (nm, why))
+        L.append('  refit without %s failed: %s' % (sn.get(nm, nm), why))
     for nt in res.notes:
         L.append('  note: %s' % nt)
     return '\n'.join(L)
