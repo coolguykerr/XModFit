@@ -664,6 +664,28 @@ snapshot, LOO rows and settings, loop wording, tension under rescaling, Cholesky
   name), name columns size to the longest label instead of a fixed 16, and the softest
   direction lists at most `SOFTEST_MAX_TERMS` (6) terms plus a count of the rest (that report
   listed 21). Rendering only: diagnostics data and keys keep full names and every term. Test W14.
+- Optimum-distance guard (2026-11-19, found on the 13-dataset, 88-parameter bilayer fit in
+  `model` mode: correlation condition number ~3e9, 148 pairs at |rho| > 0.9, the old line
+  claimed the optimum was 1.88e3 stderr away while a step of 1e-4 of the way raised
+  -2 ln L by 3e6). `optimum_distance` now takes the Newton step in stderr units over the
+  correlation eigen-directions above `OPT_COND_TOL` (1e-6) of the largest, reports
+  `dropped`, predicts the change `pred_change = -1/4 g~^T R g~`, and checks the step (clipped
+  to bounds) with one extra evaluation: the distance is printed only when the step lowers
+  -2 ln L by at least `OPT_MIN_RATIO` (0.25) of the prediction, else "not estimable from
+  this fit" with both numbers. Cost 2*nvarys + 1 evaluations (W3 updated). Same pass: the
+  degenerate-pair list is capped at `DEGENERATE_MAX_PAIRS` (10) plus a summary line; more
+  than `FISHER_TABLE_MAX` (6) shared parameters render one line per parameter listing only
+  the datasets that inform it, with untruncated names (the table cut every `__gN_Model_...`
+  key to the same 12 characters); a shared tension term is labelled `shared (N datasets)`.
+  Tests F6 (reliable on the well-conditioned fixture), W15.
+- `least_squares` defaults to `x_scale='jac'` (2026-11-19, engine change in
+  `JointFit.perform_fit`; an explicit `x_scale` wins, `leastsq` is untouched). On the same
+  bilayer fit TRF with `x_scale=1` stopped on xtol after 2 evaluations, short of the minimum,
+  in both modes: `data` chi2 93,569 -> 92,755 once scaled (58 s); `model` reaches the
+  XTOL=1e-15 tight-tolerance point (parameters within 0.2%) in 97 s against 467 s. The
+  optimum-distance line still says "not estimable" at the converged point, so what remains
+  is the reweighting objective and the rho-d degeneracy (WS6), not convergence. LOO refits
+  inherit the default through `_fit_args`. Test W16.
 
 ### 13.5 Final review
 
@@ -686,8 +708,10 @@ re-review found no new Critical or Important issues. Remaining minors from it: c
 
 - Report text is ASCII (R9); the 3.4 labels read chi2, sigma_ln, sqrt in place of the symbols.
 - `JointFit.report_diagnostics` {'full','cheap'} exists (R10); code-settable only, no GUI control.
-- Open: the finite-difference step may be noisy for XLayersPDB/XPR models; that noise decides the
-  WS6 exact-optimiser question, and the distance-to-optimum on the bilayer bundle was not run.
+- Open: the finite-difference step may be noisy for XLayersPDB/XPR models. The distance-to-optimum
+  on the bilayer bundle was run (2026-11-19, 13.4): "not estimable" even after the fit converges,
+  so the WS6 question is not answerable on that parametrisation without fixing or
+  reparametrising the rho-d directions.
 - Open: leave-one-out deep-copies the models; this is untested for heavy or Julia-backed models.
 - Open: the GUI `.jpar` save/load drops `#RescaleErrors` until WS4.
 - Deferred minors that remain: `quiet()` restores only listed state (caches and output_params of

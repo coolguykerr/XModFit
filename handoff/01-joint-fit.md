@@ -323,7 +323,9 @@ refuses to run while joint mode is enabled and points the user at the panel's ow
 `perform_fit` (`Joint_Fit_Routines.py:1004-1062`) supports `leastsq`, `least_squares`,
 `differential_evolution` (popsize 300, `updating='immediate'`), a generic fallback, and
 `emcee`; `nan_policy='raise'` on all least-squares paths; `**fit_kws` are forwarded to
-`Minimizer.minimize` so TRF `ftol`/`xtol`/`gtol` can be tuned.
+`Minimizer.minimize` so TRF `ftol`/`xtol`/`gtol` can be tuned. `least_squares` defaults to
+`x_scale='jac'` (2026-11-19; unscaled TRF stalled after 2 evaluations on the 88-parameter
+bilayer fit, see `20-spec-ws2-reporting.md` 13.4); pass `x_scale=1.0` for scipy's default.
 
 ## 4. How to use it
 

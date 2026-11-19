@@ -1444,6 +1444,11 @@ def exact_objective(jf, snap, params):
     return float(z @ z) + logdet + len(r) * LN2PI + pr
 
 
+OPT_COND_TOL = 1e-6     # correlation eigenvalues below this x the largest: direction dropped
+OPT_MIN_RATIO = 0.25    # the checked step must achieve this share of the predicted decrease
+OPT_NEGLIGIBLE = 0.01   # |change in -2 ln L| below this: already at the optimum
+
+
 def optimum_distance(jf, snap, step=None, cache=None):
     """How far the fitted point is from the exact likelihood's optimum (spec §6.4 item 6).
     ``None`` unless C depends on the model (model mode, intensity-dependent term), and
@@ -1451,9 +1456,16 @@ def optimum_distance(jf, snap, step=None, cache=None):
     ``snap.covar`` missing: ``{'unavailable': ...}``. Else the central-difference gradient
     g of ``exact_objective`` over ``snap.var_names`` and the Newton step
     ``δ = −½·covar·g`` (Φ's Hessian is about 2·covar⁻¹: on the covariance path lmfit runs
-    with ``scale_covar=False``, so covar = (Jᵀ C⁻¹ J)⁻¹). Returns ``{'delta', 'in_stderr',
-    'worst': (name, δ/stderr), 'fit_gap'}``. Costs 2·nvarys quiet model evaluations (one per
-    ``exact_objective``) and as many factorisations; leaves every model and ``jf.result`` as
+    with ``scale_covar=False``, so covar = (Jᵀ C⁻¹ J)⁻¹), taken in stderr units over the
+    correlation eigen-directions above ``OPT_COND_TOL`` of the largest (near-null directions,
+    where gradient noise is amplified without limit, are left out and counted in
+    ``dropped``). The step is then checked with one evaluation at θ̂ + δ (clipped to the
+    bounds): ``reliable`` only when it lowers Φ by at least ``OPT_MIN_RATIO`` of the
+    predicted ``pred_change`` = −¼ g̃ᵀR g̃ (or both are below ``OPT_NEGLIGIBLE``). Returns
+    ``{'delta', 'in_stderr', 'worst': (name, δ/stderr), 'fit_gap', 'pred_change',
+    'actual_change', 'reliable', 'reason', 'dropped', 'n_directions', 'clipped'}``. Costs
+    2·nvarys + 1 quiet model evaluations (one per ``exact_objective``) and as many
+    factorisations; leaves every model and ``jf.result`` as
     they were. ``snap`` must be ``jf.last_snapshot`` (ValueError otherwise); ``jf.fit_abort``
     stops the loop (``DiagnosticSkipped``)."""
     if snap.method == 'emcee' or not _model_needs(snap):
@@ -1474,7 +1486,20 @@ def optimum_distance(jf, snap, step=None, cache=None):
             fp = exact_objective(jf, snap, _params_at(jf, snap, {name: v + h}))
             fm = exact_objective(jf, snap, _params_at(jf, snap, {name: v - h}))
             g[j] = (fp - fm) / (2.0 * h)
-    delta = -0.5 * np.asarray(cov, float) @ g
+    cov = np.asarray(cov, float)
+    sd = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+    if np.any(sd <= 0):
+        return {'unavailable': 'parameter covariance is not positive definite (singular '
+                               'Hessian: some parameters are exactly degenerate or unconstrained)'}
+    # Newton step in stderr units on the well-determined directions only: a direction whose
+    # correlation eigenvalue is below OPT_COND_TOL of the largest is barely constrained by
+    # the data, and the finite-difference gradient's noise along it is amplified by 1/lambda
+    corr = cov / np.outer(sd, sd)
+    lam, V = np.linalg.eigh(0.5 * (corr + corr.T))
+    keep = lam > OPT_COND_TOL * float(lam.max())
+    proj = V.T @ (sd * g)
+    delta = sd * (-0.5 * (V[:, keep] @ (lam[keep] * proj[keep])))
+    pred = -0.25 * float(np.sum(lam[keep] * proj[keep] ** 2))
     dd, ins = {}, {}
     for j, name in enumerate(names):
         dd[name] = float(delta[j])
@@ -1482,8 +1507,38 @@ def optimum_distance(jf, snap, step=None, cache=None):
         ins[name] = float(delta[j] / se) if se else None
     avail = [(n, v) for n, v in ins.items() if v is not None]
     worst = max(avail, key=lambda t: abs(t[1])) if avail else None
-    return {'delta': dd, 'in_stderr': ins, 'worst': worst,
-            'fit_gap': per_dataset_objective(snap, cache)[1]['fit_gap']}
+    # check the step with one evaluation (clipped to the bounds): the estimate is used only
+    # when it actually lowers -2 ln L by a fair share of what the quadratic model predicts
+    _, ex = per_dataset_objective(snap, cache)
+    phi0 = ex['nll2'] + ex['prior']
+    trial, clipped = {}, []
+    for name in names:
+        v = snap.params[name] + dd[name]
+        p = jf.result.params[name]
+        lo = p.min if p.min is not None and np.isfinite(p.min) else None
+        hi = p.max if p.max is not None and np.isfinite(p.max) else None
+        if lo is not None and v < lo:
+            v = lo
+        if hi is not None and v > hi:
+            v = hi
+        if v != snap.params[name] + dd[name]:
+            clipped.append(name)
+        trial[name] = v
+    _check_abort(jf)
+    with jf.quiet():
+        actual = exact_objective(jf, snap, _params_at(jf, snap, trial)) - phi0
+    if abs(pred) < OPT_NEGLIGIBLE and abs(actual) < OPT_NEGLIGIBLE:
+        reliable, reason = True, None
+    elif pred < 0 and actual < 0 and actual / pred >= OPT_MIN_RATIO:
+        reliable, reason = True, None
+    else:
+        reliable = False
+        reason = ('a step to the estimate changes -2 ln L by %+.4g against a predicted %+.4g'
+                  % (actual, pred))
+    return {'delta': dd, 'in_stderr': ins, 'worst': worst, 'fit_gap': ex['fit_gap'],
+            'pred_change': pred, 'actual_change': float(actual), 'reliable': reliable,
+            'reason': reason, 'dropped': int(np.sum(~keep)), 'n_directions': len(names),
+            'clipped': clipped}
 
 
 # ------------------------------------------------------------- diagnostics --
@@ -1687,6 +1742,8 @@ def diagnostics(jf, snap, individual_fits=None, *, qrange_tol=0.10, hetero_ratio
 
 
 SOFTEST_MAX_TERMS = 6      # the report lists this many softest-direction terms; data keeps all
+DEGENERATE_MAX_PAIRS = 10  # ... and this many degenerate pairs (largest |rho| first)
+FISHER_TABLE_MAX = 6       # more shared parameters than this: one line per parameter
 
 
 def _softest_text(softest, max_terms=None):
@@ -1807,8 +1864,14 @@ def _fmt_degeneracy(diag, th, L):
         L.append('  degeneracy: %s' % dg['unavailable'])
         return
     if dg['pairs']:
-        for a, b, r in dg['pairs']:
+        pairs = dg['pairs']
+        for a, b, r in pairs[:DEGENERATE_MAX_PAIRS]:
             L.append('  degenerate pair: %s, %s (rho = %+.3f)' % (a, b, r))
+        rest = pairs[DEGENERATE_MAX_PAIRS:]
+        if rest:
+            L.append('  ... and %d more pair%s with |rho| above %g (%d of all %d at |rho| >= 0.999)'
+                     % (len(rest), '' if len(rest) == 1 else 's', th.get('rho_tol', 0.9),
+                        sum(abs(t[2]) >= 0.999 for t in pairs), len(pairs)))
     else:
         L.append('  no parameter pair with |rho| above the threshold')
     if dg['softest']:
@@ -1829,11 +1892,25 @@ def _fmt_fisher(diag, th, L):
     ps = f['params']
     L.append('  information on the shared parameters (Fisher, marginal; share per dataset):')
     sn = short_names(list(f['shares']))
-    w = _name_width(sn.values())
-    L.append('    %-*s %s' % (w, 'dataset', ' '.join('%12s' % p[:12] for p in ps)))
-    for name, sh in f['shares'].items():
-        L.append('    %-*s %s' % (w, sn[name], ' '.join(
-            '%12s' % ('n/a' if sh.get(p) is None else '%.3g' % sh[p]) for p in ps)))
+    label = {p: p.lstrip('_') or p for p in ps}
+    if len(ps) <= FISHER_TABLE_MAX:
+        w = _name_width(sn.values())
+        cw = max([12] + [len(label[p]) for p in ps])
+        L.append('    %-*s %s' % (w, 'dataset', ' '.join('%*s' % (cw, label[p]) for p in ps)))
+        for name, sh in f['shares'].items():
+            L.append('    %-*s %s' % (w, sn[name], ' '.join(
+                '%*s' % (cw, 'n/a' if sh.get(p) is None else '%.3g' % sh[p]) for p in ps)))
+    else:
+        # many shared parameters: one line each, listing only the datasets that inform it
+        pw = max(len(label[p]) for p in ps)
+        for p in ps:
+            got = [(sn[nm], sh.get(p)) for nm, sh in f['shares'].items()]
+            na = [d for d, v in got if v is None]
+            parts = ['%s %.3g' % (d, v) for d, v in got if v is not None and v > 0]
+            if na:
+                parts.append('n/a: %s' % ', '.join(na))
+            L.append('    %-*s  %s' % (pw, label[p], ', '.join(parts) if parts
+                                       else 'no information'))
     if f.get('coupled'):
         L.append('    %s' % COUPLED_NOTE)
     if f.get('mean_information_only'):
@@ -1848,11 +1925,16 @@ def _fmt_tension(diag, th, L):
         return
     L.append('  %s (per multiplicative error component: eps = Sum G^T C^-1 r, the shift the '
              'fit leaned on, and its pull eps/sqrt(Sigma_kk)):' % TENSION_HEAD)
-    sn = short_names(list(dict.fromkeys(r['dataset'] for r in t)))
-    w = _name_width(sn.values())
+    def _who(r):
+        if r.get('scope') == 'shared' and ', ' in r['dataset']:
+            return 'shared (%d datasets)' % len(r['dataset'].split(', '))
+        return sn.get(r['dataset'], r['dataset'])
+    sn = short_names([r['dataset'] for r in t if not (r.get('scope') == 'shared'
+                                                     and ', ' in r['dataset'])])
+    w = _name_width([_who(r) for r in t])
     for r in t:
         L.append('    %-*s %-12s %-10s eps = %+.4g  pull = %+.3g' % (
-            w, sn[r['dataset']], r['term'], r['label'], r['eps'], r['pull']))
+            w, _who(r), r['term'], r['label'], r['eps'], r['pull']))
 
 
 def _fmt_optimum(diag, th, L):
@@ -1867,10 +1949,26 @@ def _fmt_optimum(diag, th, L):
         return
     w = o.get('worst')
     gap = o.get('fit_gap')
+    poor = ''
+    if o.get('dropped'):
+        poor = ('; %d of %d parameter directions are too poorly determined to use'
+                % (o['dropped'], o['n_directions']))
+    if o.get('reliable') is False:
+        L.append('  distance to the exact-likelihood optimum: not estimable from this fit (%s%s); '
+                 'fit gap Delta chi2 = %s' % (o['reason'], poor,
+                                             'n/a' if gap is None else '%+.4g' % gap))
+        return
     line = ('  the fitted point is the reweighting fixed point; the exact-likelihood optimum is '
             'estimated %s stderr away (%s); fit gap Delta chi2 = %s' % (
                 'n/a' if w is None else '%.3g' % abs(w[1]), 'n/a' if w is None else w[0],
                 'n/a' if gap is None else '%+.4g' % gap))
+    if o.get('pred_change') is not None:
+        line += ('; -2 ln L would change by %+.4g (checked: %+.4g)'
+                 % (o['pred_change'], o['actual_change']))
+    line += poor
+    if o.get('clipped'):
+        line += '; step clipped at bounds for %d parameter%s' % (
+            len(o['clipped']), '' if len(o['clipped']) == 1 else 's')
     if w is not None and abs(w[1]) > 0.3:
         line += '; the WS6 exact optimiser should settle it'
     L.append(line)

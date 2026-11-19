@@ -1439,11 +1439,18 @@ class JointFit(QObject):
 
         Extra keyword args (e.g. ``ftol``/``xtol``/``gtol`` for the
         ``least_squares`` TRF backend) are forwarded to ``Minimizer.minimize``
-        and thence to the underlying scipy solver. Backward-compatible: with no
-        extra kwargs the behaviour is unchanged."""
+        and thence to the underlying scipy solver.
+
+        ``least_squares`` defaults to ``x_scale='jac'`` (pass ``x_scale=1.0`` for
+        scipy's own default). Joint parameters span ~1e-8 (bkg) to ~10 (d); with an
+        unscaled trust region TRF stopped on xtol after 2 evaluations, short of the
+        minimum (13-set bilayer, 2026-11-19: chi2 93,569 -> 92,755 once scaled).
+        MINPACK ``leastsq`` already scales by the Jacobian column norms."""
         mode = self.covariance_mode if covariance_mode is None else covariance_mode
         if mode not in ('model', 'data'):
             raise ValueError("covariance_mode must be 'model' or 'data', got %r" % (mode,))
+        if fit_method == "least_squares":
+            fit_kws.setdefault('x_scale', 'jac')
         self.Niter = 0
         self.fit_abort = False
         self.last_snapshot = None           # never describe a previous fit

@@ -915,6 +915,10 @@ def test_f6_exact_objective_and_optimum():
     check('F6 in_stderr = delta / stderr', all(
         abs(od['in_stderr'][n] - od['delta'][n] / snap.stderr[n]) <= 1e-12 * abs(od['in_stderr'][n]) + 1e-15
         for n in snap.var_names))
+    check('F6 well-conditioned: nothing dropped, the checked step lowers -2 ln L as predicted',
+          od['reliable'] and od['dropped'] == 0 and od['pred_change'] < 0
+          and od['actual_change'] <= jfs.OPT_MIN_RATIO * od['pred_change'],
+          'pred %.4g actual %.4g dropped %d' % (od['pred_change'], od['actual_change'], od['dropped']))
     wn, wv = od['worst']
     check('F6 worst is the largest |delta/stderr|',
           abs(wv) == max(abs(v) for v in od['in_stderr'].values()) and od['in_stderr'][wn] == wv)
@@ -1273,11 +1277,12 @@ def test_w3_evaluation_counts():
     _, n = _calls_in(lambda: jfs.fisher_shares(jf, snap))
     check('W3 fisher_shares: nvarys evaluations', n == nv * nds, '%d calls, nvarys %d' % (n, nv))
     _, n = _calls_in(lambda: jfs.optimum_distance(jf, snap))
-    check('W3 optimum_distance: 2*nvarys evaluations', n == 2 * nv * nds, '%d calls' % n)
+    check('W3 optimum_distance: 2*nvarys + 1 (the checked step) evaluations',
+          n == (2 * nv + 1) * nds, '%d calls' % n)
     d, n = _calls_in(lambda: jfs.diagnostics(jf, snap))
-    check('W3 diagnostics: nvarys + 2*nvarys + 1 (restore) evaluations',
-          n == (3 * nv + 1) * nds and d['optimum_distance'] and 'delta' in d['optimum_distance'],
-          '%d calls, want %d' % (n, (3 * nv + 1) * nds))
+    check('W3 diagnostics: nvarys + 2*nvarys + 1 (checked step) + 1 (restore) evaluations',
+          n == (3 * nv + 2) * nds and d['optimum_distance'] and 'delta' in d['optimum_distance'],
+          '%d calls, want %d' % (n, (3 * nv + 2) * nds))
     j2 = _counting(nds, cov=None, mode=None)
     _fit(j2)
     _, n = _calls_in(lambda: jfs.diagnostics(j2, j2.last_snapshot))
@@ -1691,6 +1696,117 @@ def test_w14_short_labels_and_softest_cap():
           'smaller' not in jfs._softest_text(soft[:3], jfs.SOFTEST_MAX_TERMS))
 
 
+def test_w15_optimum_guard_and_large_fit_rendering():
+    """Real-data findings on a 13-dataset, 88-parameter bilayer fit: (1) the optimum
+    distance is checked with one evaluation and called 'not estimable' when the step does
+    not lower -2 ln L; near-null correlation directions are dropped and counted; (2) the
+    degenerate-pair list is capped; (3) more than FISHER_TABLE_MAX shared parameters render
+    one line each, with untruncated names; (4) a shared tension term is labelled by its
+    dataset count, not by every name."""
+    import dataclasses
+    jf = _f6_jf()
+    snap = jf.last_snapshot
+    real = jfs.exact_objective
+    nv = len(snap.var_names)
+    calls = {'n': 0}
+
+    def fake(j, s_, p):
+        calls['n'] += 1
+        v = real(j, s_, p)
+        return v + 1e3 if calls['n'] == 2 * nv + 1 else v      # the checked step only
+    jfs.exact_objective = fake
+    try:
+        od = jfs.optimum_distance(jf, snap)
+    finally:
+        jfs.exact_objective = real
+    check('W15 a step that raises -2 ln L is not reliable', od['reliable'] is False
+          and od['actual_change'] > 0 and 'predicted' in od['reason'], str(od.get('reason')))
+    txt = jfs.format_diagnostics({'optimum_distance': od})
+    check('W15 not-estimable line, no stderr distance claimed',
+          'not estimable from this fit' in txt and 'stderr away' not in txt
+          and 'WS6' not in txt, ascii(txt))
+    od2 = jfs.optimum_distance(jf, snap)
+    t2 = jfs.format_diagnostics({'optimum_distance': od2})
+    check('W15 reliable line reports the predicted and checked change',
+          'would change by' in t2 and '(checked:' in t2, ascii(t2))
+    # a near-null direction in the covariance is dropped and counted
+    cov = np.array(snap.covar, float)
+    sd = np.sqrt(np.diag(cov))
+    corr = np.eye(len(sd))
+    corr[0, 1] = corr[1, 0] = 1 - 1e-9
+    jf.last_snapshot = dataclasses.replace(snap, covar=corr * np.outer(sd, sd))
+    try:
+        od3 = jfs.optimum_distance(jf, jf.last_snapshot)
+    finally:
+        jf.last_snapshot = snap
+    check('W15 near-null direction dropped', od3.get('dropped') == 1, str(od3.get('dropped')))
+    t3 = jfs.format_diagnostics({'optimum_distance': od3})
+    check('W15 dropped directions are reported', '1 of %d parameter directions are too poorly '
+          'determined' % nv in t3, ascii(t3))
+    # rendering caps
+    pairs = [('p%d' % i, 'q%d' % i, 0.9995 if i < 4 else 0.95) for i in range(15)]
+    t = jfs.format_diagnostics({'degeneracy': {'pairs': pairs, 'softest': []},
+                                'thresholds': {'rho_tol': 0.9}})
+    check('W15 degenerate pairs capped with a summary line',
+          t.count('degenerate pair:') == jfs.DEGENERATE_MAX_PAIRS
+          and '... and 5 more pairs with |rho| above 0.9 (4 of all 15 at |rho| >= 0.999)' in t,
+          ascii(t))
+    ps = ['__g%d_Model_d_001' % i for i in range(jfs.FISHER_TABLE_MAX + 1)]
+    shares = {'A': {p: (0.5 if i % 2 == 0 else 0.0) for i, p in enumerate(ps)},
+              'B': {p: (0.5 if i % 2 == 0 else 1.0) for i, p in enumerate(ps)}}
+    t = jfs.format_diagnostics({'fisher': {'params': ps, 'shares': shares}})
+    check('W15 many shared parameters: one line each, full names, zero shares omitted',
+          'g0_Model_d_001  A 0.5, B 0.5' in t and 'g1_Model_d_001  B 1' in t
+          and '__g14_Model_' not in t, ascii(t))
+    t = jfs.format_diagnostics({'fisher': {'params': ['theta', '__g3_Model_rho_001'],
+                                           'shares': {'A': {'theta': 0.5, '__g3_Model_rho_001': 1.0},
+                                                      'B': {'theta': 0.5, '__g3_Model_rho_001': 0.0}}}})
+    check('W15 small table keeps untruncated headers', 'g3_Model_rho_001' in t, ascii(t))
+    names13 = ', '.join('DS%d' % i for i in range(13))
+    t = jfs.format_diagnostics({'tension': [
+        {'dataset': names13, 'term': 'atten', 'label': 'c1', 'scope': 'shared',
+         'eps': 0.1, 'pull': 0.2},
+        {'dataset': '0<>C:/x/own.rrf', 'term': 'fp', 'label': 'c0', 'scope': 'dataset',
+         'eps': 0.3, 'pull': 0.4}]})
+    check('W15 shared tension term labelled by its dataset count',
+          'shared (13 datasets)' in t and 'DS12' not in t and '0<>own.rrf' in t, ascii(t))
+
+
+def test_w16_least_squares_x_scale_default():
+    """least_squares defaults to x_scale='jac' (it reaches scipy and is recorded for the
+    LOO refits); an explicit x_scale wins; leastsq gets no x_scale (MINPACK has none)."""
+    jf = make_jf(2)
+    _fit(jf, fit_method='least_squares')
+    check('W16 least_squares defaults to x_scale=jac',
+          jf.result.call_kws.get('x_scale') == 'jac'
+          and jf._fit_args['fit_kws'].get('x_scale') == 'jac',
+          str((jf.result.call_kws, jf._fit_args['fit_kws'])))
+    check('W16 default fit still recovers the slope',
+          abs(jf.result.params['a'].value - A_TRUE) < 0.05, str(jf.result.params['a'].value))
+    jf2 = make_jf(2)
+    _fit(jf2, fit_method='least_squares', x_scale=1.0)
+    check('W16 explicit x_scale is kept', jf2.result.call_kws.get('x_scale') == 1.0,
+          str(jf2.result.call_kws))
+    jf3 = make_jf(2)
+    _fit(jf3, fit_method='leastsq')
+    check('W16 leastsq gets no x_scale', 'x_scale' not in jf3._fit_args['fit_kws'],
+          str(jf3._fit_args['fit_kws']))
+    orig, news = jfs._loo_copy, []
+
+    def capture(j, k, *a, **kw):
+        new = orig(j, k, *a, **kw)
+        news.append(new)
+        return new
+    jfs._loo_copy = capture
+    try:
+        jfs.leave_one_out(jf)
+    finally:
+        jfs._loo_copy = orig
+    check('W16 LOO refits use x_scale=jac',
+          len(news) == 2 and all(n.result.call_kws.get('x_scale') == 'jac' for n in news),
+          str([getattr(n.result, 'call_kws', None) for n in news]))
+
+
 def _guarded(t):
     try:
         t()
@@ -1720,7 +1836,9 @@ def main():
               test_w7_rescale_zero_marginal, test_w8_outputs_restored,
               test_w9_stale_snapshot_guard, test_w10_loo_alignment_and_settings,
               test_w11_rescale_wording, test_w12_tension_rescaled,
-              test_w13_logdet_marg_cholesky, test_w14_short_labels_and_softest_cap):
+              test_w13_logdet_marg_cholesky, test_w14_short_labels_and_softest_cap,
+              test_w15_optimum_guard_and_large_fit_rendering,
+              test_w16_least_squares_x_scale_default):
         _guarded(t)
     return finish()
 
