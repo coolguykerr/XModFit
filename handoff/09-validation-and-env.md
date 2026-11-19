@@ -385,7 +385,7 @@ required there.
 |---|---|---|---|
 | V1 | The runtime estimates in section 4.1 | this document (extrapolated from `maxiter`, dataset sizes and the notes' timings) | run each validator once under `Measure-Command`; record real times back into 4.1 |
 | V2 | All nine runnable validators currently **pass** | nothing — none has been run since the changes were made | run 4.2 top to bottom; expect at least `validate_jointfit.py` to fail on missing data |
-| V3 | `cmc-py39` can run every non-viewer validator, i.e. the `xraydb` stub is sufficient everywhere | `cmc-py39-env.md` (verified in Aug 2026, before GID2D/XPR existed) | run `validate_gid2d_gui.py` and `validate_xpr.py` in cmc-py39 and check nothing reaches a real `xraydb` call |
+| V3 | `cmc-py39` can run every non-viewer validator, i.e. the `xraydb` stub is sufficient everywhere | `cmc-py39-env.md` (verified in Aug 2026, before GID2D/XPR existed) | run `validate_gid2d_gui.py` and `validate_xpr.py` in cmc-py39 and check nothing reaches a real `xraydb` call. **Partly refuted 2026-11-18:** the fake is *not* sufficient for the XFNTR family, which cannot be constructed under it, so no `cmc-py39` run builds those models (audit P5.4) |
 | V4 | The vendored `lmfit/` shadows pip `lmfit 1.2.2` in cmcars when cwd is the repo root | inference from `sys.path` ordering | `& $CMCARS -c "import lmfit; print(lmfit.__file__)"` from the repo root and from `C:\` |
 | V5 | `cmcars` SSL is broken and `SSL_CERT_FILE` does not fix it | `xpr-julia-backend.md`, 2026-08-31 | `& $CMCARS -c "import ssl; ssl.create_default_context()"` |
 | V6 | `tomli` is now healthy in cmcars | same note (a fix that was applied) | `& $CMCARS -c "import tomli; print(tomli.__file__)"` |

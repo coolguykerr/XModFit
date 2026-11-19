@@ -424,6 +424,22 @@ In order of value to joint fits:
   - attribution for `ngl.js` and `julia/XPR/` (A3.15);
   - the **GenX / refnx prior-art check** before Axis 2 is described as novel;
   - reorganise and condense, then push (D4).
+- **Setup instructions: the final step, after the reorganisation and before the push**
+  (added 2026-11-18). They are written last because the reorganisation decides the file
+  layout, the requirements file and the env the instructions describe. They must cover
+  audit `11-audit-plan.md` §7a (P5.1–P5.5):
+  - one env recipe and one requirements file (with the viewer and Julia/XPR add-ons
+    marked optional);
+  - `xraydb` as a hard requirement (the app does not start without it), with its version
+    checked;
+  - dropping the empty `xraydb/` folder, or else quoting the confusing
+    `cannot import name 'XrayDB' ... (unknown location)` error;
+  - developer test setup (`cmc-py39` fake vs `cmcars` for XFNTR) kept separate and
+    pointed at doc 09.
+
+  Done means a new user follows them in a freshly built env, `xmodfit.py` starts, and
+  `XFNTR_Plus`, `GIXOS` and one XRR model can be selected. Keep upstream's `README.md`
+  diff to a short pointer, or put the instructions in a new file.
 
 ## WS8 — Low priority
 

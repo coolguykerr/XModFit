@@ -157,6 +157,21 @@ Requires a human at the GUI; produce a click-through checklist rather than a scr
   reload, whether `AA_ShareOpenGLContexts` is actually required, and macOS at all.
 - GID2D's 2D Map tab against a freshly packed map.
 
+## 7a. P5 — environment and setup (added 2026-11-18)
+
+Found while bringing in GIXOS (doc 22). Nobody outside the original machines can install
+XModJointFit from the repo as it stands. Each item below must be covered by the setup
+instructions, which are the last step of roadmap WS7 before the push. Items marked
+*verified* were checked on 2026-11-18; the rest are still to be checked.
+
+| # | Claim | From | How |
+|---|---|---|---|
+| P5.1 | **There are no setup instructions.** `README.md` (upstream's) never mentions `pip`, `conda` or a requirements file. Seven `requirements*.txt` files exist and none is marked as the one to use (doc 09 §6.3 compares them). *Verified.* | 09, 22 | The setup doc must name one env recipe and one requirements file, with `requirements_xmodfit_viewer.txt` for the NGL viewer and `requirements_xpr.txt` as the optional Julia add-on. |
+| P5.2 | **`xraydb` is a hard requirement, not optional.** `Chemical_Formula.py:2` does `from xraydb import XrayDB` and `xmodfit.py:43` imports it, so the app does not start without it. The XFNTR family also queries it at import and in `__init__` (`XFNTR_Plus.py:10`, `:66-67`). It is already in every requirements file: `requirements.txt` pins `4.5.4`, `requirements_latest.txt` leaves it unpinned, and the local snapshots pin `4.4.7`. `cmcars` has 4.4.7; `cmc-py39` has none (`pip show xraydb`: not found). *Verified.* | 09 §3.3, 22 | Build a fresh env from the chosen requirements file, start `xmodfit.py`, and select `XFNTR`, `XFNTR_Plus` and `GIXOS`. Also check that the pinned version works: only 4.4.7 has been exercised, never 4.5.4. |
+| P5.3 | **The repo's empty `xraydb/` folder hides a missing install.** It holds only orphan `.pyc` files and no `__init__.py`, so with no pip `xraydb`, `import xraydb` *succeeds* as an empty namespace package. The real failure then shows up later as `ImportError: cannot import name 'XrayDB' from 'xraydb' (unknown location)`, not `No module named 'xraydb'`. *Verified in cmc-py39.* | 09 §3.4, §8.1 | Drop `xraydb/` (doc 09 §8.1 already recommends it), then confirm an env without `xraydb` fails with the plain `ModuleNotFoundError`. Until then, the setup doc must quote the confusing message so users can recognise it. |
+| P5.4 | **The `cmc-py39` fake hides model-level `xraydb` use.** The validators' fake `XrayDB` returns `None`/`0`, so XFNTR-family models cannot even be constructed under it (`xray_lines(98).keys()` on `None`). The quick suite runs in `cmc-py39` and therefore never builds an XFNTR model. That is how the `XFNTR_Plus` `filepaths` crash (P2.6) went unseen. *Verified.* This partly refutes doc 09 V3. | 09 V3, 22 | Any XFNTR / X-ray-calculator check needs `cmcars` (`interp: 'cmcars'` in the `tests/run_all.py` registry). Consider a `cmcars` harness that selects every model in every category, which would catch the next upstream model missing `filepaths`. |
+| P5.5 | **Headless-recipe prerequisites are developer-only** (offscreen Qt, the fake xraydb, `__main__` guards). They belong in a "running the tests" section, not in the user setup. | 09 §3.3 | Keep the user setup free of them, and point developers to doc 09. |
+
 ## 8. Delegation
 
 - **Subagents** can do P1, P2, P3 and all of section 2: they are scriptable, headless, and
@@ -171,8 +186,9 @@ Requires a human at the GUI; produce a click-through checklist rather than a scr
 
 The audit is done when every section 7 claim is marked CONFIRMED, REFUTED or
 INCONCLUSIVE-with-a-reason in its own document; every REFUTED claim has a `10-fix-list.md`
-entry; P0 is fully closed; and the validator suite runs from one command and genuinely
-fails when something is broken.
+entry; P0 is fully closed; the validator suite runs from one command and genuinely
+fails when something is broken; and every P5 item is covered by setup instructions that
+were tested in a freshly built environment (roadmap WS7, last step).
 
 ## 10. Known blockers
 
