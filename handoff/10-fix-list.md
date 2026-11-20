@@ -72,7 +72,16 @@ Upstream has this file at 1.3 MB; our commit `d3e353e` replaced it with a 26.8 M
 backend. Pushing adds 27 MB to every clone permanently. *Fix:* restore upstream's blob
 across the six local commits before any push.
 
-**A0.6 The seeding study must not reach upstream — one step left.** [publishing risk]
+**A0.6 The seeding study must not reach upstream.** [publishing risk] **DONE 2026-11-20 (route B).**
+`7942458` was dropped from `develop` with `git rebase --onto 7942458^ 7942458 develop`, just
+before the fork was created. Checked first: all 114 files are in `../xpr-seeding-study`
+(103 identical, 4 line endings only, 11 as earlier versions of files edited there; its
+`MANIFEST.sha256` verifies). After: no study path in any `develop` commit, and the 103
+rewritten commits match their originals in message and tree (minus the 114 files). Every
+commit hash after `a1a2a62` changed; hashes cited in `handoff/` and the tests were remapped
+in the same change. The old history is kept locally only, in branch
+`backup-before-dropping-7942458` and `../XModJointFit-develop-before-dropping-7942458.bundle`;
+never push either. The history below is kept as the record.
 The September 2026 global-optimum seeding study was research, not an XModFit feature. It
 was **extracted to its own repository on 2026-09-04** (`../xpr-seeding-study`, still with
 no remote configured), and `.gitignore` now covers its paths so the untracked half cannot
@@ -123,7 +132,7 @@ encode one machine's absolute conda path. *Fix:* `git checkout -- .idea/`.
 
 ## A1. Correctness fixes
 
-**A1.1 One source of truth for the PDB model-name list.** [crash] **DONE 2026-11-06 (WS1, `a1717a6`).**
+**A1.1 One source of truth for the PDB model-name list.** [crash] **DONE 2026-11-06 (WS1, `e07f722`).**
 Three tuples disagree, all three uncommitted: `lmfit/minimizer.py:94` (6 names),
 `xmodfit.py:2634` (3, drops `_G`/`_H`/`_XPR`), `Fit_Routines.py:491` (a different 3, drops
 `_box`). Consequence: for `XLayersPDB_XPR`/`_G`/`_H` the engine builds a `CustomSampler`
@@ -141,7 +150,7 @@ a loop that runs *only when `__fit__` is False*, and `Joint_Fit_Routines.py:452`
 `__fit__ = True` — so none of the three can be joint-fitted. *Fix:* hoist the assignment,
 or drop the variants (D1 — if they go, this item disappears).
 
-**A1.3 Seed workers ignore the per-column fit mask.** [wrong-result] **DONE 2026-11-06 (WS1, `63e984e`).**
+**A1.3 Seed workers ignore the per-column fit mask.** [wrong-result] **DONE 2026-11-06 (WS1, `98618c3`).**
 `Fit.residual` applies the mask (`Fit_Routines.py:291-296`) and `JointFit.residual` applies
 `obj["imask"]` (`Joint_Fit_Routines.py:552-558`), but `pdb_seed_worker`,
 `pdb_joint_seed_worker.JointSeedScan.residual` and `_build_orientation_seed`'s slices all
@@ -150,12 +159,12 @@ true while no column limit is active — and the two features were never exercis
 *Fix:* thread the frozen mask into both workers.
 *Done:* `pdb_seed_worker` and `pdb_joint_seed_worker` take the window-restricted frozen mask plus a `yfit_masked` flag (evaluate on the true window, then select fit/y/err active points; a `__masked_x__` model is not masked twice); `Minimizer.emcee`'s seed block and `JointFit._build_orientation_seed` pass them. `mask=None` is byte-identical to before. Regression: `validate_seed_mask.py` (serial == parallel with a mask, differs from mask-off).
 
-**A1.4 `_eval_chisqr` ignores per-dataset ranges and column masks.** [wrong-result] **DONE 2026-11-06 (WS1, `e1e8b9f`).**
+**A1.4 `_eval_chisqr` ignores per-dataset ranges and column masks.** [wrong-result] **DONE 2026-11-06 (WS1, `caaef43`).**
 The joint-vs-individual model comparison masks with the scalar Xrange only, so the two
 chi2 values are computed on different point sets whenever `#FitRange=` or a column limit
 is in use. *Fix:* route it through the same `imask_for`/`active_index` path as the fit.
 *Done:* `JointFit.active_index(i)` and module function `chisqr_on`; `_eval_chisqr` evaluates both models on the joint fit's own active points. Under covariance the comparison scores both models on raw `y`/`yerr` (a plain chi-square), not `y_corr`/`sigma_meas`; that was already the case and is intended (see `01-joint-fit.md` §6.6). Regression: `validate_joint_ws1.py` T5. Superseded by WS2 §2.1 when that lands.
-*Final fix wave (`3c3fd71`):* the `.jpar` and `.par`-into-joint load paths now freeze the fit ranges and column masks after compile (`XModFit._apply_joint_ranges` -> `JointFit._set_ranges`, same arguments as `run_joint_fit`), so a loaded, never re-fitted joint fit is compared on its own `#FitRange=` / column-limit points too; before this, `active_index` there was the whole dataset (a regression from the pre-WS1 scalar `_joint_range()`). `chisqr_on` now evaluates on the objective's `[imin, imax]` window (M1). `xmodfit._joint_range` is live again (used by `run_joint_fit` and the load paths). Regression: `validate_joint_ws1.py` T5e and the T3gui `.jpar` round trip.
+*Final fix wave (`d754ec4`):* the `.jpar` and `.par`-into-joint load paths now freeze the fit ranges and column masks after compile (`XModFit._apply_joint_ranges` -> `JointFit._set_ranges`, same arguments as `run_joint_fit`), so a loaded, never re-fitted joint fit is compared on its own `#FitRange=` / column-limit points too; before this, `active_index` there was the whole dataset (a regression from the pre-WS1 scalar `_joint_range()`). `chisqr_on` now evaluates on the objective's `[imin, imax]` window (M1). `xmodfit._joint_range` is live again (used by `run_joint_fit` and the load paths). Regression: `validate_joint_ws1.py` T5e and the T3gui `.jpar` round trip.
 
 **A1.5 Mask + `__masked_x__` breaks the 1-D plot.** [crash, modal dialog]
 With both active, `self.fit.yfit` is shorter than `self.fit.x[imin:imax+1]`, but
@@ -262,11 +271,11 @@ in `tests/run_all.py` is dropped.
 *Remains:* the hard-coded `T:` path itself (still tried first when reachable), and that
 without the T: file, section 6 packs a round-tripped raw map rather than the original.
 
-**A1.17 Two recovered harnesses are stale.** [hygiene] **DONE 2026-11-06 (WS1 Task 7, `6ed34fc`).**
+**A1.17 Two recovered harnesses are stale.** [hygiene] **DONE 2026-11-06 (WS1 Task 7, `3f0c607`).**
 `tests/recovered/smoke_fit.py` reads `scaler_parameters['chi2_per_N_reported']`, which GID2D
 now emits as `chi2_per_N_reported_LINEAR` / `chi2_per_N_active_only_LINEAR` (KeyError at the
 first print). `tests/recovered/verify_jointmcmc.py` binds a fixed list of XModFit methods
-onto a `Fake`; `_draw_corner` now calls `_corner_render_data` (added in `b953c3f`), absent
+onto a `Fake`; `_draw_corner` now calls `_corner_render_data` (added in `c5dc957`), absent
 from the list (AttributeError at section 3). Neither is an engine defect.
 *Fix:* update the key names / add `_corner_render_data` to the bound list. Both are
 registered `known` in `tests/run_all.py` until then.
@@ -279,11 +288,11 @@ gives `median_sigma_over_I`, a different quantity; the harness only prints it).
 the harness now binds it and sets the class constant on its `Fake`. Both `known` entries dropped; the WS1 full run has zero KNOWN-FAIL rows.
 Residual: `verify_jointmcmc` does not exercise the stride-thinning branch of `_corner_render_data`.
 
-**A1.18 Parallel MCMC sampling ignored the per-column fit mask.** [wrong-result] **DONE 2026-11-06 (WS1 Task 6b, `bfdd234`, `6ffcff9`).**
+**A1.18 Parallel MCMC sampling ignored the per-column fit mask.** [wrong-result] **DONE 2026-11-06 (WS1 Task 6b, `34650cc`, `3893311`).**
 Found by WS1 while fixing A1.3. With a column mask and `emcee_cores>1`, the parallel sampling objectives (`PdbLogProb` via `pdb_logprob.init_worker`, and `JointLogProb` via `pdb_joint_logprob.init_worker`, attached by `JointFit._attach_joint_parallel`) evaluated unmasked data, so the posterior was sampled from a different likelihood than the serial path. *Done:* both take the frozen window mask plus a `__masked_x__` flag and apply it exactly as `Fit.residual` / `JointFit.residual` do; the seed workers and log-probs share `apply_mask` / `prepare_datas`; `yfit_masked` is derived (`mask is not None and func.__masked_x__`) at both seed call sites rather than read from a stored flag. `mask=None` is byte-identical to the parent. Regression: `validate_seed_mask.py` (g)-(k); check (j) compares against `tests/fixtures/seed_mask_parent_ref.json`, so it has no git-history dependency.
 *Consequences to act on:*
 - **Discard old `.h5` backends.** A backend written by a pre-A1.18 parallel run that used a column mask was sampled under the wrong (unmasked) likelihood, yet it carries a matching MCMC fingerprint and will resume without complaint. Delete such backends and re-run.
-- **Re-point the fixture generator after A0.6.** `tests/fixtures/make_seed_mask_parent_ref.py` pins `PARENT=63e984e`. Dropping `7942458` (A0.6) rewrites that hash, so re-point `PARENT` before anyone regenerates the fixture. The committed fixture itself is unaffected.
+- **Re-point the fixture generator after A0.6.** DONE 2026-11-20: `tests/fixtures/make_seed_mask_parent_ref.py` pins `PARENT=98618c3`, the rewritten hash of the old `63e984e`. The committed fixture itself is unaffected.
 - Open: the `yfit_masked=True` sampling branch is only tested with synthetic models (no PDB model declares `__masked_x__`); `mask[:len(y)]` truncation hides a length mismatch (inherited convention).
 
 ## A1a. Gaps found by the WS0/WS1 audit (2026-11-09)
@@ -293,7 +302,7 @@ WS0/WS1 items resolved, 3 partial, and five new problems (N1-N5). All are closed
 Every new check was shown to fail against a scratch copy with the fix reverted or broken;
 the repo tree was never the mutant.
 
-**AG.1 (audit N1) Qt-slot exceptions never failed a harness.** [safety net, high] **DONE 2026-11-09 (`7c37f8f`).**
+**AG.1 (audit N1) Qt-slot exceptions never failed a harness.** [safety net, high] **DONE 2026-11-09 (`1a572e0`).**
 pyqtgraph replaces `sys.excepthook` when xmodfit is imported, so PyQt5 prints an exception
 raised in a slot and carries on; the harness still exits 0.
 *Done:* `tests/run_all.py` marks an exit-0 row FAIL when its log contains
@@ -335,13 +344,13 @@ pattern, both come out FAIL.
   slot is counted once.
 - The runner is the gate. A harness run directly with `python` that does not use
   `tests.harness` (about 25 of them, bare `assert`) still exits 0 on a slot exception.
-- Proof: against `f954a8d` the new runner self-tests fail 11 of 34 and the harness
+- Proof: against `3946853` the new runner self-tests fail 11 of 34 and the harness
   self-tests fail 3 cases. With the parallel setup forced to raise,
   `validate_parallel_sampling` alone still reports ALL PASS (5 checks) on the old
   fallback, its "parallel" chain having silently run serial. Through the new fallback
   the runner row is FAIL naming the RuntimeError.
 
-**AG.2 (audit A1.4 partial) no regression guard on the model-comparison call site.** **DONE 2026-11-09 (`b190c27`).**
+**AG.2 (audit A1.4 partial) no regression guard on the model-comparison call site.** **DONE 2026-11-09 (`d0a598d`).**
 *Done:* `validate_joint_ws1.py` T5f drives the real `XModFit.computeModelComparison`, and
 `_eval_chisqr` through it, on a joint fit with per-dataset ranges and a mask. It asserts
 N = 51 active points (not 80) and that the joint and individual chi-squares match.
@@ -349,7 +358,7 @@ N = 51 active points (not 80) and that the joint and individual chi-squares matc
 The "covered only through `validate_jointfit_gui`" note in `12-work-package-preaudit.md`
 was false and is corrected.
 
-**AG.3 (audit W0.3) trivially-passing rows.** **DONE 2026-11-09 (`7c37f8f`, `b4ec7ac`).**
+**AG.3 (audit W0.3) trivially-passing rows.** **DONE 2026-11-09 (`1a572e0`, `509e375`).**
 *Done:* `smoke_fit.py` is registered `smoke`. `validate_fastscan_gui.py` returns 77 (SKIP)
 when Julia is unavailable, and takes `ROOT` from `__file__` instead of a hard-coded path.
 `repro_backend`, `repro_raw`, `repro_tab` and `test_gui_construct` gained `tests.harness`
@@ -360,12 +369,12 @@ reason in the registry: `test_pickle_fit` (a diagnostic probe), `test_autocorr_w
 RAW-file warning suppressed (2), `_clone_fit` renamed (1). `julia_available` forced False
 gives rc 77 here and rc 0 at HEAD.
 
-**AG.4 (audit 01 §6.14 partial) the orchestration path dropped sub-curves silently.** **DONE 2026-11-09 (`3ba60b4`).**
+**AG.4 (audit 01 §6.14 partial) the orchestration path dropped sub-curves silently.** **DONE 2026-11-09 (`21dbd75`).**
 *Done:* `build_jointfit_from_selection` records the spec path's message in
 `JointFit.warnings`. A bare `_primary_curve` call (no JointFit) uses `warnings.warn`.
 *Proof:* `validate_joint_ws1.py` T4c' fails against the pre-fix module.
 
-**AG.5 (audit N2) the report's derived-quantity keymap ignored share-groups.** [silent omission, medium] **DONE 2026-11-09 (`7ed2ec7`).**
+**AG.5 (audit N2) the report's derived-quantity keymap ignored share-groups.** [silent omission, medium] **DONE 2026-11-09 (`797cf5a`).**
 `JointFit._report` keyed `derived_report` through `_master_key`, which knows only the legacy
 `shared=` list. For any spec/GUI joint fit with a shared pose the XPR `protins_top` block was
 silently missing.
@@ -376,17 +385,17 @@ Python, no Julia) on a synthetic pose model in three cases: shared bare, shared 
 (`g{n}_` keys), and legacy `shared=`. The pre-fix keymap fails 6 checks.
 `05-xpr-julia.md` §3 is corrected.
 
-**AG.6 (audit N3) `run_all.py --only <typo>` ran nothing and exited 0.** **DONE 2026-11-09 (`7c37f8f`).**
+**AG.6 (audit N3) `run_all.py --only <typo>` ran nothing and exited 0.** **DONE 2026-11-09 (`1a572e0`).**
 *Done:* it prints "no harness matched" and exits 2. Checked in `tests/test_run_all.py`.
 
-**AG.7 (audit N4) the no-cov `Log w/o error` / `Linear w/o error` joint residuals were unpinned.** **DONE 2026-11-09 (`cd613b4`).**
+**AG.7 (audit N4) the no-cov `Log w/o error` / `Linear w/o error` joint residuals were unpinned.** **DONE 2026-11-09 (`3093bf2`).**
 *Done:* `validate_joint_ws1.py` N4 compares `JointFit.residual`, evaluated off the optimum,
 with hand-computed `log10(y) - log10(f)` and `(y - f)/max(y)`.
 *Proof:* the audit's `mut_lwo` fails the Log check. An analogous mutant that drops the
 `max(y)` normalisation fails the Linear check. Each mutant touches one scale, so each fails
 only its own check.
 
-**AG.8 (audit N5) the audit output path was not ignored.** **DONE 2026-11-09 (`3b58055`).**
+**AG.8 (audit N5) the audit output path was not ignored.** **DONE 2026-11-09 (`98cf3fe`).**
 `.superpowers/` is in `.gitignore`; the audit file is kept on disk.
 
 ## A2. Data folder
@@ -408,7 +417,7 @@ leaked `_last_xsig`. As the only GID2D example in the repo it teaches the wrong 
 the origin) is now the default for all six models, the `_dev_smooth` demo, the joint
 validator and the two `.par` fixtures. `Data/tim3_hmmm_ext_all_bestframe.pdb` and
 `Data/d6test.h5` were removed from the branch with `git rm --cached` (kept on disk,
-gitignored) in `c4300d0`. Two caveats now on the record: the parameter values in those
+gitignored) in `812991e`. Two caveats now on the record: the parameter values in those
 `.par` fixtures were fitted against the tim3 structure and no longer match the shipped
 template, and the **i2_tim3 two-mode case that the multimodal seeding was validated
 against is no longer reproducible from a clean clone** -- if that validation needs to be
@@ -541,7 +550,7 @@ Three gaps:
 `_use_footprint` needs `cov['v']`/`cov['var_fwhm']`, which only `load_bundle_npz` returns,
 while the panel loads sidecars via `load_dataset_cov`, and `load_cov_npz` drops those keys
 even when the `.npz` contains them;
-**(a) DONE 2026-11-06 (WS1 B2a, `1b83aae`).** *Consequence to act on:* **discard old `.h5`
+**(a) DONE 2026-11-06 (WS1 B2a, `af8b570`).** *Consequence to act on:* **discard old `.h5`
 backends from covariance joint fits whose sidecars carried `v`/`var_fwhm`.** Before B2a those
 keys were dropped at load, so such a fit ran without the footprint term; after B2a a re-run
 includes it, so the likelihood changed. `_mcmc_fingerprint` does not hash the covariance or

@@ -40,9 +40,9 @@ The engine already contains one special case of this: the bilayer campaign's att
 scale-factor covariance plus a shared beam-footprint term, joint fits only. This
 workstream generalises it and keeps that case working.
 
-## 2. What exists today (as of `7d2549e`)
+## 2. What exists today (as of `dc35e88`)
 
-> **Status 2026-11-10: implemented (XModFit side) by doc 18, commits `b55bf41`..COV T8
+> **Status 2026-11-10: implemented (XModFit side) by doc 18, commits `6cb8b35`..COV T8
 > (`git log --oneline --grep "COV T"`); the list below is the pre-implementation state.
 > Verified headless by `validate_covariance.py`, `validate_covariance_gui.py`,
 > `validate_cov_stitching.py`, `validate_joint_gls.py` and the full `tests/run_all.py`. The
@@ -704,7 +704,7 @@ to fail when its feature is reverted, as was done for WS0/WS1.
 10. Outer iteration stops below 0.1 σ of parameter movement, or after 5 rounds.
 11. Saved fits without a mode field reload in `"data"` mode.
 12. The legacy `beam_fwhm` term is converted to multiplicative (W = v/y_corr).
-13. (Superseded by the Log fix in 64babd9: every Log fit now uses correct log statistics.)
+13. (Superseded by the Log fix in 9cddb21: every Log fit now uses correct log statistics.)
 14. The covariance lives with the dataset, and `set_x` without `cov` clears it.
 15. The fallback without a covariance: for v1 it is exactly today's fit, and for legacy
     files it is `y_corr` with σ_meas.

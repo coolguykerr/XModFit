@@ -6,7 +6,7 @@ depends on: the **output contract** (§2), the arithmetic that fills it (§3), a
 current code with the traps in it (§4), and the acceptance tests (§5). Everything else in
 LSS_Reader is that agent's to redesign.
 
-- The XModFit side is finished and tested (`XModJointFit` `develop`, `b55bf41..c884afa`).
+- The XModFit side is finished and tested (`XModJointFit` `develop`, `6cb8b35..4347d9d`).
   XModFit reads this file today. Nothing in LSS_Reader writes it yet.
 - The rationale (why a covariance, why these estimators, the statistics) is in
   `17-spec-general-covariance.md` §4.3, §7.1 and §8. Where this document and spec 17 §8

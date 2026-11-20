@@ -263,10 +263,10 @@ Baseline: `handoff/12-work-package-preaudit.md` "BASELINE (re-recorded 2026-11-0
 
 Found by WS1 itself during Task 6, ruled in by the controller. With a column mask and
 `emcee_cores>1`, the parallel MCMC *sampling* objectives (`PdbLogProb`, `JointLogProb`) used
-unmasked data, a silently different likelihood from the serial path. Fixed in `bfdd234`
+unmasked data, a silently different likelihood from the serial path. Fixed in `34650cc`
 (workers take the frozen window mask plus a `__masked_x__` flag; seed workers and log-probs
 share `apply_mask`/`prepare_datas`; `yfit_masked` is derived, not read from a stored flag) and
-`6ffcff9` (check (j) no longer depends on git history: the parent lnprob values are frozen in
+`3893311` (check (j) no longer depends on git history: the parent lnprob values are frozen in
 `tests/fixtures/seed_mask_parent_ref.json`). Regression checks: `validate_seed_mask.py` (g)-(k).
 
 ### Task 7: Bring the two stale harnesses up to date (A1.17)
@@ -277,7 +277,7 @@ share `apply_mask`/`prepare_datas`; `yfit_masked` is derived, not read from a st
 - [x] **Step 1: Confirm semantics before editing.** `GID2D.py:629` emits
   `chi2_per_N_reported_LINEAR`. Confirm it is the quantity `smoke_fit` meant by
   `chi2_per_N_reported`, read from `GID2D`'s code and history, not from the name.
-  Similarly confirm that `_corner_render_data` (b953c3f) is a helper the method list in
+  Similarly confirm that `_corner_render_data` (c5dc957) is a helper the method list in
   `verify_jointmcmc` must bind, and not a behaviour change.
   - If either is a real semantic change, keep it `known` and record why in A1.17. That is
     a finding, not a fix.
@@ -312,10 +312,10 @@ share `apply_mask`/`prepare_datas`; `yfit_masked` is derived, not read from a st
   refuses unless `on_mismatch='first'`. **Premise corrected during execution:** the original
   text claimed `run_joint_fit` already turned an exception into a message box. It did not
   (no `try`, no excepthook), so a `ShareMismatchError` would have reached a Qt slot and
-  aborted the app. A minimal GUI guard was added in `9518ef9`: `ShareMismatchError` shows a
+  aborted the app. A minimal GUI guard was added in `66be91e`: `ShareMismatchError` shows a
   message box on the Fit path and on both load paths (`.jpar` and `loadParIntoJoint`), with
   no retry dialog and no success claim. Fuller GUI handling stays in WS4. **Final fix wave
-  (`3c3fd71`):** the guard now catches any `ValueError` (I3), and a `ShareMismatchError`
+  (`d754ec4`):** the guard now catches any `ValueError` (I3), and a `ShareMismatchError`
   asks Yes/No to apply the first dataset's bounds/vary and recompile with
   `on_mismatch='first'` (I4), which now unifies the local bounds so nothing clips (I1).
 - **X3 (Task 1):** the single list lives in `lmfit/minimizer.py`, where four of the uses

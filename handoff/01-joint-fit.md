@@ -128,7 +128,7 @@ an individual-fit value ± stderr instead of hard-fixing it.
 
 **Superseded 2026-11-10 by the general covariance workstream** (design:
 `17-spec-general-covariance.md`; plan and task record: `18-plan-general-covariance.md`;
-commits `b55bf41`..COV T8). What holds now:
+commits `6cb8b35`..COV T8). What holds now:
 
 * **Loaders.** Every route — `JointFit.add_dataset`, `JointFitSpec.compile`,
   `build_jointfit_from_selection`, the panel's covTable, `.jpar` `#Cov:`/`#Raw:` — goes
@@ -437,14 +437,14 @@ which upstream also touched for its new MCMC framework (`merge-with-upstream-dev
    no subset (`joint_fit_panel.py:409`), i.e. share-across-ALL. Subset sharing today requires
    either a hand-written `.jpar` or a script. This is the single biggest gap between the
    advertised feature and the UX.
-2. **The footprint covariance term is unreachable from the GUI.** **FIXED 2026-11-06 (WS1 B2a, `1b83aae`): `load_cov_npz` and `load_dataset_cov` now carry `v`/`var_fwhm`, so the term reaches any sidecar-based fit (the GUI attaches sidecars this way). The text below is the pre-fix state.** `_use_footprint` needs
+2. **The footprint covariance term is unreachable from the GUI.** **FIXED 2026-11-06 (WS1 B2a, `af8b570`): `load_cov_npz` and `load_dataset_cov` now carry `v`/`var_fwhm`, so the term reaches any sidecar-based fit (the GUI attaches sidecars this way). The text below is the pre-fix state.** `_use_footprint` needs
    `cov['v']` and `cov['var_fwhm']` (`Joint_Fit_Routines.py:146-148`), and only
    `load_bundle_npz` produces them. The GUI attaches sidecars through
    `jcov.load_dataset_cov`, which returns neither key for either flavour
    (`joint_covariance.py:277-309`). So a GUI joint fit can use the scale-factor covariance
    but never the shared-beam term; the bilayer campaign gets it via a script.
 3. **`load_cov_npz` drops `v`/`var_fwhm` even if present in the `.npz`.** **FIXED 2026-11-06
-   (`1b83aae`): both keys are carried through; a sidecar with only one of the two now
+   (`af8b570`): both keys are carried through; a sidecar with only one of the two now
    raises `ValueError` at load rather than turning the footprint term half-on. The text
    below is the pre-fix state.** `load_cov_npz` (`joint_covariance.py:200-211`) returned
    neither key, which is why (2) was unreachable for the npz flavour.
@@ -459,7 +459,7 @@ which upstream also touched for its new MCMC framework (`merge-with-upstream-dev
    Editing the Xrange box while an individual dataset is selected does not change a joint
    fit's window for that dataset unless you also set its row in the range table.
 6. **`_eval_chisqr` (model comparison) ignores per-dataset ranges and column masks.**
-   **FIXED 2026-11-06 (WS1 A1.4, `e1e8b9f`): both models are scored on
+   **FIXED 2026-11-06 (WS1 A1.4, `caaef43`): both models are scored on
    `JointFit.active_index(i)`, the model evaluated on the objective's own `[imin, imax]`
    window (`chisqr_on(..., imin=, imax=)`, final fix wave M1). A `.jpar` or `.par` loaded
    into the joint fit and never re-fitted now has its fit ranges and column masks frozen
@@ -472,12 +472,12 @@ which upstream also touched for its new MCMC framework (`merge-with-upstream-dev
    using per-dataset windows will be compared against individuals over a different point
    set; the comparison already warns when point counts differ, but the joint side itself is
    computed on the wrong window.
-7. **`'Linear w/o error'` scale weights datasets by their own maximum.** **WARNED 2026-11-06 (`6b727d0`): the weighting is unchanged (decision X1), and `perform_fit` adds a `jf.warnings` entry for >=2 datasets without covariance. The text below is the pre-fix state, and still describes the weighting.** In the no-cov
+7. **`'Linear w/o error'` scale weights datasets by their own maximum.** **WARNED 2026-11-06 (`fe61cf2`): the weighting is unchanged (decision X1), and `perform_fit` adds a `jf.warnings` entry for >=2 datasets without covariance. The text below is the pre-fix state, and still describes the weighting.** In the no-cov
    branch each dataset is divided by its own `np.max(data)`; the factor cancels in `Log`,
    `Log w/o error` and `Linear` (via `err`), but NOT in `Linear w/o error`, where the
    relative weight between datasets becomes `1/maxd`.
 8. **A share-group inherits value/bounds/vary from its FIRST endpoint only.** **FIXED
-   2026-11-06 (`e177e2f`, `9518ef9`, final fix wave): differing start values warn (one
+   2026-11-06 (`e1ac1e1`, `66be91e`, final fix wave): differing start values warn (one
    `jf.warnings` entry per group); differing `min`/`max`/`vary` raise `ShareMismatchError`
    unless `build_master_params(on_mismatch='first')`. `'first'` copies the first
    endpoint's `min`/`max`/`vary` onto every other endpoint's local Parameter
@@ -510,10 +510,10 @@ which upstream also touched for its new MCMC framework (`merge-with-upstream-dev
 13. `array_summary_rows(spec, jf=...)` accepts a compiled `JointFit` but `_param_value`
     never reads it (`joint_fit_panel.py:135-143`); it works only because `compile()` reuses
     the spec's model instances.
-14. **WARNED 2026-11-06 (`6b727d0`): `compile()` adds a `jf.warnings` entry when a dataset has more than one curve.** `_primary_curve` (both in `joint_fit_spec.py:290-294` and
+14. **WARNED 2026-11-06 (`fe61cf2`): `compile()` adds a `jf.warnings` entry when a dataset has more than one curve.** `_primary_curve` (both in `joint_fit_spec.py:290-294` and
     `joint_fit_orchestration.py:39-46`) takes only the FIRST sub-curve of a dataset. A
     multi-curve dataset silently contributes one curve to a joint fit.
-    **2026-11-09 (audit gap AG.4, `3ba60b4`):** the orchestration copy warns too, into
+    **2026-11-09 (audit gap AG.4, `21dbd75`):** the orchestration copy warns too, into
     `JointFit.warnings` from `build_jointfit_from_selection`, or through `warnings.warn`
     from a bare `_primary_curve` call (`validate_joint_ws1.py` T4c').
 
@@ -531,7 +531,7 @@ which upstream also touched for its new MCMC framework (`merge-with-upstream-dev
 | 8 | Fixed-parameter sharing across objectives is always correct for PDB models (`filepaths`) | `xmodfit.py:5854-5877`; `validate_jointfit_gui.py:165-170` | Run the GUI harness checks; additionally confirm a PDB swap re-reads the structure per objective rather than leaving a stale cached geometry |
 | 9 | `.jpar` round-trips old and new files in either direction (the `#FitRange=`/`#ColumnLimits=` additions are back-compatible) | `joint_fit_io.py:190-195`; `column-fit-limits.md` | Load a pre-August `.jpar` (no `#FitRange=`) and confirm `fit_xmin/fit_xmax` come out `None`; write a new one and load it in a build without the column-limit code |
 | 10 | The `0.99*xmin` -> exact-bound change shifts `imin` by zero points on the real test data | `column-fit-limits.md` (measured claim) | Re-measure on `Data/i2_tim3_1000_test.txt` at its own `#Fit Range=0.026:0.550`; the note admits a one-point shift is possible for a datum in `[0.99*xmin, xmin)` |
-| 11 | Masks compose identically in `_build_chol` and `residual` (whitening rows aligned) | `Joint_Fit_Routines.py:474-479`, `532-536` | Run `validate_joint_mask.py`; add a case where the two datasets have *different* masks and a non-trivial `Sigma_logc` off-diagonal, and check the length guard is not the only protection **Seed scans and parallel MCMC sampling, 2026-11-06 (WS1, `63e984e`, `bfdd234`):** the same frozen window mask now reaches the seed workers and the parallel log-probs; `validate_seed_mask.py` shows serial == parallel with a mask on, and differs from mask-off. Covariance-whitening side was covered 2026-11-04 (`validate_joint_gls.py` G4/G4b) |
+| 11 | Masks compose identically in `_build_chol` and `residual` (whitening rows aligned) | `Joint_Fit_Routines.py:474-479`, `532-536` | Run `validate_joint_mask.py`; add a case where the two datasets have *different* masks and a non-trivial `Sigma_logc` off-diagonal, and check the length guard is not the only protection **Seed scans and parallel MCMC sampling, 2026-11-06 (WS1, `98618c3`, `34650cc`):** the same frozen window mask now reaches the seed workers and the parallel log-probs; `validate_seed_mask.py` shows serial == parallel with a mask on, and differs from mask-off. Covariance-whitening side was covered 2026-11-04 (`validate_joint_gls.py` G4/G4b) |
 | 12 | The panel's headless-testable-with-a-stub-parent claim | `joint_fit_panel.py:6-8` | Instantiate `JointFitPanel(parent_app=stub)` with a stub exposing only the documented contract and confirm no `AttributeError` (the panel calls `_refresh_data_labels`, `_overlay_modifier_active`, `joint_model_for`, `confInterval_joint_emcee`, none of which are in the documented list) |
 | 13 | `differential_evolution` with `popsize=300` is usable on a joint objective | `Joint_Fit_Routines.py:1048-1053` | Time one small joint DE run; 300 * nvar population on a concatenated objective may be impractical |
 | 14 | A joint fit run through the main **Fit** button behaves identically to **Run joint fit** | `xmodfit.py:1780-1789` | Both call `run_joint_fit()`, but verify `fit_method`/`fit_scale` are set consistently (doFit sets them before routing; `run_joint_fit` re-reads the combo boxes at `7100-7101`) |

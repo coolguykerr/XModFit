@@ -1,6 +1,6 @@
 {
  "what": "mask=None parallel MCMC lnprob from the parent commit code (validate_seed_mask.py check (j)); regenerate with tests/fixtures/make_seed_mask_parent_ref.py",
- "parent_commit": "63e984e",
+ "parent_commit": "98618c3",
  "data": "Data/i2_tim3_1000_test.txt",
  "pdb": "Data/1ubq.pdb",
  "window": [

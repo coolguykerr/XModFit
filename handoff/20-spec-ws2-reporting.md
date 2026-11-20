@@ -15,7 +15,7 @@ not:
    user 2026-11-11). That replaces the earlier device of re-scoring two fits under one
    covariance (§4.1).
 3. It settles roadmap Decisions 2, 3 and 5, and revisits two roadmap rules that the Log fix
-   (`64babd9`) and the absolute-error decision (spec 17 §6.2) overtook.
+   (`9cddb21`) and the absolute-error decision (spec 17 §6.2) overtook.
 
 Everything the roadmap says about WS2 stands unless a section here says otherwise.
 
@@ -207,7 +207,7 @@ fixed Gaussian, so its −2 ln L is computed and compared the same way; the sent
 what it approximates. `model` mode carries no such sentence.
 
 **This revises a roadmap rule.** The roadmap forbade calling any `Log` number a likelihood,
-because the old Log residual used log₁₀ and understated χ² by ln 10. Since `64babd9` the
+because the old Log residual used log₁₀ and understated χ² by ln 10. Since `9cddb21` the
 weighted Log residual is (ln y − ln f)·y/σ, a first-order Gaussian likelihood for ln y, and
 the covariance Log path uses C_log of ln y. A Δ(−logL) between two Log fits is therefore
 legitimate, labelled "of ln y, first order". A Log fit is never compared with a Linear fit:
@@ -594,26 +594,26 @@ All headless, in `tests/run_all.py`, each shown to fail when its feature is reve
 
 ## 13. Implementation record
 
-Implemented 2026-11-11 by `21-plan-ws2-reporting.md`, commits `c884afa..8078803` on `develop`
+Implemented 2026-11-11 by `21-plan-ws2-reporting.md`, commits `4347d9d..02abcf5` on `develop`
 (nothing pushed). Code: `joint_fit_stats.py` (new), `Joint_Fit_Routines.py`; harnesses
 `validate_joint_stats.py` (304 checks) and `validate_joint_diag.py` (258 checks).
 
 ### 13.1 Commits
 
-- `64f1937` T1: `JointFit` quiet evaluation, row ranges, prior rows, last blocks and model blocks.
-- `16d2e3c` T2: `JointSnapshot`, sequential/marginal split, exact likelihood, labels.
-- `93d1e42` T3: comparability key.
-- `1c10e91` T4: calibrated comparison, nesting, known-error AIC/BIC.
-- `5bcbcc3` T4 fix: small-N headline, unweighted wording, fixed-value nesting.
-- `1bc3dd4` T5: opt-in per-dataset error rescaling by sqrt(chi2_red).
-- `3231ba3` T6: joint-fit diagnostics block (quality, heterogeneity, q-range, degeneracy).
-- `5bf5298` T6 fix: quality and heterogeneity use unrescaled chi2/n on rescaled fits.
-- `267acd6` T7: joint vs individual fits on one covariance.
-- `5016e35` T7 fix: tests for a raising model, Log with a dropped row, rescaled fits, column mask.
-- `1d984f5` T8: Fisher shares, model-reduction tension, distance to the exact optimum.
-- `9b34e64` T8 fix: no optimum distance on emcee snapshots; ascii report tails in harnesses.
-- `5867320` T9: leave-one-out refits on copies.
-- `8078803` Final review fixes: ASCII report, labels, one evaluation per theta, abort and cheap diagnostics.
+- `ef99c04` T1: `JointFit` quiet evaluation, row ranges, prior rows, last blocks and model blocks.
+- `1e6fac9` T2: `JointSnapshot`, sequential/marginal split, exact likelihood, labels.
+- `78facb4` T3: comparability key.
+- `f9472dd` T4: calibrated comparison, nesting, known-error AIC/BIC.
+- `cf896ce` T4 fix: small-N headline, unweighted wording, fixed-value nesting.
+- `0dad9a4` T5: opt-in per-dataset error rescaling by sqrt(chi2_red).
+- `beb2dd5` T6: joint-fit diagnostics block (quality, heterogeneity, q-range, degeneracy).
+- `1d304fe` T6 fix: quality and heterogeneity use unrescaled chi2/n on rescaled fits.
+- `a6412a4` T7: joint vs individual fits on one covariance.
+- `6de1d2a` T7 fix: tests for a raising model, Log with a dropped row, rescaled fits, column mask.
+- `ad4854a` T8: Fisher shares, model-reduction tension, distance to the exact optimum.
+- `cb582e1` T8 fix: no optimum distance on emcee snapshots; ascii report tails in harnesses.
+- `d1fe1f2` T9: leave-one-out refits on copies.
+- `02abcf5` Final review fixes: ASCII report, labels, one evaluation per theta, abort and cheap diagnostics.
 
 ### 13.2 Tests
 
@@ -689,20 +689,20 @@ snapshot, LOO rows and settings, loop wording, tension under rescaling, Cholesky
 
 ### 13.5 Final review
 
-Opus review of `c884afa..5867320`: ready with fixes. Important: I1 `snap.label` never rendered and a
+Opus review of `4347d9d..d1fe1f2`: ready with fixes. Important: I1 `snap.label` never rendered and a
 false "Hessian failed" sentence on MCMC results; I2 non-ASCII report crashed redirected stdout;
 I3 diagnostics cost (3 evaluations per theta), no abort handling, duplicate factorisations;
 I4 rescale factor 0 (a dataset fitted exactly) crashed under nan_policy raise. Minors M1-M7
 (restore model outputs, Cholesky log-det, stale-snapshot guard, LOO rows and settings, rescale-loop
-wording, emcee + rescaling not a downgrade, docstring counts). All fixed in `8078803` with RED
-evidence; the fixed-fit path is bit-identical to `c884afa` for six no-diagnostic cases. A scoped
+wording, emcee + rescaling not a downgrade, docstring counts). All fixed in `02abcf5` with RED
+evidence; the fixed-fit path is bit-identical to `4347d9d` for six no-diagnostic cases. A scoped
 re-review found no new Critical or Important issues. Remaining minors from it: cheap mode with
 `individual_fits` still does one restore evaluation; a restore evaluation after a mid-loop abort;
 `rescale_factors` notes only from round 0.
 
 ### 13.6 Full suite
 
-`tests/run_all.py` (full, `QT_QPA_PLATFORM=offscreen`, cmc-py39) at `8078803`: **66 PASS, 0 FAIL, 0 SKIP, 0 TIMEOUT**, about 33 min. `tests/recovered/test_pdb_persist.py`, which failed once in an earlier `--quick` run, passed (3.9 s), so it is flaky rather than broken.
+`tests/run_all.py` (full, `QT_QPA_PLATFORM=offscreen`, cmc-py39) at `02abcf5`: **66 PASS, 0 FAIL, 0 SKIP, 0 TIMEOUT**, about 33 min. `tests/recovered/test_pdb_persist.py`, which failed once in an earlier `--quick` run, passed (3.9 s), so it is flaky rather than broken.
 
 ### 13.7 Notes and open items
 

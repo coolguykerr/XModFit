@@ -86,12 +86,12 @@ Each item is specified in the fix list. All are small.
 
 **Status: Done 2026-11-06 (A1.1, A1.3, A1.4, A1.17, B2a, 01 §6.2/3/6/7/8/14, plus A1.18 found during execution); full-run table in `12-work-package-preaudit.md`. Full run: 60 PASS, 0 FAIL, 0 KNOWN-FAIL, 1 TIMEOUT (`validate_xpr.py` at the 600 s default under a slow machine; PASS alone in 622 s).**
 
-**Audit gaps closed 2026-11-09** (`10-fix-list.md` §A1a, AG.1-AG.8: Qt-slot tracebacks now fail a row, A1.4 call-site guard, W0.3 smoke rows given checks, §6.14 orchestration warning, N2 share-group keymap, N3/N4/N5). Full run at `3b58055`, one uninterrupted run: **61 PASS, exit 0** (`tests/_logs/gapfix_full_run.txt`).
+**Audit gaps closed 2026-11-09** (`10-fix-list.md` §A1a, AG.1-AG.8: Qt-slot tracebacks now fail a row, A1.4 call-site guard, W0.3 smoke rows given checks, §6.14 orchestration warning, N2 share-group keymap, N3/N4/N5). Full run at `98cf3fe`, one uninterrupted run: **61 PASS, exit 0** (`tests/_logs/gapfix_full_run.txt`).
 
 ## WS2 — The reporting contract: statistics the program computes for the user
 
 > The general covariance workstream (docs 17 and 18) precedes WS2. **DONE 2026-11-10**
-> (XModFit side, commits `b55bf41`..COV T8; verified by `validate_covariance.py`,
+> (XModFit side, commits `6cb8b35`..COV T8; verified by `validate_covariance.py`,
 > `validate_covariance_gui.py`, `validate_cov_stitching.py` and the full `tests/run_all.py`;
 > the LSS_Reader side, spec 17 §8, is separate). **WS2 is next**, and must design its
 > per-dataset χ² decomposition (§2.1) on the *whitened* residual `L⁻¹ r` that the fit now
@@ -99,7 +99,7 @@ Each item is specified in the fix list. All are small.
 > `model` or `data` mode (spec 17 §10). With shared terms that decomposition is not additive
 > and WS2 must state how it splits.
 >
-> **WS2 DONE 2026-11-11** (commits `c884afa..8078803`; record in spec 20 section 13; verified by
+> **WS2 DONE 2026-11-11** (commits `4347d9d..02abcf5`; record in spec 20 section 13; verified by
 > `validate_joint_stats.py` and `validate_joint_diag.py` and the full `tests/run_all.py`). Left to WS4:
 > the GUI rescale control and `.jpar` pass-through of `#RescaleErrors` in `xmodfit.py`, the comparison
 > panel swap to `format_joint_vs_individuals`, and a `report_diagnostics` full/cheap control. Left to

@@ -40,15 +40,15 @@ to drop a 26.8 MB `.h5` blob (fix-list A0.4), so `d3e353e` is now `7b37f15`, `c5
 `765754e`, `a4fd04e` is `f3335f9`, `babe1aa` is `5662813`.
 
 ```
-edc8b80  Clear saved .par files out of Data/; add the 1UBQ generator and a PDB-prep to-do
-8251c0a  Fix list: record the 1UBQ default, and two new PDB-handling defects
-c4300d0  Remove d6test.h5 and the unpublished tim3 structure; ship 1UBQ as the default
-a68f7a3  Note in the handoff index that the untracked work is now committed
-4b56db6  Add handoff documentation: one change record per category, plus a fix list
-3ca25a0  Add requirements snapshots for the viewer and the working environments
-d662335  Add regression harnesses for the fit-mask, column-limit and joint-PDB paths
-b953c3f  Per-column fit limits, multimodal MCMC seeding, parallel joint sampling, plotting
-433fab7  Add picklable MCMC objectives and parallel seed-scan workers
+486d936  Clear saved .par files out of Data/; add the 1UBQ generator and a PDB-prep to-do
+f72ec90  Fix list: record the 1UBQ default, and two new PDB-handling defects
+812991e  Remove d6test.h5 and the unpublished tim3 structure; ship 1UBQ as the default
+63f075e  Note in the handoff index that the untracked work is now committed
+8876db8  Add handoff documentation: one change record per category, plus a fix list
+c556762  Add requirements snapshots for the viewer and the working environments
+e53926a  Add regression harnesses for the fit-mask, column-limit and joint-PDB paths
+c5dc957  Per-column fit limits, multimodal MCMC seeding, parallel joint sampling, plotting
+786fa5e  Add picklable MCMC objectives and parallel seed-scan workers
 7942458  Add XPR global-seeding bake-off harness, saved endpoints and study write-ups  <-- MUST NOT be pushed, see A0.6
 a1a2a62  Add XLayersPDB_XPR: vendored Julia differentiable reflectivity model + bridge
 dad9f9d  Add GID2D: 2D grazing-incidence map fitting, 2D Map tab and packing tools
@@ -68,7 +68,7 @@ from the state *before* all of the above.
 
 > **Superseded 2026-09-03, later the same day.** Everything that was uncommitted or
 > untracked has since been committed to `develop` in eight themed commits, `013eabe`
-> through `a68f7a3` (hashes as rewritten; see section 1). The bucket statements
+> through `63f075e` (hashes as rewritten; see section 1). The bucket statements
 > throughout this directory — including every
 > category document's section 2, and the many "untracked working-tree only" notes —
 > describe the state at the time of writing, i.e. at `babe1aa`. They are still the right
@@ -116,8 +116,8 @@ recommendation.
 | 17 | `17-spec-general-covariance.md` | design spec (awaiting approval): covariance on any dataset and any function, single and joint, plus the LSS_Reader output contract; precedes WS2 | `covariance_core.py` (new), `Fit_Routines.py`, `Joint_Fit_Routines.py`, `joint_covariance.py`, LSS_Reader |
 | 18 | `18-plan-general-covariance.md` | task-by-task plan for the general covariance spec (doc 17): XModFit side, 8 tasks; task 1 = `covariance_core.py` data model and v1 JSON loader | `covariance_core.py` (new), `validate_covariance.py`, `tests/fixtures/cov_v1/` |
 | 19 | `19-lss-reader-covariance-contract.md` | handoff to the LSS_Reader rework agent: the `*.cov.json` output contract, the arithmetic, a trap map of `mainwindow.py` at `a861d79`, acceptance tests; supersedes 17 §8 | LSS_Reader `mainwindow.py` |
-| 20 | `20-spec-ws2-reporting.md` | design spec (approved 2026-11-11, amended the same day for the exact likelihood) for roadmap WS2: the per-dataset χ² and −2 ln L split under covariance (sequential vs marginal), the exact model-mode likelihood, calibrated comparison, end-of-fit diagnostics, LOO; implemented (c884afa..8078803) | `joint_fit_stats.py` (new), `Joint_Fit_Routines.py` |
-| 21 | `21-plan-ws2-reporting.md` | task-by-task implementation plan for doc 20 (10 tasks, tests Q/P/K/M/R/D/I/F/L); implemented (c884afa..8078803) | `joint_fit_stats.py` (new), `Joint_Fit_Routines.py`, `joint_fit_io.py`, `joint_fit_spec.py` |
+| 20 | `20-spec-ws2-reporting.md` | design spec (approved 2026-11-11, amended the same day for the exact likelihood) for roadmap WS2: the per-dataset χ² and −2 ln L split under covariance (sequential vs marginal), the exact model-mode likelihood, calibrated comparison, end-of-fit diagnostics, LOO; implemented (4347d9d..02abcf5) | `joint_fit_stats.py` (new), `Joint_Fit_Routines.py` |
+| 21 | `21-plan-ws2-reporting.md` | task-by-task implementation plan for doc 20 (10 tasks, tests Q/P/K/M/R/D/I/F/L); implemented (4347d9d..02abcf5) | `joint_fit_stats.py` (new), `Joint_Fit_Routines.py`, `joint_fit_io.py`, `joint_fit_spec.py` |
 | 22 | `22-gixos.md` | the upstream GIXOS model (`origin/main` `681f84c`) brought in: why a file checkout, the one-line `filepaths` fix, joint/cov/mask validation, gotchas | `Functions/GIXOS/GIXOS.py`, `validate_gixos.py` |
 | 15 | `15-plan-ws0-test-safety-net.md` | task-by-task plan for roadmap WS0: shared `check()`, runner, synthetic GLS regression, baseline | `tests/` |
 

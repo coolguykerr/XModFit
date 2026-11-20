@@ -96,7 +96,7 @@ can still exit 0 on a slot exception. The runner is the gate.
 | `verify_seed_gui` | a | PASS | assert | |
 | `verify_reuse_wrap` | a | PASS | assert | |
 | `verify_fingerprint` | a | PASS | assert | |
-| `verify_jointmcmc` | a | PASS | assert | A1.17: `_corner_render_data` (b953c3f) and `_CORNER_MAX_SAMPLES` now bound onto the `Fake` |
+| `verify_jointmcmc` | a | PASS | assert | A1.17: `_corner_render_data` (c5dc957) and `_CORNER_MAX_SAMPLES` now bound onto the `Fake` |
 | `verify_jointwindow` | a | PASS | assert | |
 | `repro_full` | a | PASS | assert | |
 | `repro_switch` | a | PASS | assert | 2026-11-09: no longer raises `AttributeError` in `functionChanged` (signals blocked while the fake function item is added) |

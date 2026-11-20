@@ -470,7 +470,7 @@ PASS                        1.4  cmc-py39  tests/recovered/verify_joint_orient.p
 PASS                       14.7  cmc-py39  tests/recovered/verify_joint_parallel_edge.py      
 PASS                        4.1  cmc-py39  tests/recovered/verify_joint_parallel_sample.py    
 PASS                        2.0  cmc-py39  tests/recovered/verify_joint_seed_worker.py        
-KNOWN-FAIL                  2.3  cmc-py39  tests/recovered/verify_jointmcmc.py                known: binds a fixed list of XModFit methods onto a Fake; _draw_corner now calls _corner_render_data (added in b953c3f), absent from the list -> AttributeError at section 3
+KNOWN-FAIL                  2.3  cmc-py39  tests/recovered/verify_jointmcmc.py                known: binds a fixed list of XModFit methods onto a Fake; _draw_corner now calls _corner_render_data (added in c5dc957), absent from the list -> AttributeError at section 3
 PASS                        3.7  cmc-py39  tests/recovered/verify_jointwindow.py              
 PASS                        4.4  cmc-py39  tests/recovered/verify_legend.py                   
 PASS                        4.4  cmc-py39  tests/recovered/verify_multifit_selection.py       
@@ -496,7 +496,7 @@ PASS                        5.2  cmc-py39  validate_xlayerspdb_joint.py
 PASS                      294.7  cmcars    validate_xpr.py                                    external: XPR-main/test_data, sibling of the repo; slow
 
 summary: 1 FAIL, 2 KNOWN-FAIL, 1 KNOWN-FAIL NOW PASSES, 55 PASS
-NOTE: tests/recovered/compare_models.py is registered known-failing but now passes; remove its registry entry. (done, 3824709)
+NOTE: tests/recovered/compare_models.py is registered known-failing but now passes; remove its registry entry. (done, 93da4b4)
 ```
 
 Quick run (`tests/run_all.py --quick`, after the registry change): **504 s wall (~8.4 min)**,
@@ -504,7 +504,7 @@ exit 0; 49 PASS, 3 KNOWN-FAIL, 7 SKIP (the slow/external ones).
 
 KNOWN-FAIL reasons:
 - `tests/recovered/smoke_fit.py`: reads `scaler_parameters['chi2_per_N_reported']` etc.; GID2D now emits `chi2_per_N_reported_LINEAR` / `chi2_per_N_active_only_LINEAR` (stale key names -> KeyError at the first print). Harness-side staleness.
-- `tests/recovered/verify_jointmcmc.py`: binds a fixed list of XModFit methods onto a Fake; `_draw_corner` now calls `_corner_render_data` (added in `b953c3f`), absent from the list -> AttributeError at section 3. Harness-side staleness.
+- `tests/recovered/verify_jointmcmc.py`: binds a fixed list of XModFit methods onto a Fake; `_draw_corner` now calls `_corner_render_data` (added in `c5dc957`), absent from the list -> AttributeError at section 3. Harness-side staleness.
 - `validate_gid2d.py` (NEW, fix-list **A1.16**): `RAW` is a hard-coded `T:\SURFACE\...` path; absent -> `check('raw map present', False, ...)`, 1 of 28 checks. Re-run alone: same, deterministic. Fix: repoint at the untracked `Data/dppc_q2d_gid_raw_copy.txt` or make it a real skip.
 - (`tests/recovered/compare_models.py` was registered known in the as-run table but passed in 270 s under its 900 s timeout; its `known` was dropped, `slow`/`timeout: 900` kept. It exercises `XLayersPDB_dev_smooth` (retired, D1) and goes when WS1/B8 removes that variant.)
 
@@ -561,7 +561,7 @@ PASS                        1.4  cmc-py39  tests/recovered/verify_joint_orient.p
 PASS                       14.2  cmc-py39  tests/recovered/verify_joint_parallel_edge.py      
 PASS                        3.9  cmc-py39  tests/recovered/verify_joint_parallel_sample.py    
 PASS                        1.8  cmc-py39  tests/recovered/verify_joint_seed_worker.py        
-KNOWN-FAIL                  2.2  cmc-py39  tests/recovered/verify_jointmcmc.py                known: A1.17: binds a fixed list of XModFit methods onto a Fake; _draw_corner now calls _corner_render_data (added in b953c3f), absent from the list -> AttributeError at section 3
+KNOWN-FAIL                  2.2  cmc-py39  tests/recovered/verify_jointmcmc.py                known: A1.17: binds a fixed list of XModFit methods onto a Fake; _draw_corner now calls _corner_render_data (added in c5dc957), absent from the list -> AttributeError at section 3
 PASS                        3.5  cmc-py39  tests/recovered/verify_jointwindow.py              
 PASS                        4.0  cmc-py39  tests/recovered/verify_legend.py                   
 PASS                        4.0  cmc-py39  tests/recovered/verify_multifit_selection.py       
@@ -595,14 +595,14 @@ Plan: `16-plan-ws1-joint-correctness.md`. Commits, oldest first:
 
 | item | commit |
 |---|---|
-| A1.1 one PDB model-name list | `a1717a6` |
-| B2a / 01 §6.2-3 footprint term from `.npz` sidecars | `1b83aae` |
-| 01 §6.8 share-group mismatches (refuse on bounds/vary, warn on values) | `e177e2f`, GUI guard `9518ef9` |
-| 01 §6.7 / §6.14 warnings (`Linear w/o error`, dropped sub-curves) | `6b727d0` |
-| A1.4 model comparison on the fit's own active points (01 §6.6) | `e1e8b9f` |
-| A1.3 seed scans honour the frozen column mask | `63e984e` |
-| A1.18 (new) parallel MCMC sampling honours the frozen column mask | `bfdd234`, `6ffcff9` |
-| A1.17 two stale harnesses brought up to date | `6ed34fc` |
+| A1.1 one PDB model-name list | `e07f722` |
+| B2a / 01 §6.2-3 footprint term from `.npz` sidecars | `af8b570` |
+| 01 §6.8 share-group mismatches (refuse on bounds/vary, warn on values) | `e1ac1e1`, GUI guard `66be91e` |
+| 01 §6.7 / §6.14 warnings (`Linear w/o error`, dropped sub-curves) | `fe61cf2` |
+| A1.4 model comparison on the fit's own active points (01 §6.6) | `caaef43` |
+| A1.3 seed scans honour the frozen column mask | `98618c3` |
+| A1.18 (new) parallel MCMC sampling honours the frozen column mask | `34650cc`, `3893311` |
+| A1.17 two stale harnesses brought up to date | `3f0c607` |
 
 Full run: `tests/run_all.py` (no flags), log `tests/_logs/ws1_full_run.txt` (git-ignored). Sum of per-harness times
 about 3,600 s (WS0 baseline 1,856 s): this machine ran roughly 1.5-2x slower than at the baseline on every row.
@@ -684,7 +684,7 @@ New fix-list ID: A1.18 (done). A1.17 completed. Premise corrections: decision X2
 Consequences for the user:
 - Discard any `.h5` MCMC backend from a pre-A1.18 parallel run (`emcee_cores>1`) that used a column mask: it was sampled under the unmasked likelihood but carries a matching fingerprint.
 - (B2a) Discard any `.h5` MCMC backend from a covariance joint fit whose sidecars carried `v`/`var_fwhm`: B2a now includes the footprint term those keys were dropped from, so the likelihood changed, and `_mcmc_fingerprint` does not hash the covariance or footprint state, so the old backend resumes without a mismatch.
-- `tests/fixtures/make_seed_mask_parent_ref.py` pins `PARENT=63e984e`; re-point it after the A0.6 history rewrite (dropping `7942458`) before regenerating `tests/fixtures/seed_mask_parent_ref.json`.
+- `tests/fixtures/make_seed_mask_parent_ref.py` pins `PARENT=98618c3`; re-point it after the A0.6 history rewrite (dropping `7942458`) before regenerating `tests/fixtures/seed_mask_parent_ref.json`.
 
 #### WS1 deferred minors
 
@@ -719,7 +719,7 @@ T5 window edge (M1), T4 whitespace (M3); `_joint_range` is live again.
 
 ### 2026-11-06 -- WS1 final fix wave
 
-Final review I1-I4 and M1-M3 fixed in `3c3fd71`; `validate_xpr.py` registry timeout 1500 s in `29e4d55`; docs in
+Final review I1-I4 and M1-M3 fixed in `d754ec4`; `validate_xpr.py` registry timeout 1500 s in `0fe752a`; docs in
 this commit. I1: `on_mismatch='first'` unifies local bounds/vary so `push_params` cannot clip. I2: load paths
 freeze ranges/masks. I3/I4: `XModFit._compile_joint_guarded` (Yes/No on `ShareMismatchError`, warning box on
 any other `ValueError`). M1: `chisqr_on(imin=, imax=)`. M2: the B2a backend note above. M3: whitespace.

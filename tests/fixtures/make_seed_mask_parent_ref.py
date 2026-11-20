@@ -26,7 +26,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-PARENT = '63e984e'      # last commit before A1.18 touched pdb_logprob / pdb_joint_logprob
+PARENT = '98618c3'      # last commit before A1.18 touched pdb_logprob / pdb_joint_logprob
 OUT = os.path.join(ROOT, 'tests', 'fixtures', 'seed_mask_parent_ref.json')
 
 

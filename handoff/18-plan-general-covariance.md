@@ -28,7 +28,7 @@ re-implementation used as a test fixture (Task 6).
   `sys.modules['xraydb']` before importing `xmodfit`, `if __name__ == '__main__':` guard
   around anything that reaches a spawn Pool).
 - **Before and after every task:** `"C:/Users/kerr/.conda/envs/cmc-py39/python.exe" tests/run_all.py --quick`
-  (~8.5 min) exits 0 with no new FAIL. Baseline at plan time: 54 PASS / 7 SKIP (`64babd9`).
+  (~8.5 min) exits 0 with no new FAIL. Baseline at plan time: 54 PASS / 7 SKIP (`9cddb21`).
 - New checks use `tests.harness` (`check`, `check_close`, `skip`, `finish`). New root
   `validate_*.py` files are auto-discovered; register in `tests/run_all.py` `REGISTRY`
   only if slower than 120 s or needing external data. Each new check is shown to fail

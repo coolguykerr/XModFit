@@ -343,7 +343,7 @@ The joint batch goes first, because WS1–WS3 lean on it.
   `python tests/run_all.py --only <batch pattern>`. Note each failure's cause from its log.
 - [ ] **Step 2 (per batch): apply only the allowed edits.** Re-run.
 - [ ] **Step 3 (per batch): register what still fails** in `REGISTRY` with the real cause
-  ("asserts serial sampling; behaviour flipped in b953c3f", "needs a 2-mode fixture; tim3
+  ("asserts serial sampling; behaviour flipped in c5dc957", "needs a 2-mode fixture; tim3
   case not reproducible from a clean clone (fix-list A2.4)", …). Do not edit engine code to
   make a harness pass. If a failure looks like a genuine engine bug, add it to
   `10-fix-list.md` under a new ID and register the harness `known` with that ID.

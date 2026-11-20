@@ -1147,7 +1147,7 @@ def test_l7_subset_share_and_no_shared():
 
 
 # ----------------------------------------------------------------------- W --
-# Final whole-branch review fixes (c884afa..5867320): I1-I4, M1-M7 and the cheap tests.
+# Final whole-branch review fixes (4347d9d..d1fe1f2): I1-I4, M1-M7 and the cheap tests.
 
 class CountLine(Line):
     """Line that counts its y() calls (class-wide) and can stop the fit after a given
