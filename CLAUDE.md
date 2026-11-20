@@ -14,22 +14,28 @@ recoverable from the code.
 
 ## State of the repo
 
-- `origin` is the **upstream** repository, not a personal fork. Nothing here has been
-  pushed. Local `develop` is 6 commits ahead of `origin/develop` (`81e53c8`), which is
-  already merged in via `a4fd04e`.
-- A large amount of work is **uncommitted or untracked**. Check
-  `git status --porcelain -uall` before assuming a file is under version control.
+- **Remotes (since 2026-11-20):** `origin` is the shared public fork
+  [coolguykerr/XModFit](https://github.com/coolguykerr/XModFit), where this work lives and
+  where collaborators push; `upstream` is
+  [chemmatcars/XModFit](https://github.com/chemmatcars/XModFit), the original project.
+  **Never push to `upstream`.** The joint-fit work is on `develop`; upstream's own `develop`
+  is merged in via `f3335f9`. Changes go back upstream only as pull requests from the fork.
+- Before the fork, `develop`'s history was rewritten once to drop the seeding-study commit
+  (`handoff/10-fix-list.md` A0.6). Hashes in `handoff/` are the new ones; a hash that does
+  not resolve is from the old history, kept only in a local backup.
+- Check `git status --porcelain -uall` before assuming a file is under version control.
 - A `.gitignore` was added in `0296ec3` covering caches, `.h5` MCMC backends, saved
   `.xpar`/`.par` output and the seeding study. Files still showing as untracked are
   mostly personal structures and test output in `Data/`; do not "clean them up" without
   checking `handoff/09-validation-and-env.md` — a few are fixtures the validators need.
-- **`origin` is the upstream project.** Run `git config core.hooksPath .githooks` in a
-  fresh clone: `.githooks/pre-push` refuses to push commits carrying the XPR seeding
-  study, which is research material that must not reach `chemmatcars/XModFit`. See
+- Run `git config core.hooksPath .githooks` in a fresh clone: `.githooks/pre-push`
+  refuses to push any commit carrying XPR seeding-study paths (research material kept in
+  the separate `xpr-seeding-study` repository, never in this one). See
   `handoff/10-fix-list.md` A0.6.
-- Collaborators are working from stock `origin/develop`. Anything you change in a file
+- Upstream collaborators work from stock `upstream/develop`. Anything you change in a file
   that upstream also touches raises the merge cost; `handoff/10-merge-and-consolidation.md`
-  tracks that surface.
+  tracks that surface. Work added on the fork should stay minimally intrusive for the
+  same reason.
 
 ## Running and testing
 
